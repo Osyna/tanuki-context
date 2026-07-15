@@ -9,12 +9,13 @@ text/logs ──► stage 0: distill ──► stage 1: ladder ──► stage 2
                query slice)          dense/caveman)        from the original pxpipe mechanic)
 ```
 
-Rust rewrite of the [pxpipe](https://github.com/teamchong/pxpipe) MCP. Glyphs
-and page geometry are extracted from pxpipe's generated gray atlas — **full
-BMP coverage** (Spleen 5×8 for ASCII/code, Unifont fallback for CJK/Cyrillic/
-etc.), so pages are pixel-faithful to pxpipe's production renderer. Only
-astral codepoints (emoji beyond the BMP) fall back to `▯` and are counted —
-identical behavior to pxpipe's own atlas.
+Rust rewrite of the [pxpipe](https://github.com/teamchong/pxpipe) MCP. Page
+geometry and BMP glyphs are extracted from pxpipe's generated gray atlas
+(Spleen 5×8 for ASCII/code, Unifont for CJK/Cyrillic/etc.), so pages are
+pixel-faithful to pxpipe's production renderer. **Astral planes (emoji,
+plane-1+ symbols) render too** — from GNU `unifont_upper`, box-filtered to the
+same AA cells — which goes beyond pxpipe (it drops astral). 92,812 codepoints
+total; only unassigned codepoints fall back to `▯` (counted + reported).
 
 ## Measured (vs the node reference, same machine)
 
@@ -52,7 +53,7 @@ tanuki-context render <file> [level] [outdir]
 | `src/distill.rs` | stage 0: 3-pass log distiller (runs/blocks ×N, exact+template near-dupes, query) |
 | `src/ladder.rs` | stage 1: levels 0–4 with the exact-recall guard |
 | `src/render.rs` | stage 2: reflow (`↵`), wrap, page split, AA glyph blit |
-| `src/atlas.rs` | full-BMP glyph atlas: codepoints/wide eager, pixels lazily inflated |
+| `src/atlas.rs` | full-Unicode glyph atlas (92,812 cps): codepoints/wide eager, pixels lazily inflated |
 | `src/png.rs` | minimal grayscale PNG encoder (zlib via miniz_oxide) |
 | `src/stats.rs` | events.jsonl summary |
 | `assets/glyphs.*` | generated glyph data (35,501 codepoints, 0.4 MB packed) |
@@ -74,6 +75,9 @@ with `dist/` built):
 ```
 PXPIPE_DIST=~/Projects/pxpipe/dist node tools/gen-glyphs.mjs && cargo build --release
 ```
+
+(The generator auto-downloads `unifont_upper-16.0.04.hex.gz` into `tools/data/`
+on first run for the astral tier; drop the file there manually if offline.)
 
 The reference scripts (`reference/node-mcp/compare.mjs`,
 `reference/node-mcp/biglog-report.mjs`) still generate the HTML comparison

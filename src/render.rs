@@ -1,9 +1,9 @@
 //! Stage 2: the `pxpipe` imaging engine, ported from pxpipe's render.ts
 //! production dense path (bare 5x8 AA cell, 312 cols, 1568x728 pages).
-//! Glyphs cover the full BMP (Spleen for ASCII/code, Unifont fallback), so
-//! CJK/Cyrillic/etc. render exactly as pxpipe does; only astral codepoints
-//! (emoji outside the BMP) fall back to `▯` and are counted as dropped —
-//! same behavior as pxpipe's own atlas.
+//! Glyphs cover BMP (pxpipe's atlas: Spleen for ASCII/code, Unifont fallback)
+//! PLUS the astral planes (unifont_upper, incl. emoji) — beyond pxpipe, which
+//! drops astral. Only unassigned codepoints fall back to `▯` and are counted
+//! as dropped.
 
 use crate::atlas::{self, CELL_H, CELL_W};
 use crate::png::encode_gray_png;
@@ -20,7 +20,7 @@ pub const MAX_LINES: usize = (MAX_HEIGHT_PX - 2 * PAD_Y) / CELL_H; // 90
 pub const NL_SENTINEL: char = '\u{21B5}'; // ↵ inserted for original hard newlines
 pub const NL_LITERAL: char = '\u{23CE}'; // ⏎ stands in for pre-existing ↵ in source
 const TAB_MARK: char = '\u{2192}'; // → visible tab marker
-const FALLBACK: char = '\u{25AF}'; // ▯ for codepoints outside the atlas (astral only)
+const FALLBACK: char = '\u{25AF}'; // ▯ for codepoints absent from the atlas (unassigned)
 const TAB_WIDTH: usize = 4;
 
 static NL4: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{4,}").unwrap());
