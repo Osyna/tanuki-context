@@ -127,7 +127,7 @@ fn tool_render(args: &Value) -> Value {
         summary.push_str(&format!(" · {} lines kept verbatim", p.protected_lines));
     }
     if r.dropped > 0 {
-        summary.push_str(&format!(" · {} non-BMP glyphs -> ▯", r.dropped));
+        summary.push_str(&format!(" · {} unmapped glyphs -> ▯", r.dropped));
     }
     if a.reflow {
         summary.push_str(" · ↵ = newline · engine: pxpipe");
