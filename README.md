@@ -60,13 +60,15 @@ tanuki-context render <file> [level] [outdir]
 | `tools/gen-glyphs.mjs` | regenerates `assets/` from pxpipe's atlas |
 | `reference/node-mcp/` | the original node implementation, kept for comparison |
 | `reference/parity.mjs` | parity harness: same input through both, asserts counts/geometry |
+| `reference/benchmark.mjs` | full node-vs-rust benchmark (every level, real content) → HTML report |
 
 ## Build & test
 
 ```
-cargo build --release          # target/release/tanuki-context
-node reference/parity.mjs      # rust vs node on synthetic log + a source file
+cargo build --release            # target/release/tanuki-context
+node reference/parity.mjs        # rust vs node on synthetic log + a source file
 node reference/parity.mjs <your-files...>
+node reference/benchmark.mjs    # timed matrix + parity -> reference/benchmark-report.html
 ```
 
 Regenerating glyphs after a pxpipe atlas rebuild (requires a pxpipe checkout

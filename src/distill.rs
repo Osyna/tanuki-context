@@ -31,7 +31,8 @@ static M_UUID: LazyLock<Regex> = LazyLock::new(|| {
 static M_HEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?-u:\b)[0-9a-f]{7,64}(?-u:\b)").unwrap());
 static M_NUM: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?-u:\b)[0-9]+(\.[0-9]+)?[ \t\u{a0}]?(ms|us|µs|ns|s|m|h|%|[KMGT]i?B)?(?-u:\b)").unwrap()
+    Regex::new(r"(?i)(?-u:\b)[0-9]+(\.[0-9]+)?[ \t\u{a0}]?(ms|us|µs|ns|s|m|h|%|[KMGT]i?B)?(?-u:\b)")
+        .unwrap()
 });
 
 const MIN_RUN: usize = 3;
@@ -58,7 +59,13 @@ fn coarse_key(masked: &str) -> String {
         parts.push("<v>");
     }
     for t in masked.split_whitespace() {
-        parts.push(if !t.is_empty() && t.chars().all(|c| c.is_ascii_alphabetic()) { t } else { "<v>" });
+        parts.push(
+            if !t.is_empty() && t.chars().all(|c| c.is_ascii_alphabetic()) {
+                t
+            } else {
+                "<v>"
+            },
+        );
     }
     if masked.trim().len() < masked.trim_start().len() {
         parts.push("<v>"); // trailing whitespace -> trailing empty token in JS

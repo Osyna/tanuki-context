@@ -320,6 +320,47 @@ fn main() {
                 }
             }
         }
+        Some("bench") => {
+            // tanuki-context bench <file> <op:distill|pipeline> [level] [runs] [--distill]
+            // In-process timing (median of `runs`, first run is a discarded warmup).
+            let file = args
+                .get(2)
+                .expect("usage: tanuki-context bench <file> <op> [level] [runs] [--distill]");
+            let op = args.get(3).map(String::as_str).unwrap_or("pipeline");
+            let level: u8 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let runs: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(3);
+            let use_distill = args.iter().any(|a| a == "--distill");
+            let text = std::fs::read_to_string(file).expect("read file");
+            let mut times: Vec<f64> = Vec::new();
+            let mut result = json!(null);
+            for i in 0..=runs {
+                let t0 = std::time::Instant::now();
+                match op {
+                    "distill" => {
+                        let d = distill::distill_log(&text, None, 2);
+                        result = d.stats;
+                    }
+                    _ => {
+                        let p = stage01(&text, level, use_distill, None);
+                        let r = render::render_text(&p.compressed, true);
+                        result = json!({
+                            "pages": r.pages.len(),
+                            "imageTokens": render::image_tokens(r.pixels),
+                            "stage1Chars": p.compressed.chars().count(),
+                            "dropped": r.dropped,
+                        });
+                    }
+                }
+                if i > 0 {
+                    times.push(t0.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            println!(
+                "{}",
+                json!({ "medianMs": times[times.len() / 2], "runs": runs, "result": result })
+            );
+        }
         Some("serve") | None => serve(),
         Some(other) => {
             eprintln!("unknown command: {other}\nusage: tanuki-context [serve|distill|estimate|render] ...");
