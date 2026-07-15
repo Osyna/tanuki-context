@@ -1,0 +1,4 @@
+/target
+node_modules/
+reference/**/*.html
+*.bak

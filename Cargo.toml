@@ -1,0 +1,18 @@
+[package]
+name = "tanuki-context"
+version = "0.1.0"
+edition = "2021"
+description = "tanuki-context: token-cutting context MCP (distill -> ladder -> pxpipe imaging), all Rust."
+license = "MIT"
+
+[dependencies]
+regex = "1"
+serde_json = "1"
+miniz_oxide = "0.8"
+base64 = "0.22"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+opt-level = 3

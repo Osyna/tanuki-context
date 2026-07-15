@@ -1,0 +1,12 @@
+{
+  "name": "pxpipe-mcp",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "description": "pxpipe as a callable MCP server (stdio): render text to images, estimate/transform, stats.",
+  "bin": { "pxpipe-mcp": "server.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.0"
+  }
+}
