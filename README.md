@@ -1,6 +1,7 @@
 # tanuki-context
 
 Token-cutting context pipeline as a single-binary MCP server. All Rust.
+Usage below; the architecture and reasoning live in [DESIGN.md](DESIGN.md).
 
 ```
 text/logs ──► stage 0: distill ──► stage 1: ladder ──► stage 2: pxpipe imaging ──► PNG pages
