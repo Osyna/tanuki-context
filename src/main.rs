@@ -8,6 +8,7 @@
 //!      tanuki-context render <file> [level] [outdir]
 
 mod atlas;
+mod codebook;
 mod distill;
 mod ladder;
 mod png;
@@ -26,22 +27,36 @@ struct PipelineOut {
     compressed: String,
     protected_lines: usize,
     level: u8,
+    cb_entries: usize,
 }
 
-/// Stages 0+1: optional distill, then ladder level.
-fn stage01(text: &str, level: u8, use_distill: bool, query: Option<&str>) -> PipelineOut {
-    let (working, stage0) = if use_distill || query.is_some() {
+/// Stages 0 + 0.5 + 1: optional distill, optional codebook, then ladder level.
+fn stage01(
+    text: &str,
+    level: u8,
+    use_distill: bool,
+    query: Option<&str>,
+    use_codebook: bool,
+) -> PipelineOut {
+    let (mut working, stage0) = if use_distill || query.is_some() {
         let d = distill::distill_log(text, query, 2);
         (d.distilled, Some(d.stats))
     } else {
         (text.to_string(), None)
     };
+    let mut cb_entries = 0;
+    if use_codebook {
+        let cb = codebook::apply(&working);
+        working = cb.text;
+        cb_entries = cb.entries;
+    }
     let c = ladder::compress_text(&working, level);
     PipelineOut {
         stage0,
         compressed: c.compressed,
         protected_lines: c.protected_lines,
         level: c.level,
+        cb_entries,
     }
 }
 
@@ -65,6 +80,9 @@ struct PipeArgs<'a> {
     distill: bool,
     query: Option<&'a str>,
     reflow: bool,
+    pack: bool,
+    font: &'a str,
+    codebook: bool,
 }
 
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
@@ -74,13 +92,17 @@ fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
         distill: args["distill"].as_bool().unwrap_or(false),
         query: args["query"].as_str(),
         reflow: args["reflow"].as_bool().unwrap_or(true),
+        pack: args["pack"].as_bool().unwrap_or(true),
+        font: args["font"].as_str().unwrap_or("normal"),
+        codebook: args["codebook"].as_bool().unwrap_or(false),
     }
 }
 
 fn tool_estimate(args: &Value) -> Value {
     let a = pipe_args(args);
-    let p = stage01(a.text, a.level, a.distill, a.query);
-    let est = render::estimate_text(&p.compressed, a.reflow);
+    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+    let font = render::Font::parse(a.font);
+    let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
     let img_tok = render::image_tokens(est.pixels);
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -97,14 +119,18 @@ fn tool_estimate(args: &Value) -> Value {
         "rawTextTokens": raw_tok,
         "totalSavedPct": pct(raw_tok, img_tok),
         "protectedLines": p.protected_lines,
+        "pack": a.pack,
+        "font": if font == render::Font::Tiny { "tiny" } else { "normal" },
+        "codebook": if a.codebook { json!(p.cb_entries) } else { json!(false) },
         "verdict": if img_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
     })
 }
 
 fn tool_render(args: &Value) -> Value {
     let a = pipe_args(args);
-    let p = stage01(a.text, a.level, a.distill, a.query);
-    let r = render::render_text(&p.compressed, a.reflow);
+    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+    let font = render::Font::parse(a.font);
+    let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
     let img_tok = render::image_tokens(r.pixels);
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -128,6 +154,15 @@ fn tool_render(args: &Value) -> Value {
     }
     if r.dropped > 0 {
         summary.push_str(&format!(" · {} unmapped glyphs -> ▯", r.dropped));
+    }
+    if p.cb_entries > 0 {
+        summary.push_str(&format!(" · codebook: {} sigils (see ·legend·)", p.cb_entries));
+    }
+    if font == render::Font::Tiny {
+        summary.push_str(" · font: tiny 4x6");
+    }
+    if a.pack {
+        summary.push_str(" · packed (⇥N indent, → tab)");
     }
     if a.reflow {
         summary.push_str(" · ↵ = newline · engine: pxpipe");
@@ -182,13 +217,13 @@ fn tools_list() -> Value {
     json!({ "tools": [
         {
             "name": "tanuki_render",
-            "description": "Token-cut pipeline: optional log distillation (dedupe noise, keep errors verbatim, optional query filter), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" } }, "required": ["text"] }
+            "description": "Token-cut pipeline: optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_estimate",
-            "description": "Estimate tokens for the pipeline (distill -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/flags to pick a loss/size tradeoff.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" } }, "required": ["text"] }
+            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
@@ -290,30 +325,54 @@ fn main() {
             println!("{}", serde_json::to_string(&d.stats).unwrap());
         }
         Some("estimate") => {
-            let file = args
-                .get(2)
-                .expect("usage: tanuki-context estimate <file> [level] [--distill]");
+            let file = args.get(2).expect(
+                "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]",
+            );
             let text = std::fs::read_to_string(file).expect("read file");
-            let level: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let use_distill = args.iter().any(|a| a == "--distill");
-            let v = tool_estimate(&json!({ "text": text, "level": level, "distill": use_distill }));
+            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
+            let level: u64 = pos.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let flag = |n: &str| args.iter().any(|a| a == n);
+            let font = args
+                .iter()
+                .position(|a| a == "--font")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str)
+                .unwrap_or("normal");
+            let v = tool_estimate(&json!({
+                "text": text, "level": level,
+                "distill": flag("--distill"),
+                "pack": !flag("--no-pack"),
+                "font": font,
+                "codebook": flag("--codebook"),
+            }));
             println!("{}", serde_json::to_string(&v).unwrap());
         }
         Some("render") => {
-            let file = args
-                .get(2)
-                .expect("usage: tanuki-context render <file> [level] [outdir]");
+            let file = args.get(2).expect(
+                "usage: tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]",
+            );
             let text = std::fs::read_to_string(file).expect("read file");
-            let level: u8 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let p = stage01(&text, level, false, None);
-            let r = render::render_text(&p.compressed, true);
+            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
+            let level: u8 = pos.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let flag = |n: &str| args.iter().any(|a| a == n);
+            let pack = !flag("--no-pack");
+            let use_cb = flag("--codebook");
+            let font = render::Font::parse(
+                args.iter()
+                    .position(|a| a == "--font")
+                    .and_then(|i| args.get(i + 1))
+                    .map(String::as_str)
+                    .unwrap_or("normal"),
+            );
+            let p = stage01(&text, level, false, None, use_cb);
+            let r = render::render_text(&p.compressed, true, pack, font);
             let tok = render::image_tokens(r.pixels);
             println!(
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
                         "rawTextTokens": text_tokens(text.chars().count()) })
             );
-            if let Some(dir) = args.get(4) {
+            if let Some(dir) = pos.get(1).map(|s| s.as_str()) {
                 std::fs::create_dir_all(dir).expect("mkdir");
                 for (i, page) in r.pages.iter().enumerate() {
                     std::fs::write(format!("{dir}/page{i}.png"), &page.png).expect("write png");
@@ -323,6 +382,7 @@ fn main() {
         Some("bench") => {
             // tanuki-context bench <file> <op:distill|pipeline> [level] [runs] [--distill]
             // In-process timing (median of `runs`, first run is a discarded warmup).
+            // Imaging stays pxpipe-faithful (pack off) so node-vs-rust timing is comparable.
             let file = args
                 .get(2)
                 .expect("usage: tanuki-context bench <file> <op> [level] [runs] [--distill]");
@@ -341,8 +401,8 @@ fn main() {
                         result = d.stats;
                     }
                     _ => {
-                        let p = stage01(&text, level, use_distill, None);
-                        let r = render::render_text(&p.compressed, true);
+                        let p = stage01(&text, level, use_distill, None, false);
+                        let r = render::render_text(&p.compressed, true, false, render::Font::Normal);
                         result = json!({
                             "pages": r.pages.len(),
                             "imageTokens": render::image_tokens(r.pixels),
