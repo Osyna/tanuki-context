@@ -31,19 +31,32 @@ total; only unassigned codepoints fall back to `▯` (counted + reported).
 
 ## Tools (MCP, stdio)
 
-- `tanuki_render` — `{ text, level?, distill?, query?, reflow? }` → PNG page blocks + breakdown
+- `tanuki_render` — `{ text, level?, distill?, query?, reflow?, pack?, font?, codebook? }` → PNG page blocks + breakdown
 - `tanuki_estimate` — same args; exact page geometry, numbers only (never decompresses glyphs)
 - `tanuki_distill` — stage 0 alone (logs stay text; error/warn lines always verbatim)
 - `tanuki_compress` — stage 1 alone (levels 0–4; code/IDs/hashes/paths verbatim from L2 up)
 - `tanuki_stats` — honest savings summary from `~/.pxpipe/events.jsonl` (env `TANUKI_EVENTS`)
+
+### Density knobs (measured, image-tokens vs the pxpipe-faithful baseline)
+
+All lossless or legend-decodable, all off the parity path (`pack=false,
+font=normal, codebook=false` = byte-identical to pxpipe, 25/25 parity intact).
+Reproduce with `node reference/methods-report.mjs` → `methods-report.html`.
+
+| knob | what | code | prose | log |
+|---|---|---:|---:|---:|
+| `pack` (default on) | single-cell tabs, `⇥N` indent runs, width-trimmed pages — byte-exact | −14% | −0% | −0% |
+| `codebook` | repeated tokens/path prefixes → 1-cell sigils + a `·legend·` line — reversible | −19% | −0% | −37% |
+| `font:"tiny"` | atlas box-filtered into a 4×6 cell — experimental, 99.7% read-back accuracy | −40% | −38% | −40% |
+| **all three** | stacked | **−51%** | **−38%** | **−62%** |
 
 ## CLI
 
 ```
 tanuki-context                          # MCP stdio server (default)
 tanuki-context distill <file> [query]   # stats JSON to stdout
-tanuki-context estimate <file> [level] [--distill]
-tanuki-context render <file> [level] [outdir]
+tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
+tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]
 ```
 
 ## Layout
@@ -53,7 +66,8 @@ tanuki-context render <file> [level] [outdir]
 | `src/main.rs` | MCP stdio server (hand-rolled JSON-RPC, no async runtime) + CLI |
 | `src/distill.rs` | stage 0: 3-pass log distiller (runs/blocks ×N, exact+template near-dupes, query) |
 | `src/ladder.rs` | stage 1: levels 0–4 with the exact-recall guard |
-| `src/render.rs` | stage 2: reflow (`↵`), wrap, page split, AA glyph blit |
+| `src/codebook.rs` | stage 0.5: repeated tokens/path prefixes → sigils + `·legend·` (opt-in, reversible) |
+| `src/render.rs` | stage 2: reflow (`↵`), pack (`⇥N`/single-cell tab/width-trim), wrap, page split, AA blit, tiny 4×6 font |
 | `src/atlas.rs` | full-Unicode glyph atlas (92,812 cps): codepoints/wide eager, pixels lazily inflated |
 | `src/png.rs` | minimal grayscale PNG encoder (zlib via miniz_oxide) |
 | `src/stats.rs` | events.jsonl summary |
@@ -62,6 +76,7 @@ tanuki-context render <file> [level] [outdir]
 | `reference/node-mcp/` | the original node implementation, kept for comparison |
 | `reference/parity.mjs` | parity harness: same input through both, asserts counts/geometry |
 | `reference/benchmark.mjs` | full node-vs-rust benchmark (every level, real content) → HTML report |
+| `reference/methods-report.mjs` | density-knob comparison (rust-only, no pxpipe) → `methods-report.html` |
 
 ## Build & test
 

@@ -4,26 +4,85 @@
 //! PLUS the astral planes (unifont_upper, incl. emoji) — beyond pxpipe, which
 //! drops astral. Only unassigned codepoints fall back to `▯` and are counted
 //! as dropped.
+//!
+//! Two tanuki-only extensions over the faithful port, both behind knobs so the
+//! `pack=false, font=Normal` path stays byte-identical to pxpipe (parity):
+//!   * `pack`  — lossless reflow tighter than pxpipe: single-cell tabs (no
+//!               4-col padding) + indent run-length (`⇥N`), plus per-page
+//!               width-trim so short payloads stop paying for 1568px rows.
+//!   * `font`  — `Tiny` renders the same atlas box-filtered into a 4x6 cell
+//!               (390 cols x 120 rows/page), ~40% fewer image-tokens; opt-in,
+//!               transcription-accuracy gated.
 
 use crate::atlas::{self, CELL_H, CELL_W};
 use crate::png::encode_gray_png;
 use regex::Regex;
 use std::sync::LazyLock;
 
-pub const COLS: usize = 312;
 pub const PAD_X: usize = 4;
 pub const PAD_Y: usize = 4;
+pub const MAX_WIDTH_PX: usize = 1568; // Anthropic no-resample bound
 pub const MAX_HEIGHT_PX: usize = 728;
-pub const CHARS_PER_IMAGE: usize = 28080;
-pub const MAX_LINES: usize = (MAX_HEIGHT_PX - 2 * PAD_Y) / CELL_H; // 90
 
 pub const NL_SENTINEL: char = '\u{21B5}'; // ↵ inserted for original hard newlines
 pub const NL_LITERAL: char = '\u{23CE}'; // ⏎ stands in for pre-existing ↵ in source
 const TAB_MARK: char = '\u{2192}'; // → visible tab marker
+const TAB_LITERAL: char = '\u{21E2}'; // ⇢ stands in for pre-existing → (pack mode)
+const INDENT_MARK: char = '\u{21E5}'; // ⇥ leading-indent run-length header (pack mode)
+const INDENT_LITERAL: char = '\u{21E8}'; // ⇨ stands in for pre-existing ⇥ (pack mode)
 const FALLBACK: char = '\u{25AF}'; // ▯ for codepoints absent from the atlas (unassigned)
 const TAB_WIDTH: usize = 4;
+const MIN_INDENT: usize = 3; // shorter runs aren't worth a 2-char code
+// 62 count symbols: an indent run of N spaces (3..=61) -> INDENT_MARK + ALPHABET[N].
+pub(crate) const INDENT_ALPHABET: &[u8] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 static NL4: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{4,}").unwrap());
+
+/// Cell dimensions and page grid for a font.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Font {
+    Normal,
+    Tiny,
+}
+
+impl Font {
+    pub fn parse(s: &str) -> Font {
+        if s.eq_ignore_ascii_case("tiny") {
+            Font::Tiny
+        } else {
+            Font::Normal
+        }
+    }
+    fn cell(self) -> (usize, usize) {
+        match self {
+            Font::Normal => (CELL_W, CELL_H),
+            Font::Tiny => (4, 6),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Geom {
+    pub cw: usize,
+    pub ch: usize,
+    pub cols: usize,
+    pub max_lines: usize,
+    pub max_chars: usize,
+}
+
+pub fn geom(font: Font) -> Geom {
+    let (cw, ch) = font.cell();
+    let cols = (MAX_WIDTH_PX - 2 * PAD_X) / cw;
+    let max_lines = (MAX_HEIGHT_PX - 2 * PAD_Y) / ch;
+    Geom {
+        cw,
+        ch,
+        cols,
+        max_lines,
+        max_chars: cols * max_lines,
+    }
+}
 
 /// Cells a codepoint occupies (pxpipe cellsFor): wide glyphs take 2,
 /// missing codepoints advance 1 for wrap stability.
@@ -68,6 +127,23 @@ pub fn expand_tabs(line: &str) -> String {
     out
 }
 
+/// Pack a single line: every tab -> single '→' cell (no 4-col padding), then
+/// run-length the leading-space run (`⇥` + one count symbol). Lossless; the
+/// inverse is `⇥X` -> X spaces, `→` -> tab.
+fn pack_line(line: &str) -> String {
+    let tabbed: String = line.replace('\t', &TAB_MARK.to_string());
+    let indent = tabbed.chars().take_while(|&c| c == ' ').count();
+    if indent >= MIN_INDENT && indent < INDENT_ALPHABET.len() {
+        let mut out = String::with_capacity(tabbed.len());
+        out.push(INDENT_MARK);
+        out.push(INDENT_ALPHABET[indent] as char);
+        out.push_str(&tabbed[indent..]); // leading run is ASCII spaces -> byte index ok
+        out
+    } else {
+        tabbed
+    }
+}
+
 /// Swap pre-existing ↵ for ⏎ so reflow can pack newlines (render-prep only).
 pub fn neutralize(text: &str) -> String {
     if text.contains(NL_SENTINEL) {
@@ -75,6 +151,19 @@ pub fn neutralize(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Pack-mode neutralize: also protect pre-existing `→`/`⇥` (they become
+/// meaningful sentinels after packing) so reconstruction stays exact.
+pub fn neutralize_pack(text: &str) -> String {
+    let mut s = neutralize(text);
+    if s.contains(TAB_MARK) {
+        s = s.replace(TAB_MARK, &TAB_LITERAL.to_string());
+    }
+    if s.contains(INDENT_MARK) {
+        s = s.replace(INDENT_MARK, &INDENT_LITERAL.to_string());
+    }
+    s
 }
 
 /// Minify + expand tabs + join hard newlines with the ↵ sentinel.
@@ -88,6 +177,22 @@ pub fn reflow(text: &str) -> String {
             out.push(NL_SENTINEL);
         }
         out.push_str(&expand_tabs(line));
+        first = false;
+    }
+    out
+}
+
+/// Pack-mode reflow: single-cell tabs + indent RLE, then ↵-join.
+/// Call after `neutralize_pack`.
+pub fn reflow_pack(text: &str) -> String {
+    let minified = minify(text);
+    let mut out = String::with_capacity(minified.len());
+    let mut first = true;
+    for line in minified.split('\n') {
+        if !first {
+            out.push(NL_SENTINEL);
+        }
+        out.push_str(&pack_line(line));
         first = false;
     }
     out
@@ -145,20 +250,36 @@ pub fn split_pages(lines: Vec<String>, max_lines: usize, max_chars: usize) -> Ve
 }
 
 /// Shared front half of render/estimate: (neutralize -> reflow ->) wrap -> page.
-fn prep_pages(text: &str, use_reflow: bool) -> Vec<Vec<String>> {
+fn prep_pages(text: &str, use_reflow: bool, pack: bool, g: Geom) -> Vec<Vec<String>> {
     let prepped: String = if use_reflow {
-        reflow(&neutralize(text))
+        if pack {
+            reflow_pack(&neutralize_pack(text))
+        } else {
+            reflow(&neutralize(text))
+        }
     } else {
         text.to_string()
     };
-    let lines = wrap_lines(&prepped, COLS);
-    split_pages(lines, MAX_LINES, CHARS_PER_IMAGE)
+    let lines = wrap_lines(&prepped, g.cols);
+    split_pages(lines, g.max_lines, g.max_chars)
 }
 
-pub const PAGE_WIDTH: usize = 2 * PAD_X + COLS * CELL_W; // 1568
+fn page_height(rows: usize, g: Geom) -> usize {
+    2 * PAD_Y + rows * g.ch
+}
 
-fn page_height(rows: usize) -> usize {
-    2 * PAD_Y + rows * CELL_H
+/// Page pixel width: full (pxpipe) unless `pack`, then trimmed to the widest
+/// row actually present (capped at the column bound). Pure geometry — lossless.
+fn page_width(lines: &[String], g: Geom, pack: bool) -> usize {
+    if !pack {
+        return 2 * PAD_X + g.cols * g.cw;
+    }
+    let max_cells = lines
+        .iter()
+        .map(|l| l.chars().map(|c| cells_for(c as u32)).sum::<usize>().min(g.cols))
+        .max()
+        .unwrap_or(0);
+    (2 * PAD_X + max_cells * g.cw).max(2 * PAD_X + g.cw)
 }
 
 pub struct Page {
@@ -169,18 +290,25 @@ pub struct Page {
 }
 
 /// Blit one glyph's AA coverage (max blend) at pixel position; returns cells advanced.
-fn blit(fb: &mut [u8], fb_w: usize, x: usize, y: usize, cp: u32) -> usize {
+fn blit(fb: &mut [u8], fb_w: usize, x: usize, y: usize, cp: u32, g: Geom, font: Font) -> usize {
     let rank = match atlas::rank(cp) {
         Some(r) => r,
         None => return 0,
     };
     let wide = atlas::is_wide(rank);
-    let src_w = if wide { 2 * CELL_W } else { CELL_W };
-    let cov = atlas::coverage(rank);
-    for gy in 0..CELL_H {
+    let dst_w = if wide { 2 * g.cw } else { g.cw };
+    let scaled;
+    let cov: &[u8] = match font {
+        Font::Normal => atlas::coverage(rank),
+        Font::Tiny => {
+            scaled = atlas::coverage_scaled(rank, dst_w, g.ch);
+            &scaled
+        }
+    };
+    for gy in 0..g.ch {
         let dst_row = (y + gy) * fb_w + x;
-        let src_row = gy * src_w;
-        for gx in 0..src_w {
+        let src_row = gy * dst_w;
+        for gx in 0..dst_w {
             let c = cov[src_row + gx];
             if c > 0 {
                 let idx = dst_row + gx;
@@ -198,24 +326,24 @@ fn blit(fb: &mut [u8], fb_w: usize, x: usize, y: usize, cp: u32) -> usize {
 }
 
 /// Render one page of wrapped lines to a grayscale PNG (black-on-white).
-fn render_page(lines: &[String]) -> Page {
-    let width = PAGE_WIDTH;
-    let height = page_height(lines.len());
+fn render_page(lines: &[String], g: Geom, pack: bool, font: Font) -> Page {
+    let width = page_width(lines, g, pack);
+    let height = page_height(lines.len(), g);
     let mut fb = vec![0u8; width * height];
     let mut dropped = 0usize;
     for (row, line) in lines.iter().enumerate() {
-        let base_y = PAD_Y + row * CELL_H;
+        let base_y = PAD_Y + row * g.ch;
         let mut col = 0usize;
         for ch in line.chars() {
-            if col >= COLS {
+            if col >= g.cols {
                 break;
             }
-            let base_x = PAD_X + col * CELL_W;
-            let mut advance = blit(&mut fb, width, base_x, base_y, ch as u32);
+            let base_x = PAD_X + col * g.cw;
+            let mut advance = blit(&mut fb, width, base_x, base_y, ch as u32, g, font);
             if advance == 0 {
                 dropped += 1;
                 if ch != ' ' {
-                    blit(&mut fb, width, base_x, base_y, FALLBACK as u32);
+                    blit(&mut fb, width, base_x, base_y, FALLBACK as u32, g, font);
                 }
                 advance = 1;
             }
@@ -241,10 +369,11 @@ pub struct Rendered {
 }
 
 /// Full stage 2: prep + blit + PNG encode.
-pub fn render_text(text: &str, use_reflow: bool) -> Rendered {
-    let pages: Vec<Page> = prep_pages(text, use_reflow)
+pub fn render_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Rendered {
+    let g = geom(font);
+    let pages: Vec<Page> = prep_pages(text, use_reflow, pack, g)
         .iter()
-        .map(|p| render_page(p))
+        .map(|p| render_page(p, g, pack, font))
         .collect();
     let pixels = pages.iter().map(|p| (p.width * p.height) as u64).sum();
     let dropped = pages.iter().map(|p| p.dropped).sum();
@@ -262,11 +391,12 @@ pub struct Estimated {
 
 /// Same geometry as render_text without blitting/encoding — exact, fast,
 /// and never touches the (lazily decompressed) pixel data.
-pub fn estimate_text(text: &str, use_reflow: bool) -> Estimated {
-    let page_lines = prep_pages(text, use_reflow);
+pub fn estimate_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Estimated {
+    let g = geom(font);
+    let page_lines = prep_pages(text, use_reflow, pack, g);
     let pixels = page_lines
         .iter()
-        .map(|p| (PAGE_WIDTH * page_height(p.len())) as u64)
+        .map(|p| (page_width(p, g, pack) * page_height(p.len(), g)) as u64)
         .sum();
     Estimated {
         pages: page_lines.len(),
@@ -277,4 +407,86 @@ pub fn estimate_text(text: &str, use_reflow: bool) -> Estimated {
 /// Session convention: image tokens = round(pixels / 750).
 pub fn image_tokens(pixels: u64) -> u64 {
     ((pixels as f64) / 750.0).round() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inverse of `reflow_pack` — proves the pack transform is lossless.
+    fn pack_decode(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                NL_SENTINEL => out.push('\n'),
+                TAB_MARK => out.push('\t'),
+                INDENT_MARK => {
+                    if let Some(&sym) = chars.peek() {
+                        chars.next();
+                        let n = INDENT_ALPHABET
+                            .iter()
+                            .position(|&b| b as char == sym)
+                            .expect("valid indent symbol");
+                        for _ in 0..n {
+                            out.push(' ');
+                        }
+                    }
+                }
+                TAB_LITERAL => out.push(TAB_MARK),
+                INDENT_LITERAL => out.push(INDENT_MARK),
+                NL_LITERAL => out.push(NL_SENTINEL),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pack_roundtrip_code() {
+        let src = "fn main() {\n\t\tlet x = 1;\n        deep();\n}";
+        let packed = reflow_pack(&neutralize_pack(src));
+        assert_eq!(pack_decode(&packed), src);
+    }
+
+    #[test]
+    fn pack_roundtrip_preexisting_sentinels() {
+        // literal → and ⇥ and ↵ in the source must survive exactly.
+        let src = "a → b\tc\n⇥weird↵end";
+        let packed = reflow_pack(&neutralize_pack(src));
+        assert_eq!(pack_decode(&packed), src);
+    }
+
+    #[test]
+    fn pack_shrinks_indented_code() {
+        // 12-space indent: pack replaces 12 cells with a 2-cell ⇥ code.
+        let src = "            deeply_indented();";
+        let packed = reflow_pack(&neutralize_pack(src));
+        assert!(packed.chars().count() < src.chars().count());
+        assert_eq!(pack_decode(&packed), src);
+    }
+
+    #[test]
+    fn width_trim_helps_short_input() {
+        let short = "error: connection refused\nretry 3";
+        let full = estimate_text(short, true, false, Font::Normal);
+        let packed = estimate_text(short, true, true, Font::Normal);
+        assert!(packed.pixels < full.pixels, "pack must trim short pages");
+    }
+
+    #[test]
+    fn tiny_font_cuts_pixels() {
+        let body = "the quick brown fox jumps over the lazy dog ".repeat(200);
+        let normal = estimate_text(&body, true, true, Font::Normal);
+        let tiny = estimate_text(&body, true, true, Font::Tiny);
+        assert!(tiny.pixels < normal.pixels);
+    }
+
+    #[test]
+    fn nonpack_geometry_is_pxpipe() {
+        // pack=false full width must be exactly the 1568px page.
+        let g = geom(Font::Normal);
+        let full = 2 * PAD_X + g.cols * g.cw;
+        assert_eq!(full, MAX_WIDTH_PX);
+    }
 }

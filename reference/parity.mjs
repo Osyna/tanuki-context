@@ -63,7 +63,7 @@ for (const { name, file } of samples) {
   const { pages } = await renderTextToImages(neutralize(text), { reflow: true });
   const px = pages.reduce((a, p) => a + (p.width || 0) * (p.height || 0), 0);
   const nodeR = { pages: pages.length, imageTokens: Math.round(px / 750) };
-  const rustR = JSON.parse(execFileSync(BIN, ["render", file, "0"], { encoding: "utf8", maxBuffer: 1 << 28 }));
+  const rustR = JSON.parse(execFileSync(BIN, ["render", file, "0", "--no-pack"], { encoding: "utf8", maxBuffer: 1 << 28 }));
   check("render pages", nodeR.pages === rustR.pages, `${nodeR.pages} vs ${rustR.pages}`);
   check("render tokens", nodeR.imageTokens === rustR.imageTokens, `${nodeR.imageTokens} vs ${rustR.imageTokens}`);
 }

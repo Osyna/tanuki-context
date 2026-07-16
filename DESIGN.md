@@ -29,8 +29,9 @@ rewrite. The imaging stage keeps the `pxpipe` name: the mechanic is theirs.
 ```mermaid
 graph LR
   A[text / logs] --> B["stage 0 · distill<br/>(logs: selection, not compression)"]
-  B --> C["stage 1 · ladder<br/>(levels 0–4, graded loss)"]
-  C --> D["stage 2 · pxpipe imaging<br/>(pixel-priced PNG pages)"]
+  B --> X["stage 0.5 · codebook<br/>(opt-in: sigils + ·legend·)"]
+  X --> C["stage 1 · ladder<br/>(levels 0–4, graded loss)"]
+  C --> D["stage 2 · pxpipe imaging<br/>(pixel-priced PNG; pack / font knobs)"]
   D --> E[image tokens]
 ```
 
@@ -126,6 +127,59 @@ render instead of dropping — the one place tanuki deliberately exceeds the
 reference. Only unassigned codepoints fall back to `▯`, and they're counted
 and reported, never silent.
 
+### Stage 2 extensions (tanuki-only, parity-safe)
+
+Three knobs push density past the faithful port. They are off the parity path
+by construction: `pack=false, font=Normal, codebook=false` renders
+byte-identical to pxpipe (25/25 parity rows still pass), so the wins are
+strictly additive. All numbers below are measured via the binary's `estimate`
+and reproduced by `reference/methods-report.mjs`.
+
+- **pack** (default on) — a tighter, still-lossless reflow. Tabs collapse to a
+  single `→` cell instead of padding to a 4-col stop; a leading-space run of N
+  becomes `⇥` + one count symbol (`⇥N`) instead of N cells; and each page is
+  **width-trimmed** to its widest actual row instead of always paying for a
+  1568-px-wide row. Reconstruction stays byte-exact (`↵`=newline, `→`=tab,
+  `⇥N`=indent); pre-existing `→`/`⇥` are swapped to literal stand-ins first,
+  exactly as reflow already does for `↵`. A round-trip unit test proves it.
+  Measured: **−14% image-tokens on source code, −0% on prose** — prose has no
+  indent runs to pack, and width-trim only helps pages no row fills.
+
+- **codebook** (opt-in) — the direct, legitimate inversion of the base64
+  "models negotiate an encoding in-context" finding: not obscurity but a
+  private high-density notation *for cost*, kept documented. Between distill and
+  ladder, recurring long tokens and path prefixes (≥12 chars, ≥3×, net-positive
+  only) are replaced by single-cell sigils defined once in a trailing `·legend·`
+  line. Because every atlas codepoint costs one flat cell, a 60-char path prefix
+  seen 30× collapses to 30 cells + one legend entry. Measured: **−37% on a
+  path-heavy log**; ~0 on code/prose (nothing repeats enough to beat the legend
+  cost). Validated for the oversight property the paper actually worries about:
+  a vision model read the `·legend·` line and reconstructed the first log line
+  **byte-exact** — model-readable and inspectable, not a covert channel.
+
+- **tiny 4×6 font** (opt-in, experimental) — the "the tokenizer itself" lever.
+  The same atlas glyphs are box-filtered from the 5×8 cell into a 4×6 one
+  (390 cols × 120 rows/page vs 312 × 90), so the same text needs fewer pixels.
+  Measured: **−38–40% image-tokens** across every sample kind. The cost is the
+  density↔accuracy frontier the report names: at 4-px width a vision read-back
+  scored **99.7% char-accuracy** with a single `M`→`H` glyph confusion. So it
+  ships opt-in and gated — fine for logs and bulk prose; verify before trusting
+  it with `M_`/`H_`-sensitive identifiers.
+
+Stacked (`pack + codebook + tiny`) the log class reaches **−62%** below the
+pxpipe baseline, source code **−51%**, prose **−38%**.
+
+Two further properties:
+
+- **append-stable pages.** Reflow is deterministic left-to-right, so appending
+  content leaves every earlier page byte-identical (verified by hashing). That
+  lets prompt-caching price the unchanged pages at cache rates across turns —
+  the biggest lever in the base64 report, stacked on the imaging cut.
+- **still rejected: model-based pruning.** LLMLingua/RTK stays out for the same
+  reason as before — it deletes tokens it *judges* unimportant, the
+  silent-confabulation risk. pack and codebook are deterministic and
+  reversible; that line holds.
+
 ## 3. Why Rust (measured, not vibes)
 
 The MCP is stdio: clients spawn it per session, so **startup latency and
@@ -191,9 +245,12 @@ Getting to *identical* (not "close") surfaced three real porting lessons:
 | path | guarantee |
 |---|---|
 | imaging (any level 0/1) | source byte-exact reconstructable (`↵` = newline, `→` = tab, `⏎` = literal ↵) |
+| imaging + pack | still byte-exact: adds `⇥N` = indent run to the `↵`/`→`/`⏎` sentinels; pre-existing markers escaped first; a unit test round-trips it |
 | distill | error/warn/exception lines verbatim; drops are counted with exact ×N; full log stays on disk |
 | ladder L2–L4 | code / indented / symbol-dense / long-token lines verbatim; loss confined to prose |
 | ladder L4 | prose is gist-only — never use where verbatim prose matters |
+| codebook | reversible: every sigil is defined in the trailing `·legend·` line; validated byte-exact by a vision read-back |
+| tiny 4×6 font | legible but lossy at the glyph level (99.7% char-accuracy measured; `M`/`H` confusable) — opt-in, verify before trusting exact identifiers |
 | stats | savings counted against *all* billed input (input + cache reads + cache creates) — ignoring cache reads would fake the number |
 
 That last row is a story of its own: the first stats implementation read
