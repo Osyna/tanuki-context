@@ -1,0 +1,36 @@
+{
+  "name": "tanuki-context",
+  "version": "0.1.0",
+  "description": "Token-cutting context pipeline as an MCP server: distill logs, compress text, render dense PNG pages (pxpipe imaging engine). Zero dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "tanuki-context": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build src/main.ts --target=node --minify --outfile=dist/cli.js",
+    "prepublishOnly": "bun run build",
+    "parity": "bun reference/parity-ts.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Osyna/tanuki-context.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "context",
+    "compression",
+    "tokens",
+    "llm"
+  ]
+}
