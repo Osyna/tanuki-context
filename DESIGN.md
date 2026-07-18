@@ -3,6 +3,12 @@
 What this project is, why each piece exists, and the logic behind it.
 Companion to [README.md](README.md) (usage) — this is the *why*.
 
+> **Branch note** — these notes were written for the Rust implementation (now
+> on the [`rust` branch](../../tree/rust)); file names reference `src/*.rs`.
+> The `main` branch is a 1:1 TypeScript port (same modules, `src/*.ts`,
+> byte/pixel-identical output — see `reference/parity-ts.mjs`), so every
+> design decision below applies unchanged.
+
 ## 1. Origin
 
 [pxpipe](https://github.com/teamchong/pxpipe) exploits one pricing fact: an
