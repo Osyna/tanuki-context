@@ -20,7 +20,7 @@
 
 use crate::render::{self, Font};
 use crate::stats;
-use crate::{codebook, distill, ladder};
+use crate::{codebook, distill, ladder, table};
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -33,6 +33,7 @@ pub struct ProxyCfg {
     pub upstream: String, // e.g. https://api.anthropic.com
     pub level: u8,        // ladder level for imaged blocks (default 0: none)
     pub distill: bool,    // stage 0 on imaged blocks (off: lossy for logs, opt-in)
+    pub table: bool,      // columnar-encode whole-JSON blocks before distill (keys stated once)
     pub codebook: bool,
     pub font: Font,
     pub min_chars: usize, // below this a block is never considered
@@ -48,6 +49,7 @@ impl Default for ProxyCfg {
             upstream: "https://api.anthropic.com".to_string(),
             level: 0,
             distill: false,
+            table: false,
             codebook: false,
             font: Font::Normal,
             min_chars: 4000,
@@ -72,6 +74,11 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
         return None;
     }
     let mut working = text.to_string();
+    if cfg.table {
+        if let Some(t) = table::table_encode(&working) {
+            working = t.text;
+        }
+    }
     if cfg.distill {
         working = distill::distill_log(&working, None, 2).distilled;
     }
@@ -246,20 +253,30 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
 /// streams (message_start carries the same usage keys). First match wins for
-/// input/cache figures; output tokens are irrelevant to the savings log.
-fn scrape_usage(text: &str) -> (u64, u64, u64) {
+/// input/cache figures; output_tokens takes the MAX across matches because
+/// SSE emits a placeholder in message_start and the final count in
+/// message_delta. Output is not a savings input — it is logged so stats can
+/// report the share of the bill no input-side tool can touch.
+fn scrape_usage(text: &str) -> (u64, u64, u64, u64) {
     static INPUT: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#""input_tokens"\s*:\s*(\d+)"#).unwrap());
     static READ: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#""cache_read_input_tokens"\s*:\s*(\d+)"#).unwrap());
     static CREATE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#""cache_creation_input_tokens"\s*:\s*(\d+)"#).unwrap());
+    static OUTPUT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#""output_tokens"\s*:\s*(\d+)"#).unwrap());
     let grab = |re: &Regex| -> u64 {
         re.captures(text)
             .and_then(|c| c[1].parse().ok())
             .unwrap_or(0)
     };
-    (grab(&INPUT), grab(&READ), grab(&CREATE))
+    let output = OUTPUT
+        .captures_iter(text)
+        .filter_map(|c| c[1].parse().ok())
+        .max()
+        .unwrap_or(0);
+    (grab(&INPUT), grab(&READ), grab(&CREATE), output)
 }
 
 fn log_event(row: &Value) {
@@ -400,7 +417,7 @@ fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) 
             None,
         ));
         let text = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
-        let (input, cache_read, cache_create) = scrape_usage(&text);
+        let (input, cache_read, cache_create, output) = scrape_usage(&text);
         let actual = input + cache_read + cache_create;
         log_event(&json!({
             "ts": now_ms(),
@@ -414,6 +431,7 @@ fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) 
             "input_tokens": input,
             "cache_read_tokens": cache_read,
             "cache_create_tokens": cache_create,
+            "output_tokens": output,
         }));
     } else {
         let _ = request.respond(tiny_http::Response::new(
@@ -723,7 +741,7 @@ mod tests {
             }
             *cap.lock().unwrap() =
                 String::from_utf8_lossy(&buf[body_start..body_start + cl]).into_owned();
-            let body = r#"{"id":"msg_1","usage":{"input_tokens":111,"cache_read_input_tokens":22,"cache_creation_input_tokens":3}}"#;
+            let body = r#"{"id":"msg_1","usage":{"input_tokens":111,"cache_read_input_tokens":22,"cache_creation_input_tokens":3,"output_tokens":9}}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nx-upstream: mock\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len(),
@@ -782,6 +800,7 @@ mod tests {
         assert_eq!(last["input_tokens"], 111);
         assert_eq!(last["cache_read_tokens"], 22);
         assert_eq!(last["cache_create_tokens"], 3);
+        assert_eq!(last["output_tokens"], 9);
         assert!(last["baseline_tokens"].as_i64().unwrap() > 136); // actual + saved estimate
     }
 }

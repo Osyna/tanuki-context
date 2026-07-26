@@ -430,6 +430,9 @@ pub struct Estimated {
     pub pages: usize,
     pub pixels: u64, // kept internally; billing uses `tokens`
     pub tokens: u64,
+    /// per-page (width, height) px — provider tile math (cost.rs) needs real
+    /// dims because pack width-trims pages.
+    pub dims: Vec<(u64, u64)>,
 }
 
 /// Same geometry as render_text without blitting/encoding — exact, fast,
@@ -438,8 +441,10 @@ pub fn estimate_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Es
     let g = geom(font);
     let page_lines = prep_pages(text, use_reflow, pack, g);
     let (mut pixels, mut tokens) = (0u64, 0u64);
+    let mut dims = Vec::with_capacity(page_lines.len());
     for p in &page_lines {
         let (w, h) = (page_width(p, g, pack), page_height(p.len(), g));
+        dims.push((w as u64, h as u64));
         pixels += (w * h) as u64;
         tokens += patch_tokens(w, h);
     }
@@ -447,6 +452,7 @@ pub fn estimate_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Es
         pages: page_lines.len(),
         pixels,
         tokens,
+        dims,
     }
 }
 
