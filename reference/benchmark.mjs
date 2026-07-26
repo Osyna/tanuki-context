@@ -14,7 +14,7 @@ import { compressText, LEVELS } from "./node-mcp/compress.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // TANUKI_BIN may point at the rust-branch binary; default is the TS CLI.
 const CMD = (process.env.TANUKI_BIN ||
-  (existsSync(path.join(HERE, "..", "dist", "cli.js")) ? "node dist/cli.js" : "bun src/main.ts")).split(" ");
+  (existsSync(path.join(HERE, "..", "dist", "cli.js")) ? "node dist/cli.js" : "bun src/cli.ts")).split(" ");
 const PXPIPE = process.env.PXPIPE_ROOT || path.join(process.env.HOME, "Projects", "pxpipe");
 const OUT = process.argv[2] || path.join(HERE, "benchmark-report.html");
 const RUNS = 3;

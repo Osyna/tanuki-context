@@ -228,6 +228,24 @@ the proxy exists for clients you can't modify. Wire behaviour is covered by
 `test/proxy.test.ts` (transform rules unit-tested, plus a live
 proxy-to-mock-upstream session asserting passthrough and the events row).
 
+### Claude Agent SDK surface
+
+`tanuki-context/agent` exists because "add this MCP server" is still friction
+for someone wiring a team of agents. It ships two shapes: `withTanuki(options)`
+merges a stdio server config plus `allowedTools` into an Agent SDK options
+object (zero dependencies, resolves the installed `dist/cli.js` directly so
+there is no npx cold start), and `tanukiSdkServer()` builds an in-process
+server via the SDK's `createSdkMcpServer` — one instance shared by every
+agent in the process instead of a subprocess per session. The SDK and zod are
+optional peer dependencies touched only behind a dynamic import, so the core
+package keeps its zero-dependency claim; any Agent SDK project already has
+both (zod is the SDK's own peer). `TANUKI_INSTRUCTIONS` carries the
+estimate-first workflow and the decode grammar as a canned prompt block —
+the piece that actually makes fleets of agents use the tools instead of
+pasting logs. The entry split (`src/cli.ts` runs `main()`; `src/main.ts` is
+now an importable library) is what makes this module possible without
+starting a server as an import side effect.
+
 ## 3. Why Rust (measured, not vibes)
 
 The MCP is stdio: clients spawn it per session, so **startup latency and

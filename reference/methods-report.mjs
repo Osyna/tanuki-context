@@ -13,7 +13,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
 // TANUKI_BIN may point at the rust-branch binary; default is the TS CLI.
 const CMD = (process.env.TANUKI_BIN ||
-  (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/main.ts")).split(" ");
+  (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/cli.ts")).split(" ");
 const OUT = process.argv[2] || path.join(HERE, "methods-report.html");
 const TMP = mkdtempSync(path.join(os.tmpdir(), "tanuki-methods-"));
 

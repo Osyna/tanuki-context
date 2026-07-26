@@ -18,7 +18,7 @@ import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText } from "./render.ts";
 import { Float, pxStats } from "./stats.ts";
 
-const VERSION = "0.1.0";
+export const VERSION = "0.1.0";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------- serde_json parity
@@ -38,7 +38,7 @@ function keyCmp(a: string, b: string): number {
  *  `to_string_pretty`). serde_json's default Map is a BTreeMap, so object keys
  *  serialize in byte-lexicographic order. Whole f64s (wrapped in `Float`)
  *  print as `50.0`. */
-function jstring(v: unknown, pretty: boolean, indent = ""): string {
+export function jstring(v: unknown, pretty: boolean, indent = ""): string {
   if (v === null || v === undefined) {
     return "null";
   }
@@ -210,7 +210,7 @@ function pipeArgs(args: unknown): PipeArgs {
   };
 }
 
-function toolEstimate(args: unknown): Record<string, unknown> {
+export function toolEstimate(args: unknown): Record<string, unknown> {
   const a = pipeArgs(args);
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
   const font = parseFont(a.font);
@@ -240,7 +240,7 @@ function toolEstimate(args: unknown): Record<string, unknown> {
   };
 }
 
-function toolRender(args: unknown): unknown[] {
+export function toolRender(args: unknown): unknown[] {
   const a = pipeArgs(args);
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
   const font = parseFont(a.font);
@@ -296,7 +296,7 @@ function toolRender(args: unknown): unknown[] {
   return content;
 }
 
-function toolDistill(args: unknown): unknown[] {
+export function toolDistill(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
   const d = distillLog(text, asStr(jget(args, "query")), 2);
   return [
@@ -305,7 +305,7 @@ function toolDistill(args: unknown): unknown[] {
   ];
 }
 
-function toolCompress(args: unknown): unknown[] {
+export function toolCompress(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
   const level = (asU64(jget(args, "level")) ?? 1) % 256; // `as u8` wraps
   const c = compressText(text, level);
@@ -542,7 +542,7 @@ function parseUint(s: string, max: bigint): number | null {
 const U8_MAX = 255n;
 const U64_MAX = 0xffffffffffffffffn;
 
-function main(): void {
+export function main(): void {
   const argv = process.argv.slice(1); // argv[0] = program, argv[1] = command (like env::args)
   switch (argv[1]) {
     case "distill": {
@@ -699,5 +699,3 @@ function main(): void {
       process.exit(1);
   }
 }
-
-main();

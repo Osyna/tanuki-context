@@ -11,7 +11,10 @@ import { join } from "node:path";
  * in main.ts formats these like serde_json/ryu.
  */
 export class Float {
-  constructor(public readonly value: number) {}
+  readonly value: number;
+  constructor(value: number) {
+    this.value = value;
+  }
 }
 
 export function eventsPath(): string {
