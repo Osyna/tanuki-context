@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
+import { costVerdict } from "./cost.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
@@ -20,7 +21,7 @@ import { estimateText, parseFont, renderText } from "./render.ts";
 import { fetchSlice, stashText } from "./stash.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.4.1";
+export const VERSION = "0.5.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -253,7 +254,9 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const stage1Chars = charCount(p.compressed);
   const rawTok = textTokens(origChars);
   const [name, loss] = LEVELS[p.level];
-  return {
+  const model = asStr(jget(args, "model"));
+  const cached = asBool(jget(args, "cached")) ?? false;
+  const out: Record<string, unknown> = {
     engine: "pxpipe",
     level: `${p.level} ${name}`,
     loss,
@@ -272,6 +275,12 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     verdict: imgTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     recommend: recommendFor(a.text),
   };
+  // Situation-aware real cost: only when a model or cache state is supplied, so
+  // the default token-count result (and the parity harness) stay byte-identical.
+  if (model !== null || cached) {
+    out.cost = costVerdict(rawTok, imgTok, { model, cached });
+  }
+  return out;
 }
 
 export function toolRender(args: unknown): unknown[] {
@@ -422,7 +431,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_estimate",
         description:
-          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route - one call replaces manual knob probing.",
+          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4) and/or cached:true to add a 'cost' field that prices the decision in real dollars: a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
         inputSchema: {
           type: "object",
           properties: {
@@ -434,6 +443,8 @@ function toolsList(): Record<string, unknown> {
             pack: { type: "boolean" },
             font: { type: "string", enum: ["normal", "tiny"] },
             codebook: { type: "boolean" },
+            model: { type: "string" },
+            cached: { type: "boolean" },
           },
           required: ["text"],
         },
@@ -646,13 +657,15 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]",
+          "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
       const level = pos.length > 0 ? (parseUint(pos[0], U64_MAX) ?? 0) : 0;
       const fi = argv.indexOf("--font");
       const font = fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal";
+      const mi = argv.indexOf("--model");
+      const model = mi !== -1 && argv[mi + 1] !== undefined ? argv[mi + 1] : null;
       const v = toolEstimate({
         text,
         level,
@@ -660,6 +673,8 @@ export function main(): void {
         pack: !argv.includes("--no-pack"),
         font,
         codebook: argv.includes("--codebook"),
+        model,
+        cached: argv.includes("--cached"),
       });
       process.stdout.write(jstring(v, false) + "\n");
       break;

@@ -195,6 +195,50 @@ describe("recommend: server-side knob walk in one estimate call", () => {
   });
 });
 
+// ------------------------------------------ cost: situation-aware verdict
+
+describe("cost: real-dollar verdict flips on cache state and provider", () => {
+  // content that images cheaper by TOKEN COUNT (fewer image tokens than text tokens)
+  const log = Array.from(
+    { length: 400 },
+    (_, i) => `2026-07-26 INFO copied /srv/data/prod/batch/segment_${String(i % 9).padStart(5, "0")}.parquet ok`,
+  ).join("\n");
+
+  test("no situation arg: no cost field, token result unchanged", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: log, level: 0 });
+    expect(e.cost).toBeUndefined();
+    expect(e.verdict).toBe("PIPELINE cheaper");
+  });
+
+  test("uncached Anthropic: cost agrees with the token verdict (image bills at input rate)", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: log, level: 0, model: "claude-opus-4" });
+    const cost = e.cost as { cheaper: string; savedPct: number };
+    expect(cost.cheaper).toBe("PIPELINE");
+    expect(cost.savedPct).toBeGreaterThan(0);
+  });
+
+  test("cached content flips to TEXT: a cache-read token is 0.1x, imaging loses", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: log, level: 0, model: "claude-opus-4", cached: true });
+    const cost = e.cost as { cheaper: string; savedPct: number; note?: string; breakevenImageTokens: number };
+    // token verdict still says PIPELINE, but real cost says TEXT
+    expect(e.verdict).toBe("PIPELINE cheaper");
+    expect(cost.cheaper).toBe("TEXT");
+    expect(cost.savedPct).toBeLessThan(0);
+    expect(cost.breakevenImageTokens).toBeLessThan(e.imageTokens as number);
+    expect(cost.note).toContain("cache-read");
+  });
+
+  test("non-Anthropic model carries the approximate-dollars note", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: log, level: 0, model: "gpt-5" });
+    const cost = e.cost as { note?: string };
+    expect(cost.note).toContain("approximate");
+  });
+});
+
 // ------------------------------------------------ append-stable pagination
 
 describe("append-stable pages (prompt-cache reuse)", () => {
