@@ -213,6 +213,7 @@ npx tanuki-context proxy [--port 8484] [--upstream URL] [knobs]   # implicit mid
 npx tanuki-context distill <file> [query]   # stats JSON to stdout
 npx tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]
+npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 ```
 
 ## Footprint
@@ -225,7 +226,7 @@ Measured on the same machine as the tables above:
 | idle server RSS              | 50 MB (bun) / 80 MB (node)   | 177 MB             |
 | distill a 113 MB log         | 3.35 s                       | ~4 s               |
 | install                      | 0.97 MB tarball, zero deps   | node_modules tree  |
-| emoji / astral planes        | rendered                     | dropped            |
+| emoji / astral planes        | rendered                     | escaped as `[U+HEX]`  |
 
 The imaging engine is a remake of [pxpipe](https://github.com/teamchong/pxpipe):
 page geometry and glyphs come from pxpipe's own generated atlas (Spleen 5x8
@@ -258,10 +259,18 @@ Architecture notes and the reasoning behind each stage live in
 ## Build
 
 Runs from source with Bun (`bun src/cli.ts`) or as the bundled,
-Node-compatible single file:
+Node-compatible files:
 
 ```
-bun run build        # dist/cli.js (bun build --target=node --minify)
+bun run build        # dist/cli.js + dist/agent.js (+ agent.d.ts)
+```
+
+Prefer a single static binary with no runtime at all? The
+[`rust` branch](../../tree/rust) carries the same pipeline (same patch-grid
+token model, escapes, atlas, proxy) as a ~3.3 MB Rust build:
+
+```
+git checkout rust && cargo build --release
 ```
 
 Regenerating glyphs after a pxpipe atlas rebuild (needs a pxpipe checkout with
