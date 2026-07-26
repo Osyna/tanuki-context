@@ -58,9 +58,9 @@ async function nodePipeline(text, { level = 0, distill = false } = {}) {
     const working = distill ? distillLog(text).distilled : text;
     const { compressed } = compressText(working, level);
     const { pages } = await renderTextToImages(neutralize(compressed), { reflow: true });
-    const px = pages.reduce((a, p) => a + (p.width || 0) * (p.height || 0), 0);
+    const tok = pages.reduce((a, p) => a + Math.ceil((p.width || 0) / 28) * Math.ceil((p.height || 0) / 28), 0);
     if (i > 0) times.push(performance.now() - t0);
-    out = { pages: pages.length, imageTokens: Math.round(px / 750), stage1Chars: [...compressed].length };
+    out = { pages: pages.length, imageTokens: tok, stage1Chars: [...compressed].length };
   }
   return { medianMs: median(times), ...out };
 }
@@ -236,7 +236,7 @@ ${bigLog ? `<div class="card"><h2>Full-scale distill · real 126 MB rclone sync 
 <div class="card"><h2>Methodology</h2><p class="note">
 <b>Inputs are real</b>: pxpipe source files (code), pxpipe docs (prose), this machine's live journal, and a 126 MB rclone sync log. Both engines receive byte-identical files.<br>
 <b>Timing is in-process</b> for both engines (rust: <code>tanuki-context bench</code>; node: same functions the reference MCP calls), median of ${RUNS} runs after one discarded warmup — process startup is excluded from op timings and reported separately in the server-weight table.<br>
-<b>Pipeline per row</b>: optional distill (stage 0) → ladder level (stage 1) → pxpipe imaging (stage 2, PNG encode included). Tokens = pixels/750 (Anthropic's pixel pricing); baseline = raw text at chars/4.<br>
+<b>Pipeline per row</b>: optional distill (stage 0) → ladder level (stage 1) → pxpipe imaging (stage 2, PNG encode included). Tokens = 28-px patch grid, ⌈w/28⌉×⌈h/28⌉ per page (Anthropic's image pricing); baseline = raw text at chars/4.<br>
 <b>Parity is asserted, not assumed</b>: every row compares pages + image tokens across engines (✓), and the 126 MB distill compares suppression counts. A mismatch would be flagged in red.<br>
 Levels: 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up, code/IDs/hashes/paths are never reworded; distill always keeps error/warn lines verbatim.</p></div>
 </div></body></html>`;

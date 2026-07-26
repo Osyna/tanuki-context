@@ -3,6 +3,14 @@
 What this project is, why each piece exists, and the logic behind it.
 Companion to [README.md](README.md) (usage) — this is the *why*.
 
+> **Branch note** — `main` is the TypeScript npm package (`src/*.ts`); this
+> `rust` branch carries the same pipeline (`src/*.rs`) as a single static
+> binary and is kept at semantic parity — same patch-grid token model, same
+> `[U+HEX]` escapes, same atlas, same proxy rules — verified byte-identical
+> on estimate/render JSON against the TS CLI. Only the npm packaging and the
+> Claude Agent SDK glue are TS-only and ship from `main`. Every design
+> decision below applies to both.
+
 ## 1. Origin
 
 [pxpipe](https://github.com/teamchong/pxpipe) exploits one pricing fact: an
@@ -23,6 +31,8 @@ So the design moved from **implicit** (proxy rewrites everything) to
 **explicit** (the model calls a tool when it wants the cut). First as a node
 MCP wrapping pxpipe's library, then — this repo — as a single-binary Rust
 rewrite. The imaging stage keeps the `pxpipe` name: the mechanic is theirs.
+(Implicit mode later returned with rules — see "the middlebox, readmitted"
+below.)
 
 ## 2. The pipeline
 
@@ -113,7 +123,7 @@ A faithful port of pxpipe's production dense renderer:
   first so the sentinel can't collide.
 - **wrap** at 312 columns, by codepoint; wide (CJK) glyphs take 2 cells.
 - **page**: ≤90 rows / 28,080 chars per page → 1568×728 px max (Anthropic's
-  no-resample bound; ≈1,522 tokens/page at pixels/750).
+  no-resample bound; 56×26 = 1,456 tokens/page under the 28-px patch grid).
 - **blit**: 5×8 anti-aliased glyph cells (max-blend coverage), invert to
   black-on-white, grayscale PNG.
 
@@ -124,8 +134,21 @@ approximate. On top of pxpipe's BMP coverage (Spleen 5×8 + Unifont) we add
 the **astral planes** from GNU `unifont_upper` (16×16/8×16 1-bit bitmaps
 box-filtered to the same 10×8/5×8 AA cells), so emoji and plane-1+ symbols
 render instead of dropping — the one place tanuki deliberately exceeds the
-reference. Only unassigned codepoints fall back to `▯`, and they're counted
-and reported, never silent.
+reference. Unassigned codepoints become readable `[U+HEX]` escapes (pxpipe
+v0.11 semantics); invisible formatting codepoints (zero-width, variation
+selectors, combining marks) blit as blank cells. Nothing drops silently.
+
+**pxpipe v0.11 sync** (adopted upstream changes, 2026-07): image tokens are
+billed by Anthropic's documented **28×28-px patch grid** — `Σ ⌈w/28⌉×⌈h/28⌉`
+per page — replacing the older `pixels/750` fit (a ~4–5% continuous
+approximation of the same 784 px²/patch grid; pages never exceed the standard
+tier's 1568-px/1568-token limits, so the pre-billing downscale never fires).
+The atlas carries upstream's **glyph surgery**: Spleen 5×8 `K` repainted
+diagonal-legged (was Hamming-1 from `H`, the atlas's worst confusable; now
+Hamming-8 — upstream's paired A/B cut K→H confusions 42→1). And missing
+glyphs escape as `[U+HEX]` per upstream #96. The TS `main` branch and this
+branch bill the same grid; estimate/render JSON is byte-identical across the
+two.
 
 ### Stage 2 extensions (tanuki-only, parity-safe)
 
@@ -142,8 +165,9 @@ and reproduced by `reference/methods-report.mjs`.
   1568-px-wide row. Reconstruction stays byte-exact (`↵`=newline, `→`=tab,
   `⇥N`=indent); pre-existing `→`/`⇥` are swapped to literal stand-ins first,
   exactly as reflow already does for `↵`. A round-trip unit test proves it.
-  Measured: **−14% image-tokens on source code, −0% on prose** — prose has no
-  indent runs to pack, and width-trim only helps pages no row fills.
+  Measured: **−15% image-tokens on source code, −0% on prose** — prose has no
+  indent runs to pack, width-trim only helps pages no row fills, and the
+  28-px patch grid quantizes away part of the raw pixel-trim win.
 
 - **codebook** (opt-in) — the direct, legitimate inversion of the base64
   "models negotiate an encoding in-context" finding: not obscurity but a
@@ -151,23 +175,24 @@ and reproduced by `reference/methods-report.mjs`.
   ladder, recurring long tokens and path prefixes (≥12 chars, ≥3×, net-positive
   only) are replaced by single-cell sigils defined once in a trailing `·legend·`
   line. Because every atlas codepoint costs one flat cell, a 60-char path prefix
-  seen 30× collapses to 30 cells + one legend entry. Measured: **−37% on a
-  path-heavy log**; ~0 on code/prose (nothing repeats enough to beat the legend
-  cost). Validated for the oversight property the paper actually worries about:
+  seen 30× collapses to 30 cells + one legend entry. Measured: **−38% on a
+  path-heavy log**, **−20% on source code stacked with pack** (repo paths and
+  long identifiers clear the legend cost); ~0 on plain prose.
+  Validated for the oversight property the paper actually worries about:
   a vision model read the `·legend·` line and reconstructed the first log line
   **byte-exact** — model-readable and inspectable, not a covert channel.
 
 - **tiny 4×6 font** (opt-in, experimental) — the "the tokenizer itself" lever.
   The same atlas glyphs are box-filtered from the 5×8 cell into a 4×6 one
   (390 cols × 120 rows/page vs 312 × 90), so the same text needs fewer pixels.
-  Measured: **−38–40% image-tokens** across every sample kind. The cost is the
+  Measured: **−36–40% image-tokens** across every sample kind. The cost is the
   density↔accuracy frontier the report names: at 4-px width a vision read-back
   scored **99.7% char-accuracy** with a single `M`→`H` glyph confusion. So it
   ships opt-in and gated — fine for logs and bulk prose; verify before trusting
   it with `M_`/`H_`-sensitive identifiers.
 
 Stacked (`pack + codebook + tiny`) the log class reaches **−62%** below the
-pxpipe baseline, source code **−51%**, prose **−38%**.
+pxpipe baseline, source code **−50%**, prose **−36%** (28-px patch model).
 
 Two further properties:
 
@@ -179,6 +204,35 @@ Two further properties:
   reason as before — it deletes tokens it *judges* unimportant, the
   silent-confabulation risk. pack and codebook are deterministic and
   reversible; that line holds.
+
+### Implicit mode — the middlebox, readmitted with rules
+
+Section 1 explains why we left the proxy model: pxpipe relocates the system
+prompt into a user-turn wrapper that reads like an injection, and an agent
+refused it. That verdict was about the *relocation*, not about middleboxes as
+such. `tanuki-context proxy` brings the deployment shape back (point
+`ANTHROPIC_BASE_URL` at it, zero client changes) under five rules that keep
+the rewrite recognizable and consensual in spirit:
+
+1. system prompt and tool definitions are never touched;
+2. nothing moves between roles or positions — an oversized text block becomes
+   an overt `[tanuki-context: …]` marker plus PNG pages *in the same slot*
+   (Anthropic allows image blocks in user content and inside tool_results);
+3. the latest message is never imaged (the model may need to quote it);
+4. `cache_control` blocks are never touched (rewriting defeats their cache);
+5. imaging happens only when `estimate` wins by a margin (default ≥25% and
+   ≥300 tokens); everything else forwards byte-for-byte.
+
+Responses stream through untouched (a thread per request, so a long SSE
+stream never blocks the next call); usage is scraped from the stream and the
+savings row appended to the same events log `tanuki_stats` reads, with the
+baseline defined as actual billed tokens plus the estimated text cost of the
+imaged blocks. Explicit MCP mode remains the default and the recommendation;
+the proxy exists for clients you can't modify. The five rules and the wire
+behaviour are covered by `src/proxy.rs`'s unit tests (transform rules at the
+JSON level, plus a live proxy-to-mock-upstream round trip asserting
+passthrough and the events row). Server: `tiny_http`; client: `ureq` with
+rustls — the two deliberate dependency additions of this branch.
 
 ## 3. Why Rust (measured, not vibes)
 
@@ -195,7 +249,7 @@ win over Rust.
 | full pipeline per level | 85 ms – 3.05 s | 59 ms – 1.97 s (**1.4–1.7×**) |
 | MCP first response | ~150 ms | **~3–16 ms** |
 | server RSS | 177 MB | **3 MB** |
-| deployable | node + node_modules | **one ~3.3 MB static binary** |
+| deployable | node + node_modules | **one 5.7 MB static binary** (3.3 MB before the proxy's rustls) |
 
 Two implementation choices keep it light:
 
@@ -215,11 +269,15 @@ startup (~10×), memory (~60×), and deployment (one binary).
 ## 4. Parity as a discipline
 
 The node implementation didn't get deleted — it moved to
-`reference/node-mcp/` and became the test oracle. Two harnesses:
+`reference/node-mcp/` and became the test oracle. Three harnesses:
 
 - `reference/parity.mjs` — same input through both engines; asserts distill
   counts (runs, exact-tier, template-tier, important-kept) and render
   geometry (pages, image tokens).
+- `reference/parity-ts.mjs` (lives on `main`) — the TS implementation vs this
+  branch's binary: distill stats deep-equal, every estimate knob combo,
+  render JSON + pixel-exact PNGs, and a full MCP session. Both sides bill
+  the same 28-px patch grid, so estimate JSON is compared field-for-field.
 - `reference/benchmark.mjs` — the full timed matrix (every level × every
   sample, both engines in-process, median of 3 with discarded warmup) →
   `benchmark-report.html`. Parity is asserted per row: **25/25 pass**.
@@ -238,7 +296,7 @@ Getting to *identical* (not "close") surfaced three real porting lessons:
    tier byte-identical (560,779 = 560,779).
 3. **Geometry is data, not code.** Extracting the atlas instead of
    re-rasterizing the fonts is what made render parity trivially exact —
-   same coverage bytes in, same pixels out, same pixels/750 out.
+   same coverage bytes in, same pixels out, same patch count out.
 
 ## 5. Fidelity model (what can be trusted when)
 
@@ -251,6 +309,8 @@ Getting to *identical* (not "close") surfaced three real porting lessons:
 | ladder L4 | prose is gist-only — never use where verbatim prose matters |
 | codebook | reversible: every sigil is defined in the trailing `·legend·` line; validated byte-exact by a vision read-back |
 | tiny 4×6 font | legible but lossy at the glyph level (99.7% char-accuracy measured; `M`/`H` confusable) — opt-in, verify before trusting exact identifiers |
+| unassigned codepoints | render as readable `[U+HEX]` escapes (invisible formatting codepoints blit as blank cells) — nothing drops silently |
+| proxy mode | system prompt/tools/latest message/`cache_control` never touched; in-place rewrites only, marked overtly; text-cheaper requests forward byte-for-byte |
 | stats | savings counted against *all* billed input (input + cache reads + cache creates) — ignoring cache reads would fake the number |
 
 That last row is a story of its own: the first stats implementation read
@@ -262,8 +322,11 @@ this project reports now names its denominator.
 
 - Parallelize distill's masking pass (rayon) — it's embarrassingly parallel
   per line; single-threaded was chosen for binary weight.
-- A native `transform` tool (full `/v1/messages` body rewrite) — currently
-  only the reference node MCP has it; tanuki covers render/estimate/
-  distill/compress/stats.
+- **High-res vision tier.** Claude 4.7+ models accept 2576-px / 4784-token
+  pages; a `tier` knob would nearly double chars-per-page where the reader
+  supports it. Needs a transcription-accuracy A/B first, same as tiny font.
+- **Multi-provider proxy.** The middlebox speaks Anthropic `/v1/messages`
+  only; OpenAI/Gemini image pricing differs enough (32-px patches, tile
+  models) that each upstream needs its own gate math.
 - Color/class-tick render variants (pxpipe has them behind flags; the
   production dense path we ported doesn't use them).
