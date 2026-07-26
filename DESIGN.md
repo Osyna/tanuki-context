@@ -275,7 +275,9 @@ resident memory are the product**, not just throughput. Before the first
 rewrite, options were benchmarked on this machine's real workload (126 MB
 log distill): node 4.20 s, bun 3.48 s, rust 2.44 s (2.31 s final). Go was
 ruled out on regex-engine throughput; Zig/C on ecosystem risk for zero
-additional win over Rust. The Rust numbers against the node reference:
+additional win over Rust. The Rust numbers against the node reference, as
+measured at that first rewrite (the binary has since grown to 5.7 MB with
+rustls for the proxy):
 
 | metric | node reference | tanuki (rust) |
 |---|---:|---:|
@@ -301,10 +303,11 @@ dominates and both zlib implementations are good. The decisive wins were
 startup (~10×), memory (~60×), and deployment (one binary).
 
 Then distribution won: `npx tanuki-context` beats "download a binary for
-your platform" for MCP users, and a careful TS port matched Rust where it
-matters — 113 MB distill 3.35 s (bun) vs 3.27 s (rust); spawn→first MCP
-response 86 ms (bun) / 106 ms (node) vs the node reference's 152 ms; idle
-RSS 50/80 MB vs 177 MB; 0.97 MB tarball, zero runtime dependencies. So
+your platform" for MCP users, and a careful TS port stayed close enough to
+Rust where it matters. Re-measured 2026-07-26: 12 MB distill 0.31 s (bun) /
+0.42 s (node) vs 0.28 s (rust); spawn to first MCP response 27/35 ms vs the
+node reference's 158 ms; idle RSS 50/87 MB vs 177 MB; 0.98 MB tarball, zero
+runtime dependencies. So
 `main` became the 1:1 TypeScript port (proven byte/pixel-identical by
 `reference/parity-ts.mjs`), and the Rust implementation lives on as the
 `rust` branch, maintained at parity for anyone who wants the static binary.
