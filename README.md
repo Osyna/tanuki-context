@@ -53,6 +53,8 @@ real pxpipe output on the default path (`reference/parity.mjs`).
 - `tanuki_distill` — stage 0 alone (logs stay text; error/warn lines always verbatim)
 - `tanuki_compress` — stage 1 alone (levels 0–4; code/IDs/hashes/paths verbatim from L2 up)
 - `tanuki_stats` — honest savings summary from `~/.pxpipe/events.jsonl` (env `TANUKI_EVENTS`)
+- `tanuki_stash` — park text in `$TANUKI_STASH`/`~/.tanuki/stash` (content-addressed, sha256/12); returns a ~300-token map: distill stats, top repeats, first/last lines, the id
+- `tanuki_fetch` — pull a slice by `query` regex or `lines "a-b"`; auto-imaged when pages win by ≥25%/300 tokens (≤6 pages), text otherwise
 
 ### Density knobs (measured, image-tokens vs the pxpipe-faithful baseline)
 
@@ -77,6 +79,8 @@ tanuki-context distill <file> [query]   # stats JSON to stdout
 tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
 tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]
 tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
+tanuki-context stash <file>             # park text, print the map + id
+tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
 ```
 
 ## Implicit mode (proxy)
