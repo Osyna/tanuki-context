@@ -124,8 +124,10 @@ for (const file of files) {
     check(`estimate ${c.join(" ")}`, deq(eTs, eRs), `ts=${JSON.stringify(eTs)}\n        rs=${JSON.stringify(eRs)}`);
   }
 
-  // render CLI: JSON + pixel-exact PNGs (default pack and --no-pack)
-  for (const extra of [[], ["--no-pack"]]) {
+  // render CLI: JSON + pixel-exact PNGs. --distill included because the
+  // summary tie-order bug (rust HashMap iteration) only showed on distilled
+  // renders — the pixel compare must cover that path.
+  for (const extra of [[], ["--no-pack"], ["--distill"], ["--distill", "--codebook"]]) {
     const oTs = path.join(tmp, `ts-${name}${extra.join("")}`);
     const oRs = path.join(tmp, `rs-${name}${extra.join("")}`);
     const rTs = JSON.parse(tsRun(["render", file, "0", oTs, ...extra]));

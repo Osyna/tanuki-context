@@ -18,7 +18,7 @@ import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText } from "./render.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.2";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------- serde_json parity
@@ -608,7 +608,7 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]",
+          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
@@ -617,7 +617,7 @@ export function main(): void {
       const useCb = argv.includes("--codebook");
       const fi = argv.indexOf("--font");
       const font = parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal");
-      const p = stage01(text, level, false, null, useCb);
+      const p = stage01(text, level, argv.includes("--distill"), null, useCb);
       const r = renderText(p.compressed, true, pack, font);
       const tok = r.tokens;
       process.stdout.write(
