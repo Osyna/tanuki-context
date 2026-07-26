@@ -73,6 +73,63 @@ No AI client at all, just curious what it would save you:
 npx tanuki-context estimate some-big-file.log 0
 ```
 
+## Installing it: two ways, same tools
+
+**npm (the default).** `npx -y tanuki-context` downloads a 0.98 MB tarball
+with zero dependencies and starts the MCP server on stdio. That is the
+whole install. Your client spawns one short-lived process per session
+(35 ms to first response under node, 27 under bun); the model calls the
+seven `tanuki_*` tools; pages come back inline as PNG blocks. On disk it
+touches exactly two places, both yours to delete: `~/.tanuki/stash` for
+stashed text and `~/.pxpipe/events.jsonl` for the savings log.
+
+**cargo (the static binary).** No node at all:
+
+```
+cargo install --git https://github.com/Osyna/tanuki-context --branch rust
+```
+
+One 5.7 MB binary, same seven tools, same numbers — a 103-check parity
+harness holds the two engines to byte-identical JSON and pixel-identical
+PNGs on every release. It spawns in 0.4 ms and idles at 3.8 MB RSS, which
+matters when every session forks its own server. Point any client config
+at `"command": "tanuki-context"` instead of the npx line and nothing else
+changes.
+
+## Should you use it at all?
+
+Reach for tanuki when:
+
+- **bulky text is about to enter context** — logs, build output, command
+  results, long docs, anything past roughly 2,000 tokens;
+- **an agent keeps re-reading big files** — the proxy dedupes exact
+  repeats, and stash turns re-reads into cheap fetches;
+- **a long session is running out of context** — pages carry ~4x more
+  characters per token, and the proxy can image old bulky turns in place;
+- **you cannot change the client** — the proxy mode needs only a base-URL
+  export.
+
+Leave it alone when:
+
+- **your model cannot read images.** Hard requirement. Everything here
+  assumes a vision-capable reader (any current Claude model qualifies).
+- **the exact bytes must survive a round trip** — secrets, hashes, code
+  the model is about to edit. Rendering is exact, but model read-back of
+  dense random strings is not guaranteed (pxpipe measured 13/15 on
+  12-char hex). Keep those in text.
+- **the content is small.** A 500-token snippet is not worth a modality
+  switch even when the math technically favors it; `estimate` and the
+  proxy gate both say so.
+- **your bill is output-dominated.** tanuki cuts input tokens only. If
+  most of your spend is the model's own output, fix that first.
+- **you are not on Anthropic pricing.** Verdicts use Anthropic's
+  28-px patch grid. OpenAI and Google price images differently (tiles,
+  fixed per-image rates), so every verdict needs re-deriving before you
+  trust it there.
+- **the bulk is already prompt-cached.** Cache reads cost a tenth of
+  fresh input; imaging content that was riding the cache can be a net
+  loss. The proxy never touches `cache_control` blocks for this reason.
+
 ## The three ways to run it
 
 **Explicit (MCP tools) — the default and the recommendation.** Your AI gets
@@ -460,6 +517,20 @@ pi install npm:tanuki-context
 ```
 claude mcp add tanuki-context -- npx -y tanuki-context
 ```
+
+The package also ships a **skill** — a short instruction file that teaches
+the model the whole workflow (estimate first, read `recommend`, stash big
+references, the page decode grammar, the do-nots) without you prompting
+any of it. Install it once and the tools get used correctly on their own:
+
+```
+npm i -g tanuki-context   # or any install that gives you the package on disk
+cp -r "$(npm root -g)/tanuki-context/skills/tanuki-context" ~/.claude/skills/
+```
+
+From a checkout it is just `cp -r skills/tanuki-context ~/.claude/skills/`.
+The same file works for any skill-aware harness (OMP picks it up from the
+same directory).
 
 **Rust instead of Node?** Same pipeline, same numbers, one 5.7 MB static
 binary:
