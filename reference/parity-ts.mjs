@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Parity harness: TS port vs the rust binary. Byte-level where possible.
 //   node reference/parity-ts.mjs [file...]
-// Env: TANUKI_BIN (rust binary), TANUKI_TS ("bun src/main.ts" | "node dist/cli.js")
+// Env: TANUKI_BIN (rust binary), TANUKI_TS ("bun src/cli.ts" | "node dist/cli.js")
 import { readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { inflateSync } from "node:zlib";
@@ -13,7 +13,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
 const BIN = process.env.TANUKI_BIN || path.join(ROOT, "target", "release", "tanuki-context");
 const TS = (process.env.TANUKI_TS ||
-  (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/main.ts")).split(" ");
+  (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/cli.ts")).split(" ");
 const tsRun = (args, opts = {}) =>
   execFileSync(TS[0], [...TS.slice(1), ...args], { encoding: "utf8", maxBuffer: 1 << 28, cwd: ROOT, ...opts });
 const rsRun = (args, opts = {}) =>

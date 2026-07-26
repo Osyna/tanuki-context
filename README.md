@@ -155,6 +155,56 @@ Knobs: `--port N` `--upstream URL` `--level 0-4` `--distill` `--codebook`
 `--font tiny` `--min-chars N` `--ratio X` `--min-save N` `--max-pages N`.
 Defaults are conservative: level 0, no distill, no codebook, normal font.
 
+## Claude Agent SDK
+
+`tanuki-context/agent` makes the whole pipeline a one-liner for agents built
+on the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript),
+in either of two shapes.
+
+External (subprocess per session, zero extra dependencies):
+
+```ts
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { withTanuki } from "tanuki-context/agent";
+
+for await (const msg of query({ prompt: task, options: withTanuki({ model: "claude-..." }) })) {
+  // agent now has tanuki_estimate / tanuki_render / tanuki_distill / ...
+}
+```
+
+In-process (no subprocess; one server instance shared by a whole team of
+agents in the same process):
+
+```ts
+import { tanukiSdkServer, tanukiAllowedTools, TANUKI_INSTRUCTIONS } from "tanuki-context/agent";
+
+const tanuki = await tanukiSdkServer(); // needs the SDK + zod, which agent projects already have
+const options = {
+  mcpServers: { tanuki },
+  allowedTools: tanukiAllowedTools(),
+  systemPrompt: { type: "preset", preset: "claude_code", append: TANUKI_INSTRUCTIONS },
+};
+// hand the same `options` to every agent in the team
+```
+
+`withTanuki(options?)` merges into existing options without clobbering other
+servers or allowed tools; `TANUKI_INSTRUCTIONS` is a canned prompt block that
+teaches agents the estimate-first workflow and the page decode grammar. The
+core package stays zero-dependency: the SDK and zod are optional peers,
+touched only inside `tanukiSdkServer()`.
+
+Python SDK: plain dict config, no extra package needed:
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    mcp_servers={"tanuki": {"command": "npx", "args": ["-y", "tanuki-context"]}},
+    allowed_tools=[f"mcp__tanuki__tanuki_{t}" for t in
+                   ["render", "estimate", "distill", "compress", "stats"]],
+)
+```
+
 ## CLI
 
 ```
@@ -188,7 +238,8 @@ box-filtered to the same cells.
 
 | path                  | role                                                                     |
 | --------------------- | ------------------------------------------------------------------------ |
-| `src/main.ts`         | MCP stdio server (hand-rolled JSON-RPC) + CLI                             |
+| `src/main.ts`         | MCP stdio server (hand-rolled JSON-RPC) + CLI (entry: `src/cli.ts`)       |
+| `src/agent.ts`        | Claude Agent SDK glue: `withTanuki`, in-process `tanukiSdkServer`         |
 | `src/distill.ts`      | stage 0: 3-pass log distiller (runs, blocks, template near-dupes, query) |
 | `src/ladder.ts`       | stage 1: levels 0-4 with the exact-recall guard                           |
 | `src/codebook.ts`     | repeated tokens and path prefixes to sigils plus `·legend·` (opt-in)      |
@@ -206,7 +257,7 @@ Architecture notes and the reasoning behind each stage live in
 
 ## Build
 
-Runs from source with Bun (`bun src/main.ts`) or as the bundled,
+Runs from source with Bun (`bun src/cli.ts`) or as the bundled,
 Node-compatible single file:
 
 ```
