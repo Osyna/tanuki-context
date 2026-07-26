@@ -17,6 +17,7 @@
 use crate::atlas::{self, CELL_H, CELL_W};
 use crate::png::encode_gray_png;
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 pub const PAD_X: usize = 4;
@@ -249,7 +250,39 @@ pub fn split_pages(lines: Vec<String>, max_lines: usize, max_chars: usize) -> Ve
     pages
 }
 
-/// Shared front half of render/estimate: (neutralize -> reflow ->) wrap -> page.
+/// pxpipe v0.11 (#96): a codepoint absent from the atlas renders as a readable
+/// `[U+HEX]` escape instead of a lost cell — except invisible/formatting
+/// codepoints, which stay (and blit as a blank cell, not a ▯).
+pub fn is_escape_exempt(cp: u32) -> bool {
+    cp < 0x20 // C0 controls (tabs are expanded before this runs)
+        || (0x7f..=0x9f).contains(&cp) // DEL + C1 controls
+        || (0x0300..=0x036f).contains(&cp) // combining diacritics
+        || matches!(cp, 0x200b | 0x200c | 0x200d | 0x2060 | 0xfeff) // zero-width / word-joiner / BOM
+        || (0xfe00..=0xfe0f).contains(&cp) // variation selectors
+        || (0xe0100..=0xe01ef).contains(&cp) // variation selectors supplement
+}
+
+/// Escape atlas-missing codepoints as `[U+HEX]` so wrap math and the blitter
+/// see the readable text. Borrows when nothing is missing (the common case).
+pub fn escape_missing_glyphs(text: &str) -> Cow<'_, str> {
+    let mut out: Option<String> = None; // lazily materialized on first miss
+    for (i, ch) in text.char_indices() {
+        let cp = ch as u32;
+        if atlas::rank(cp).is_none() && !is_escape_exempt(cp) {
+            use std::fmt::Write as _;
+            let s = out.get_or_insert_with(|| text[..i].to_string());
+            let _ = write!(s, "[U+{cp:X}]");
+        } else if let Some(s) = &mut out {
+            s.push(ch);
+        }
+    }
+    match out {
+        Some(s) => Cow::Owned(s),
+        None => Cow::Borrowed(text),
+    }
+}
+
+/// Shared front half of render/estimate: (neutralize -> reflow ->) escape -> wrap -> page.
 fn prep_pages(text: &str, use_reflow: bool, pack: bool, g: Geom) -> Vec<Vec<String>> {
     let prepped: String = if use_reflow {
         if pack {
@@ -260,7 +293,7 @@ fn prep_pages(text: &str, use_reflow: bool, pack: bool, g: Geom) -> Vec<Vec<Stri
     } else {
         text.to_string()
     };
-    let lines = wrap_lines(&prepped, g.cols);
+    let lines = wrap_lines(&escape_missing_glyphs(&prepped), g.cols);
     split_pages(lines, g.max_lines, g.max_chars)
 }
 
@@ -341,11 +374,15 @@ fn render_page(lines: &[String], g: Geom, pack: bool, font: Font) -> Page {
             let base_x = PAD_X + col * g.cw;
             let mut advance = blit(&mut fb, width, base_x, base_y, ch as u32, g, font);
             if advance == 0 {
-                dropped += 1;
-                if ch != ' ' {
-                    blit(&mut fb, width, base_x, base_y, FALLBACK as u32, g, font);
-                }
                 advance = 1;
+                if is_escape_exempt(ch as u32) {
+                    // invisible formatting char: blank cell, not content loss
+                } else {
+                    dropped += 1;
+                    if ch != ' ' {
+                        blit(&mut fb, width, base_x, base_y, FALLBACK as u32, g, font);
+                    }
+                }
             }
             col += advance;
         }
@@ -362,9 +399,11 @@ fn render_page(lines: &[String], g: Geom, pack: bool, font: Font) -> Page {
     }
 }
 
+#[allow(dead_code)] // `pixels` is read by unit tests only; billing moved to `tokens`
 pub struct Rendered {
     pub pages: Vec<Page>,
-    pub pixels: u64,
+    pub pixels: u64, // kept internally (tests, future callers); billing uses `tokens`
+    pub tokens: u64,
     pub dropped: usize,
 }
 
@@ -376,17 +415,21 @@ pub fn render_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Rend
         .map(|p| render_page(p, g, pack, font))
         .collect();
     let pixels = pages.iter().map(|p| (p.width * p.height) as u64).sum();
+    let tokens = pages.iter().map(|p| patch_tokens(p.width, p.height)).sum();
     let dropped = pages.iter().map(|p| p.dropped).sum();
     Rendered {
         pages,
         pixels,
+        tokens,
         dropped,
     }
 }
 
+#[allow(dead_code)] // `pixels` is read by unit tests only; billing moved to `tokens`
 pub struct Estimated {
     pub pages: usize,
-    pub pixels: u64,
+    pub pixels: u64, // kept internally; billing uses `tokens`
+    pub tokens: u64,
 }
 
 /// Same geometry as render_text without blitting/encoding — exact, fast,
@@ -394,19 +437,27 @@ pub struct Estimated {
 pub fn estimate_text(text: &str, use_reflow: bool, pack: bool, font: Font) -> Estimated {
     let g = geom(font);
     let page_lines = prep_pages(text, use_reflow, pack, g);
-    let pixels = page_lines
-        .iter()
-        .map(|p| (page_width(p, g, pack) * page_height(p.len(), g)) as u64)
-        .sum();
+    let (mut pixels, mut tokens) = (0u64, 0u64);
+    for p in &page_lines {
+        let (w, h) = (page_width(p, g, pack), page_height(p.len(), g));
+        pixels += (w * h) as u64;
+        tokens += patch_tokens(w, h);
+    }
     Estimated {
         pages: page_lines.len(),
         pixels,
+        tokens,
     }
 }
 
-/// Session convention: image tokens = round(pixels / 750).
-pub fn image_tokens(pixels: u64) -> u64 {
-    ((pixels as f64) / 750.0).round() as u64
+/// Anthropic bills by 28×28-px PATCHES: ⌈w/28⌉×⌈h/28⌉ visual tokens (the old
+/// pixels/750 was a ~4-5% continuous approximation of the same 784 px²/patch
+/// grid). Pages are always ≤ 1568×728 = 56×26 = 1456 patches, inside the
+/// standard tier's long-edge (1568) and token (1568) limits, so the documented
+/// pre-billing downscale never fires and the raw patch count IS the cost.
+pub const PATCH_PX: usize = 28;
+pub fn patch_tokens(width: usize, height: usize) -> u64 {
+    (width.div_ceil(PATCH_PX) * height.div_ceil(PATCH_PX)) as u64
 }
 
 #[cfg(test)]
@@ -488,5 +539,23 @@ mod tests {
         let g = geom(Font::Normal);
         let full = 2 * PAD_X + g.cols * g.cw;
         assert_eq!(full, MAX_WIDTH_PX);
+    }
+
+    #[test]
+    fn patch_grid_token_math() {
+        // full page 1568×728 = 56×26 patches; a width-trimmed 353×16 page = 13×1.
+        assert_eq!(patch_tokens(MAX_WIDTH_PX, MAX_HEIGHT_PX), 1456);
+        assert_eq!(patch_tokens(353, 16), 13);
+    }
+
+    #[test]
+    fn missing_glyphs_escape_readable() {
+        // U+10FFFE is a noncharacter (never in the atlas) -> readable escape;
+        // exempt invisibles (ZWSP) stay put.
+        assert_eq!(escape_missing_glyphs("a\u{10FFFE}b"), "a[U+10FFFE]b");
+        assert_eq!(escape_missing_glyphs("a\u{200B}b"), "a\u{200B}b");
+        // wrap math sees the escape: 9 chars still fit one page/row.
+        let est = estimate_text("x\u{10FFFE}", true, true, Font::Normal);
+        assert_eq!(est.pages, 1);
     }
 }

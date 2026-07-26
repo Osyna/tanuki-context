@@ -6,12 +6,14 @@
 //! CLI: tanuki-context distill <file> [query]
 //!      tanuki-context estimate <file> [level] [--distill]
 //!      tanuki-context render <file> [level] [outdir]
+//!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
 mod atlas;
 mod codebook;
 mod distill;
 mod ladder;
 mod png;
+mod proxy;
 mod render;
 mod stats;
 
@@ -103,7 +105,7 @@ fn tool_estimate(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
     let font = render::Font::parse(a.font);
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
-    let img_tok = render::image_tokens(est.pixels);
+    let img_tok = est.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     json!({
@@ -131,7 +133,7 @@ fn tool_render(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
-    let img_tok = render::image_tokens(r.pixels);
+    let img_tok = r.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     let mut summary = String::new();
@@ -366,7 +368,7 @@ fn main() {
             );
             let p = stage01(&text, level, false, None, use_cb);
             let r = render::render_text(&p.compressed, true, pack, font);
-            let tok = render::image_tokens(r.pixels);
+            let tok = r.tokens;
             println!(
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
@@ -405,7 +407,7 @@ fn main() {
                         let r = render::render_text(&p.compressed, true, false, render::Font::Normal);
                         result = json!({
                             "pages": r.pages.len(),
-                            "imageTokens": render::image_tokens(r.pixels),
+                            "imageTokens": r.tokens,
                             "stage1Chars": p.compressed.chars().count(),
                             "dropped": r.dropped,
                         });
@@ -421,9 +423,41 @@ fn main() {
                 json!({ "medianMs": times[times.len() / 2], "runs": runs, "result": result })
             );
         }
+        Some("proxy") => {
+            // tanuki-context proxy [--port N] [--upstream URL] [--level N] [--distill]
+            //   [--codebook] [--font tiny] [--min-chars N] [--ratio X] [--min-save N] [--max-pages N]
+            let num = |flag: &str, dflt: f64| -> f64 {
+                args.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(dflt)
+            };
+            let sval = |flag: &str| -> Option<&String> {
+                args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1))
+            };
+            let flag = |n: &str| args.iter().any(|a| a == n);
+            let d = proxy::ProxyCfg::default();
+            proxy::run(proxy::ProxyCfg {
+                port: num("--port", d.port as f64) as u16,
+                upstream: sval("--upstream")
+                    .cloned()
+                    .or_else(|| std::env::var("TANUKI_UPSTREAM").ok())
+                    .unwrap_or(d.upstream),
+                level: num("--level", d.level as f64) as u8,
+                distill: flag("--distill"),
+                codebook: flag("--codebook"),
+                font: render::Font::parse(sval("--font").map(String::as_str).unwrap_or("normal")),
+                min_chars: num("--min-chars", d.min_chars as f64) as usize,
+                ratio: num("--ratio", d.ratio),
+                min_save: num("--min-save", d.min_save as f64) as i64,
+                max_pages: num("--max-pages", d.max_pages as f64) as usize,
+            });
+        }
         Some("serve") | None => serve(),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|distill|estimate|render] ...");
+            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render] ...");
             std::process::exit(1);
         }
     }

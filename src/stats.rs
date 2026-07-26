@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-fn events_path() -> PathBuf {
+pub(crate) fn events_path() -> PathBuf {
     if let Ok(p) = std::env::var("TANUKI_EVENTS") {
         return PathBuf::from(p);
     }
