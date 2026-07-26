@@ -106,34 +106,38 @@ fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
     }
 }
 
-/// Cheapest safe knob set at level 0, computed from the ORIGINAL text and
-/// independent of the requested knobs. Candidates in fixed order: plain,
-/// codebook, distill, distill+codebook; the first strict minimum of image
-/// tokens wins, so ties keep the earlier (fewer-knob) combo.
+/// Reversible-only headline walk at level 0, computed from the ORIGINAL text
+/// and independent of the requested knobs. Candidates in fixed order: plain,
+/// codebook; the first strict minimum of image tokens wins, so ties keep the
+/// earlier (fewer-knob) combo. Distill is priced separately under
+/// `withDistill` because it is lossy.
 fn recommend(text: &str) -> Value {
     use std::borrow::Cow;
-    let distilled = distill::distill_log(text, None, 2).distilled;
-    let mut best: Option<(bool, bool, render::Estimated, Cow<str>)> = None;
-    for (d, cb) in [(false, false), (false, true), (true, false), (true, true)] {
-        let base = if d { distilled.as_str() } else { text };
-        let cand: Cow<str> = if cb {
-            Cow::Owned(codebook::apply(base).text)
-        } else {
-            Cow::Borrowed(base)
-        };
-        let est = render::estimate_text(&cand, true, true, render::Font::Normal);
-        if best.as_ref().map_or(true, |b| est.tokens < b.2.tokens) {
-            best = Some((d, cb, est, cand));
+    fn walk(base: &str) -> (bool, render::Estimated, Cow<'_, str>) {
+        let mut best: Option<(bool, render::Estimated, Cow<str>)> = None;
+        for cb in [false, true] {
+            let cand: Cow<str> = if cb {
+                Cow::Owned(codebook::apply(base).text)
+            } else {
+                Cow::Borrowed(base)
+            };
+            let est = render::estimate_text(&cand, true, true, render::Font::Normal);
+            if best.as_ref().map_or(true, |b| est.tokens < b.1.tokens) {
+                best = Some((cb, est, cand));
+            }
         }
+        best.unwrap()
     }
-    let (d, cb, est, winner) = best.unwrap();
+    let (cb, est, winner) = walk(text);
     let tiny = render::estimate_text(&winner, true, true, render::Font::Tiny);
+    let distilled = distill::distill_log(text, None, 2).distilled;
+    let (dcb, dest, _) = walk(&distilled);
     json!({
         "codebook": cb,
-        "distill": d,
         "imageTokens": est.tokens,
         "pages": est.pages,
         "tinyImageTokens": tiny.tokens,
+        "withDistill": { "codebook": dcb, "imageTokens": dest.tokens },
     })
 }
 
@@ -298,7 +302,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_estimate",
-            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field names the cheapest safe knob set (level 0), so one call replaces manual knob probing.",
+            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route - one call replaces manual knob probing.",
             "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" } }, "required": ["text"] }
         },
         {
@@ -673,39 +677,46 @@ mod tests {
         s
     }
 
+    // Rationale: distill collapses similar-looking lines, which is honest on
+    // logs and unsafe on source code, so it is never labeled as the safe
+    // headline; it is priced separately under `withDistill`.
     #[test]
-    fn recommend_picks_distill_for_repetitive_logs() {
+    fn recommend_prices_distill_separately_for_repetitive_logs() {
         let text = log_corpus();
         let v = tool_estimate(&json!({ "text": text }));
         let r = &v["recommend"];
-        assert_eq!(r["distill"], true);
-        // strictly cheaper than the plain no-knob estimate of the same text
-        assert!(r["imageTokens"].as_u64().unwrap() < v["imageTokens"].as_u64().unwrap());
+        let mut keys: Vec<_> = r.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["codebook", "imageTokens", "pages", "tinyImageTokens", "withDistill"]
+        );
+        // distill collapses the heartbeat lines, so the lossy route is cheaper
+        assert!(
+            r["withDistill"]["imageTokens"].as_u64().unwrap()
+                < r["imageTokens"].as_u64().unwrap()
+        );
         assert!(r["pages"].as_u64().unwrap() >= 1);
-        assert!(r["tinyImageTokens"].as_u64().unwrap() > 0);
+        assert!(
+            r["tinyImageTokens"].as_u64().unwrap() <= r["imageTokens"].as_u64().unwrap()
+        );
     }
 
     #[test]
     fn recommend_ties_break_to_fewest_knobs_on_tiny_text() {
         let text = "hello tanuki, nothing log-shaped here";
-        // premise: all four level-0 candidates cost the same for this string
-        let distilled = distill::distill_log(text, None, 2).distilled;
+        // premise: codebook doesn't change the cost for this string
         let plain = render::estimate_text(text, true, true, render::Font::Normal).tokens;
-        for cand in [
-            codebook::apply(text).text,
-            distilled.clone(),
-            codebook::apply(&distilled).text,
-        ] {
-            assert_eq!(
-                render::estimate_text(&cand, true, true, render::Font::Normal).tokens,
-                plain,
-                "tie premise broken",
-            );
-        }
+        assert_eq!(
+            render::estimate_text(&codebook::apply(text).text, true, true, render::Font::Normal)
+                .tokens,
+            plain,
+            "tie premise broken",
+        );
         // ...so the strict-minimum scan must keep the earliest combo: no knobs
         let v = tool_estimate(&json!({ "text": text }));
         assert_eq!(v["recommend"]["codebook"], false);
-        assert_eq!(v["recommend"]["distill"], false);
+        assert_eq!(v["recommend"]["withDistill"]["codebook"], false);
         assert_eq!(v["recommend"]["imageTokens"].as_u64().unwrap(), plain);
     }
 
