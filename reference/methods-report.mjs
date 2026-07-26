@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Methods report: measure the tanuki-only density knobs (pack / codebook / tiny
 // font) against the pxpipe-faithful baseline, on real content, using ONLY the
-// rust binary's `estimate` (no pxpipe/node oracle needed — that's benchmark.mjs).
+// CLI's `estimate` (no pxpipe/node oracle needed — that's benchmark.mjs).
 //   node reference/methods-report.mjs [out.html]
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
@@ -11,7 +11,9 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
-const BIN = process.env.TANUKI_BIN || path.join(ROOT, "target", "release", "tanuki-context");
+// TANUKI_BIN may point at the rust-branch binary; default is the TS CLI.
+const CMD = (process.env.TANUKI_BIN ||
+  (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/main.ts")).split(" ");
 const OUT = process.argv[2] || path.join(HERE, "methods-report.html");
 const TMP = mkdtempSync(path.join(os.tmpdir(), "tanuki-methods-"));
 
@@ -33,7 +35,7 @@ function pathLog(n) {
   return L.join("\n");
 }
 const samples = [
-  { name: "code · src/main.rs", kind: "source", text: readFileSync(path.join(ROOT, "src", "main.rs"), "utf8") },
+  { name: "code · src/main.ts", kind: "source", text: readFileSync(path.join(ROOT, "src", "main.ts"), "utf8") },
   { name: "prose · DESIGN.md", kind: "prose", text: readFileSync(path.join(ROOT, "DESIGN.md"), "utf8") },
   { name: "log · distinct paths", kind: "log", text: pathLog(300) },
 ];
@@ -50,7 +52,7 @@ const methods = [
 function estimate(text, flags) {
   const f = path.join(TMP, "in.txt");
   writeFileSync(f, text);
-  const out = execFileSync(BIN, ["estimate", f, "0", ...flags], { encoding: "utf8", maxBuffer: 1 << 28 });
+  const out = execFileSync(CMD[0], [...CMD.slice(1), "estimate", f, "0", ...flags], { encoding: "utf8", maxBuffer: 1 << 28, cwd: ROOT });
   return JSON.parse(out);
 }
 
