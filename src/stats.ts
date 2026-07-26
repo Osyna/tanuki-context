@@ -50,6 +50,7 @@ export function pxStats(): object {
   let images = 0;
   let baseline = 0;
   let actual = 0;
+  let output = 0;
   for (const l of content.split("\n")) {
     if (l.trim().length === 0) {
       continue;
@@ -75,6 +76,7 @@ export function pxStats(): object {
       asU64(o["input_tokens"]) +
       asU64(o["cache_read_tokens"]) +
       asU64(o["cache_create_tokens"]);
+    output += asU64(o["output_tokens"]);
   }
   const saved =
     baseline > 0 && actual > 0
@@ -88,6 +90,10 @@ export function pxStats(): object {
     imagesEmitted: images,
     baselineTokens: baseline,
     actualInputTokens: actual,
+    outputTokens: output,
+    // the honest boundary: no input-side tool can cut this share of the bill
+    outputSharePct:
+      output > 0 ? new Float(rnd((output / (actual + output)) * 1000.0) / 10.0) : null,
     estInputSavedPct: saved,
   };
 }

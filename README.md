@@ -80,6 +80,14 @@ one, so `--cached` flips the verdict when the text would ride the prompt cache:
 npx tanuki-context estimate some-big-file.log 0 --model claude-opus-4 --cached
 ```
 
+Structured JSON (NDJSON, API dumps)? The `--table` knob states every key
+once — on a 200 KB `journalctl -o json` slice it turns 51,182 raw tokens
+into 5,320 with `--codebook`:
+
+```
+npx tanuki-context estimate journal.ndjson 0 --table --codebook
+```
+
 ## Installing it: two ways, same tools
 
 **npm (the default).** `npx -y tanuki-context` downloads a 0.98 MB tarball
@@ -96,7 +104,7 @@ stashed text and `~/.pxpipe/events.jsonl` for the savings log.
 cargo install --git https://github.com/Osyna/tanuki-context --branch rust
 ```
 
-One 5.7 MB binary, same seven tools, same numbers — a 103-check parity
+One 5.7 MB binary, same seven tools, same numbers — a 161-check parity
 harness holds the two engines to byte-identical JSON and pixel-identical
 PNGs on every release. It spawns in 0.4 ms and idles at 3.8 MB RSS, which
 matters when every session forks its own server. Point any client config
@@ -128,12 +136,15 @@ Leave it alone when:
   switch even when the math technically favors it; `estimate` and the
   proxy gate both say so.
 - **your bill is output-dominated.** tanuki cuts input tokens only. If
-  most of your spend is the model's own output, fix that first.
-- **you are not on Anthropic pricing.** Image-token *counts* use Anthropic's
-  28-px patch grid; OpenAI and Google price images differently (tiles, fixed
-  per-image rates). Pass `model` to `tanuki_estimate` for a cost verdict with
-  that provider's rates — but the count itself is Anthropic-calibrated, and the
-  result's `note` says so. Re-derive before trusting dollars there.
+  most of your spend is the model's own output, fix that first —
+  `tanuki_stats` now reports the output share of the bill, so you can see
+  when this applies instead of guessing.
+- **you are not on Anthropic pricing.** Pass `model` to `tanuki_estimate`
+  and the `cost` verdict counts image tokens with that provider's own rule —
+  OpenAI 512-px high-detail tiles (85 + 170/tile), Gemini 768-px tiles
+  (258/tile, flagged `~approximate`; their usage field is authoritative) —
+  and prices text at that provider's cache-read ratio. Dollars stay labeled
+  list prices, overridable via `TANUKI_RATES`.
 - **the bulk is already prompt-cached.** Cache reads cost a tenth of fresh
   input, so imaging content that was riding the cache is usually a net loss.
   Pass `cached:true` to `tanuki_estimate` and the `cost` verdict computes it —
@@ -208,9 +219,9 @@ All modes run the same engine and log their savings to the same file, which
 
 | tool              | what it does                                                | when to reach for it                     |
 | ----------------- | ----------------------------------------------------------- | ---------------------------------------- |
-| `tanuki_estimate` | prices both routes, returns `recommend`                     | always first; it's free and instant      |
+| `tanuki_estimate` | prices every route — knobs, `table`, provider-real `cost` — returns `recommend` | always first; it's free and instant      |
 | `tanuki_render`   | the full pipeline, returns PNG pages + a breakdown           | when estimate says the pipeline wins     |
-| `tanuki_distill`  | de-noises a log, output stays text                          | when you want greppable text, not images |
+| `tanuki_distill`  | de-noises a log (`table:true` for NDJSON), output stays text | when you want greppable text, not images |
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
 | `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
 | `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big  | after a stash, when you actually need it |
@@ -329,6 +340,9 @@ escapes. Nothing disappears silently.
 | stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |
 | `run` wrapper | wrap any command; distilled output inline, full capture stashed | -70% of chars on chatty commands, before tokenization |
 | progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
+| `table` | whole-JSON input becomes a `·cols·` header + tab-joined JSON cells | keys stated once: -33% on journald NDJSON before imaging even starts |
+| provider-real cost | `estimate {model}` counts image tokens by that provider's tile rule and prices its cache ratio | verdicts stop being Anthropic-only guesses |
+| output share | the proxy logs `output_tokens`; `tanuki_stats` reports the share | names the part of the bill no input-side tool can cut |
 
 ## What wins where
 
@@ -368,7 +382,7 @@ The same table as advice:
 | build/tool output, live | `tanuki-context run -- <cmd>` | -70% of chars before tokens even enter |
 | source code | reversible knobs only (`pack` is on by default) | **-80%**, byte-exact |
 | docs / prose | reversible knobs; tiny font if read-back risk is fine | -79 to -87% |
-| structured JSON | reversible + codebook | -79% |
+| structured JSON (arrays, NDJSON) | `table: true` + codebook — `recommend` probes it unprompted | **-86 to -90%** reversible |
 | "I'll only need two slices of this" | `tanuki_stash` + `tanuki_fetch` | ~300-token map, slices from ~112 |
 | "one narrow answer, never the file" | [context-mode](https://www.npmjs.com/package/context-mode)-style retrieval, or a stash you never fetch from | ~270/question |
 | wordy prose that must stay text | ladder levels 2-4 (caveman) | -9% on real docs; it is the weakest tool here |
@@ -377,6 +391,30 @@ Caveman-style text compression losing every matchup it enters is our own
 level 4 — we ship it, and the guard that makes it safe on code is exactly
 what makes it a no-op there. Text-side rewording just does not compete
 with pixel pricing.
+
+### Structured JSON: the table knob
+
+An array of objects or an NDJSON stream (`journalctl -o json`, docker
+events, API dumps) repeats every key on every row. `table: true` states the
+keys once — a `·cols·` header line, then one row per line, cells as
+tab-separated compact JSON. Value-lossless by construction (an absent key is
+an empty cell; a JSON cell is never empty), decodable without the model, and
+the size gate leaves tiny or mixed inputs alone. Uniform rows then collapse
+harder under distill and codebook.
+
+Fresh `journalctl -o json` slice, 200 KB (51,182 raw text tokens), measured
+2026-07-26 on this machine:
+
+| stack | image tokens | vs raw text |
+| --- | ---: | ---: |
+| imaging alone (reversible) | 10,752 | -79% |
+| + `table` | 7,280 | -86% |
+| + `table` + `codebook` | 5,320 | **-90%** |
+| + `table` + `codebook` + `distill` | 4,424 | -91% |
+| + tiny font on top | 3,192 | -94% |
+
+You do not have to know the knob exists: `recommend` prices the table route
+on every estimate call and reports `table: true` when it wins.
 
 ## Benchmarks
 
@@ -405,7 +443,7 @@ the reference server is the original node MCP wrapping pxpipe's library):
 | distill a 12 MB log     | 0.42 s  | 0.31 s  | 0.28 s  | -        |
 | install                 | 0.98 MB tarball, zero deps | same | 5.7 MB static binary | node_modules tree |
 
-Correctness: 48 TypeScript tests, 36 Rust tests, and a 103-check parity
+Correctness: 61 TypeScript tests, 48 Rust tests, and a 161-check parity
 harness that holds the two engines to byte-identical JSON and
 pixel-identical PNGs on every knob combination, including distilled
 renders and a full MCP session with error paths.
@@ -496,9 +534,9 @@ Responses stream through untouched. Savings land in
 `~/.pxpipe/events.jsonl`, with the baseline named: what was billed plus
 what the imaged blocks would have cost as text.
 
-Knobs: `--port N` `--upstream URL` `--level 0-4` `--distill` `--codebook`
-`--font tiny` `--min-chars N` `--ratio X` `--min-save N` `--max-pages N`.
-Defaults are conservative: level 0, nothing lossy on.
+Knobs: `--port N` `--upstream URL` `--level 0-4` `--distill` `--table`
+`--codebook` `--font tiny` `--min-chars N` `--ratio X` `--min-save N`
+`--max-pages N`. Defaults are conservative: level 0, nothing lossy on.
 
 ## Clients
 
@@ -605,9 +643,9 @@ options = ClaudeAgentOptions(
 ```
 npx tanuki-context                          # MCP stdio server (default)
 npx tanuki-context proxy [--port 8484] [--upstream URL] [knobs]   # implicit relay
-npx tanuki-context distill <file> [query]   # stats JSON to stdout
-npx tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
-npx tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]
+npx tanuki-context distill <file> [query] [--table]   # stats JSON to stdout
+npx tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]
+npx tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 npx tanuki-context stash <file>             # park text, print the map + id
 npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
@@ -667,7 +705,7 @@ Node-compatible files:
 ```
 bun run build        # dist/cli.js + dist/agent.js + dist/pi.js
 bun test             # 48 tests
-bun run parity       # TS vs rust binary, 103 checks (needs TANUKI_BIN)
+bun run parity       # TS vs rust binary, 161 checks (needs TANUKI_BIN)
 ```
 
 Regenerating glyphs after a pxpipe atlas rebuild (needs a pxpipe checkout

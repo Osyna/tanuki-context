@@ -110,6 +110,7 @@ const pipelineParams = Type.Object({
   pack: Type.Optional(Type.Boolean()),
   font: Type.Optional(Type.String({ enum: ["normal", "tiny"] })),
   codebook: Type.Optional(Type.Boolean()),
+  table: Type.Optional(Type.Boolean({ description: "columnar-encode whole-JSON input (keys stated once, value-lossless)" })),
   model: Type.Optional(Type.String({ description: "price the decision for this model (opus/sonnet/haiku/gpt/gemini)" })),
   cached: Type.Optional(Type.Boolean({ description: "text already prompt-cached this turn? imaging it usually loses" })),
 });
@@ -127,7 +128,7 @@ const TOOLS: { name: string; label: string; description: string; parameters: unk
     name: "tanuki_estimate",
     label: "Tanuki Estimate",
     description:
-      "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' and/or cached:true for a 'cost' field in real dollars - a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses even with fewer tokens. One call replaces manual knob probing.",
+      "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' and/or cached:true for a 'cost' field in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) - a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses. One call replaces manual knob probing.",
     parameters: pipelineParams,
     snippet: "Instant token verdict: would imaging this text beat sending it as text?",
   },

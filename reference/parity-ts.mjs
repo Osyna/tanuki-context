@@ -82,15 +82,35 @@ function mcpSession(cmd, args, lines, env) {
 const tmp = mkdtempSync(path.join(os.tmpdir(), "tanuki-parity-"));
 const logFile = path.join(tmp, "synthetic.log");
 writeFileSync(logFile, syntheticLog());
+// deterministic NDJSON fixture: sparse keys (extra), a float that must stay
+// fractional (0.75), and an integral float literal (3.0) that both engines
+// must print as "3" inside table cells (integral-f64 coercion contract).
+const ndjsonFile = path.join(tmp, "rows.ndjson");
+writeFileSync(
+  ndjsonFile,
+  Array.from({ length: 240 }, (_, i) =>
+    JSON.stringify({
+      ts: `2026-07-26T04:${String(i % 60).padStart(2, "0")}:00Z`,
+      level: i % 11 === 0 ? "error" : "info",
+      unit: `svc-${i % 5}.service`,
+      pid: 1000 + (i % 41),
+      message: `copied segment_${String(i % 13).padStart(5, "0")}.parquet ok rc=0`,
+      extra: i % 7 === 0 ? { retry: i % 3 } : undefined,
+    }),
+  ).join("\n") +
+    '\n{"ts":"2026-07-26T05:00:00Z","level":"info","unit":"svc-0.service","pid":1,"message":"ratios","ratio":0.75,"count":3.0}' +
+    '\n{"ts":"2026-07-26T05:00:01Z","level":"info","unit":"svc-0.service","pid":2,"message":"tab\\tand\\nnewline","ratio":0.5,"count":2}\n',
+);
 const events = path.join(tmp, "events.jsonl");
 writeFileSync(events, [
   JSON.stringify({ ts: 1, tool: "tanuki_render", inputTokens: 1000, cacheRead: 200, cacheCreate: 50 }),
   JSON.stringify({ ts: 2, tool: "tanuki_estimate", inputTokens: 400 }),
+  JSON.stringify({ ts: 3, tool: "proxy", input_tokens: 900, cache_read_tokens: 100, output_tokens: 4500 }),
 ].join("\n") + "\n");
 
 const files = process.argv.slice(2).length
   ? process.argv.slice(2)
-  : [logFile, path.join(ROOT, "README.md"), path.join(ROOT, "DESIGN.md"), fileURLToPath(import.meta.url)];
+  : [logFile, ndjsonFile, path.join(ROOT, "README.md"), path.join(ROOT, "DESIGN.md"), fileURLToPath(import.meta.url)];
 
 for (const file of files) {
   const name = path.basename(file);
@@ -106,6 +126,12 @@ for (const file of files) {
     ["0"], ["1"], ["2"], ["3"], ["4"],
     ["2", "--no-pack"], ["2", "--font", "tiny"], ["2", "--codebook"],
     ["2", "--distill"], ["0", "--no-pack", "--font", "tiny"], ["2", "--codebook", "--font", "tiny", "--distill"],
+    // table knob: no-ops on prose files (gate), full path on rows.ndjson
+    ["0", "--table"], ["2", "--table", "--distill"], ["0", "--table", "--codebook"],
+    // situation-aware cost: provider tile counting + cache ratios must match
+    ["0", "--model", "gpt-5"], ["0", "--model", "gemini-2.5-pro"],
+    ["0", "--model", "claude-opus-4", "--cached"],
+    ["0", "--table", "--model", "gpt-5", "--cached"],
   ];
   for (const c of combos) {
     const eTs = JSON.parse(tsRun(["estimate", file, ...c]));

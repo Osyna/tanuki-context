@@ -19,6 +19,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import http from "node:http";
 import https from "node:https";
+import { tableEncode } from "./table.ts";
 import { URL } from "node:url";
 import { distillLog } from "./distill.ts";
 import { apply as codebookApply } from "./codebook.ts";
@@ -31,6 +32,7 @@ export interface ProxyCfg {
   upstream: string; // e.g. https://api.anthropic.com
   level: number; // ladder level for imaged blocks (default 0: none)
   distill: boolean; // stage 0 on imaged blocks (off: lossy for logs, opt-in)
+  table: boolean; // columnar-encode whole-JSON blocks before distill (keys stated once)
   codebook: boolean;
   font: Font;
   minChars: number; // below this a block is never considered
@@ -42,6 +44,7 @@ export interface ProxyCfg {
 export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   level: 0,
   distill: false,
+  table: false,
   codebook: false,
   font: "normal",
   minChars: 4000,
@@ -71,6 +74,10 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   const origChars = charCount(text);
   if (origChars < cfg.minChars) return null;
   let working = text;
+  if (cfg.table) {
+    const t = tableEncode(working);
+    if (t !== null) working = t.text;
+  }
   if (cfg.distill) working = distillLog(working, null, 2).distilled;
   let cbEntries = 0;
   if (cfg.codebook) {
@@ -229,16 +236,29 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
 /// streams (message_start carries the same usage keys). First match wins for
-/// input/cache figures; output tokens are irrelevant to the savings log.
-function scrapeUsage(text: string): { input: number; cacheRead: number; cacheCreate: number } {
+/// input/cache figures; output_tokens takes the MAX across matches because
+/// SSE emits a placeholder in message_start and the final count in
+/// message_delta. Output is not a savings input — it is logged so stats can
+/// report the share of the bill no input-side tool can touch.
+function scrapeUsage(text: string): {
+  input: number;
+  cacheRead: number;
+  cacheCreate: number;
+  output: number;
+} {
   const grab = (re: RegExp): number => {
     const m = re.exec(text);
     return m ? Number(m[1]) : 0;
   };
+  let output = 0;
+  for (const m of text.matchAll(/"output_tokens"\s*:\s*(\d+)/g)) {
+    output = Math.max(output, Number(m[1]));
+  }
   return {
     input: grab(/"input_tokens"\s*:\s*(\d+)/),
     cacheRead: grab(/"cache_read_input_tokens"\s*:\s*(\d+)/),
     cacheCreate: grab(/"cache_creation_input_tokens"\s*:\s*(\d+)/),
+    output,
   };
 }
 
@@ -314,6 +334,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 input_tokens: usage.input,
                 cache_read_tokens: usage.cacheRead,
                 cache_create_tokens: usage.cacheCreate,
+                output_tokens: usage.output,
               });
             });
           } else {

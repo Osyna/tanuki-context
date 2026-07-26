@@ -51,7 +51,7 @@ function cpLen(s: string): number {
 }
 
 // Rust String cmp = UTF-8 byte order = codepoint order (NOT UTF-16 unit order).
-function cmpCodepoints(a: string, b: string): number {
+export function cmpCodepoints(a: string, b: string): number {
   let i = 0;
   let j = 0;
   while (i < a.length && j < b.length) {

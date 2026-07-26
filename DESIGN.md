@@ -244,6 +244,25 @@ Two further properties:
   map 305 tok; the every-failure-line slice 4,704 as pages vs 22,111 as
   text. Storage is `$TANUKI_STASH` or `~/.tanuki/stash`, plain files, the
   user's own bytes.
+- **table: whole-JSON columnar — the SmartCrusher answer.** The one domain
+  where [headroom](https://github.com/headroomlabs-ai/headroom)'s
+  SmartCrusher genuinely beat our line tools was structured JSON (60-95%
+  structural dedup). tanuki's version is deterministic and value-lossless:
+  when the WHOLE input is a JSON array of ≥2 objects or pure NDJSON, emit a
+  `·cols·` header (keys stated once, JSON-quoted, tab-joined) and one line
+  per row of tab-separated compact-JSON cells. An absent key is an empty
+  cell — a JSON cell is never empty, so the grammar is unambiguous; compact
+  JSON escapes control chars, so a raw tab cannot appear inside a cell.
+  Round-trip contract is *same values, canonical layout* (sorted columns and
+  sorted nested keys — deliberately matching serde_json's BTreeMap so both
+  engines emit identical bytes; source key order does not survive Rust's
+  parser anyway). `tableDecode` ships as the escape hatch and the round-trip
+  test. A size gate keeps tiny/mixed inputs as text, `recommend` probes the
+  knob on every estimate, and uniform rows then collapse harder under
+  distill/codebook. Measured on a fresh 200 KB `journalctl -o json` slice:
+  imaging alone 10,752 image-tokens; + table 7,280; + codebook 5,320 (−90%
+  vs 51,182 raw). Mixed prose+JSON stays text by design — block-level
+  detection is the upgrade path if a real corpus demands it.
 - **situation-aware cost (`estimate` model/cached): the "codeburn calculation."**
   The verdict compared token *counts* — `imageTokens < rawTextTokens` — which
   equals real cost only when both sides bill at the same per-token rate. On
@@ -262,14 +281,33 @@ Two further properties:
   Only the *ratios* (cache-read, image) drive the verdict; absolute $/Mtok are
   labeled list prices (`RATES_AS_OF`) overridable via `TANUKI_RATES`, so a price
   drift is a config edit, not a code change — the calibration knob a real price
-  table needs. Image-token *counts* stay Anthropic patch-grid, so the dollar
-  figure is Anthropic-calibrated and the non-Anthropic `note` says so. Gated by
+  table needs. Since 0.6.0 image-token *counts* are provider-correct too:
+  `estimateText` exposes per-page pixel dims (pack width-trims pages, so dims
+  are real, not assumed), and the cost model counts OpenAI pages by the
+  high-detail tile rule (85 + 170 per 512-px tile after the documented 2048/768
+  downscales) and Gemini pages at 258 per 768-px tile — flagged `~approximate`
+  because Gemini's crop rule has undocumented edges; their usage field is
+  authoritative. Measured on the 200 KB journald slice: a full 1568×728 page is
+  1456 Anthropic patches, 1445 OpenAI tile-tokens, 774 Gemini tile-tokens —
+  Gemini pages are half price, which the verdict now sees instead of guessing.
+  With no dims supplied the count falls back to the patch grid and the note
+  says so. Gated by
   construction: no `model`/`cached` argument ⇒ no `cost` field, so the default
   result and the parity harness stay byte-identical. Rejected from both sources:
   Headroom's output-token steering (verbosity notes, effort routing) is model
   behavior, not deterministic accounting — the same LLMLingua line we hold; and
   codeburn's live LiteLLM price fetch would break the zero-dependency claim, so
   hardcoded fallbacks + an env override stand in.
+- **output share: reported, never steered.** Headroom's other lever is
+  output-token steering (verbosity notes, effort routing) — model behavior,
+  rejected above with LLMLingua. The deterministic remainder is accounting:
+  the proxy already scrapes usage, so it now also records `output_tokens`
+  (max across SSE frames — `message_start` carries a placeholder,
+  `message_delta` the final count) and `tanuki_stats` reports
+  `outputSharePct`, the share of the bill no input-side tool can cut. On
+  Opus-class pricing output runs 5× input, so this line is the honest answer
+  to "why didn't my bill halve": it tells you when tanuki is the wrong
+  lever, in numbers.
 
 ### Implicit mode — the middlebox, readmitted with rules
 

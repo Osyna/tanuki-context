@@ -387,6 +387,8 @@ export interface Estimated {
   pages: number;
   pixels: number;
   tokens: number;
+  /** per-page [width, height] px — provider tile math (cost.ts) needs real dims because pack width-trims pages. */
+  dims: Array<[number, number]>;
 }
 
 /// Same geometry as renderText without blitting/encoding — exact, fast,
@@ -401,13 +403,15 @@ export function estimateText(
   const pageLines = prepPages(text, useReflow, pack, g);
   let pixels = 0;
   let tokens = 0;
+  const dims: Array<[number, number]> = [];
   for (const p of pageLines) {
     const w = pageWidth(p, g, pack);
     const h = 2 * PAD_Y + p.length * g.ch;
+    dims.push([w, h]);
     pixels += w * h;
     tokens += patchTokens(w, h);
   }
-  return { pages: pageLines.length, pixels, tokens };
+  return { pages: pageLines.length, pixels, tokens, dims };
 }
 
 /// Anthropic bills by 28×28-px PATCHES: ⌈w/28⌉×⌈h/28⌉ visual tokens (the old
