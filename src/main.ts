@@ -18,7 +18,7 @@ import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText } from "./render.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------- serde_json parity

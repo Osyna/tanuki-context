@@ -362,7 +362,7 @@ Node-compatible files:
 
 ```
 bun run build        # dist/cli.js + dist/agent.js + dist/pi.js
-bun test             # 35 tests
+bun test             # 39 tests
 bun run parity       # TS vs rust binary, byte/pixel-exact (needs TANUKI_BIN)
 ```
 
@@ -372,3 +372,20 @@ with `dist/` built; the generator fetches `unifont_upper` on first run):
 ```
 PXPIPE_DIST=~/Projects/pxpipe/dist node tools/gen-glyphs.mjs
 ```
+
+## Credits
+
+- [pxpipe](https://github.com/teamchong/pxpipe) is where the idea and the
+  engine come from: an image is billed by its pixels, not by how much text
+  is inside it, and dense text survives the trip. tanuki-context began as a
+  Rust rewrite of their MCP. The page geometry and glyphs are extracted
+  from pxpipe's own generated atlas, the default render path is still
+  byte-identical to their production renderer, and their
+  [benchmarks](https://github.com/teamchong/pxpipe#benchmark-results-and-receipts)
+  are the read-back evidence this README leans on. If you want the
+  whole-bill transparent proxy with per-model profiles and eval receipts,
+  use pxpipe itself; the two compose fine.
+- The bitmap fonts inside the atlas are
+  [Spleen](https://github.com/fcambus/spleen) 5x8 by Frederic Cambus and
+  [GNU Unifont](https://unifoundry.com/unifont/) (BMP coverage plus
+  `unifont_upper` for the astral planes).
