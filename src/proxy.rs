@@ -24,6 +24,7 @@ use crate::{codebook, distill, ladder};
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -140,11 +141,29 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
     let mut orig_chars = 0u64;
     let mut image_count = 0u64;
     let mut saved_tokens = 0i64;
-    let mut tally = |done: &ImagedBlock| {
+    // Exact-repeat dedupe: block text -> page count, recorded only when a
+    // block is actually imaged in THIS request. A later byte-identical block
+    // that reaches the funnel becomes one short marker, no repeated pages.
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut funnel = |text: &str| -> Option<Vec<Value>> {
+        let tok = |chars: usize| ((chars as f64) / 4.0).round() as i64;
+        if let Some(&pages) = seen.get(text) {
+            let chars = text.chars().count();
+            let marker = format!(
+                "[tanuki-context: {chars} chars, byte-identical to a block imaged above ({pages} PNG page(s)); not repeated]"
+            );
+            imaged_blocks += 1;
+            orig_chars += chars as u64;
+            saved_tokens += tok(chars) - tok(marker.chars().count());
+            return Some(vec![json!({ "type": "text", "text": marker })]);
+        }
+        let done = maybe_image(text, cfg)?;
+        seen.insert(text.to_string(), done.pages);
         imaged_blocks += 1;
         orig_chars += done.orig_chars as u64;
         image_count += done.pages as u64;
         saved_tokens += done.saved_tokens;
+        Some(done.blocks)
     };
 
     // rule 3: the latest message is never imaged.
@@ -157,9 +176,8 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
 
         if let Some(text) = m["content"].as_str() {
             let text = text.to_string();
-            if let Some(done) = maybe_image(&text, cfg) {
-                tally(&done);
-                m["content"] = Value::Array(done.blocks);
+            if let Some(blocks) = funnel(&text) {
+                m["content"] = Value::Array(blocks);
             }
             continue;
         }
@@ -176,9 +194,8 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
             if block["type"] == "text" {
                 if let Some(text) = block["text"].as_str() {
                     let text = text.to_string();
-                    if let Some(done) = maybe_image(&text, cfg) {
-                        tally(&done);
-                        out.extend(done.blocks);
+                    if let Some(blocks) = funnel(&text) {
+                        out.extend(blocks);
                         continue;
                     }
                 }
@@ -188,9 +205,8 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
             if block["type"] == "tool_result" {
                 if let Some(text) = block["content"].as_str() {
                     let text = text.to_string();
-                    if let Some(done) = maybe_image(&text, cfg) {
-                        tally(&done);
-                        block["content"] = Value::Array(done.blocks);
+                    if let Some(blocks) = funnel(&text) {
+                        block["content"] = Value::Array(blocks);
                     }
                 } else if block["content"].is_array() {
                     let items = block["content"].as_array_mut().unwrap();
@@ -199,9 +215,8 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
                         if item["type"] == "text" && item.get("cache_control").is_none() {
                             if let Some(text) = item["text"].as_str() {
                                 let text = text.to_string();
-                                if let Some(done) = maybe_image(&text, cfg) {
-                                    tally(&done);
-                                    inner.extend(done.blocks);
+                                if let Some(blocks) = funnel(&text) {
+                                    inner.extend(blocks);
                                     continue;
                                 }
                             }
@@ -215,7 +230,7 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
         }
         m["content"] = Value::Array(out);
     }
-    drop(tally);
+    drop(funnel);
 
     if imaged_blocks == 0 {
         return None;
@@ -439,7 +454,7 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
         cfg.min_save,
     );
     eprint!(
-        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} latest message never imaged \u{b7} cache_control skipped\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
+        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} latest message never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
         cfg.upstream,
     );
     server
@@ -596,6 +611,83 @@ mod tests {
         let c = out["messages"][0]["content"].as_array().unwrap();
         assert_eq!(c[0]["text"], expected_marker(&b));
         assert_eq!(out["messages"][1]["content"], "latest");
+    }
+
+    /// The exact dedupe marker for a repeat of `text` first imaged as `pages` pages.
+    fn expected_dupe_marker(text: &str, pages: usize) -> String {
+        format!(
+            "[tanuki-context: {} chars, byte-identical to a block imaged above ({pages} PNG page(s)); not repeated]",
+            text.chars().count(),
+        )
+    }
+
+    #[test]
+    fn byte_identical_repeat_becomes_marker_without_images() {
+        let b = big();
+        let body = json!({ "messages": [
+            msg("user", json!([{ "type": "text", "text": b }])),
+            msg("assistant", json!("ok")),
+            msg("user", json!(b)),
+            msg("user", json!("latest")),
+        ] })
+        .to_string();
+        let r = transform_request_body(&body, &cfg()).expect("dupe request must transform");
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+
+        // first occurrence: normal marker + PNG pages
+        let first = out["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(first[0]["text"], expected_marker(&b));
+        let pages = first.iter().filter(|x| x["type"] == "image").count();
+        assert!(pages > 0);
+
+        // repeat: exactly one text block, byte-exact dupe marker, zero images
+        let dupe = out["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(dupe.len(), 1);
+        assert_eq!(dupe[0]["type"], "text");
+        assert_eq!(dupe[0]["text"], expected_dupe_marker(&b, pages));
+        assert!(dupe[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("byte-identical to a block imaged above"));
+
+        // accounting: dupe counts as a block + chars, adds no images, and
+        // saves round(chars/4) - round(marker_chars/4)
+        let chars = b.chars().count();
+        let tok = |c: usize| ((c as f64) / 4.0).round() as i64;
+        let imaged = render::render_text(&b, true, true, Font::Normal);
+        assert_eq!(r.imaged_blocks, 2);
+        assert_eq!(r.image_count, pages as u64);
+        assert_eq!(r.orig_chars, 2 * chars as u64);
+        let dupe_marker = expected_dupe_marker(&b, pages);
+        assert_eq!(
+            r.saved_tokens,
+            (tok(chars) - imaged.tokens as i64) + (tok(chars) - tok(dupe_marker.chars().count()))
+        );
+    }
+
+    #[test]
+    fn one_byte_difference_defeats_dedupe() {
+        let b = big();
+        let b2 = b.replacen('2', "3", 1); // same length, one byte off
+        assert_ne!(b, b2);
+        let body = json!({ "messages": [
+            msg("user", json!(b)),
+            msg("user", json!(b2)),
+            msg("user", json!("latest")),
+        ] })
+        .to_string();
+        let r = transform_request_body(&body, &cfg()).expect("both blocks must transform");
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+        for i in 0..2 {
+            let c = out["messages"][i]["content"].as_array().unwrap();
+            let head = c[0]["text"].as_str().unwrap();
+            assert!(head.starts_with("[tanuki-context:"));
+            assert!(!head.contains("byte-identical"));
+            assert!(c.iter().any(|x| x["type"] == "image"));
+        }
+        let pages = |t: &str| render::render_text(t, true, true, Font::Normal).pages.len() as u64;
+        assert_eq!(r.imaged_blocks, 2);
+        assert_eq!(r.image_count, pages(&b) + pages(&b2));
     }
 
     #[test]
