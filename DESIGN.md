@@ -3,11 +3,13 @@
 What this project is, why each piece exists, and the logic behind it.
 Companion to [README.md](README.md) (usage) — this is the *why*.
 
-> **Branch note** — these notes were written for the Rust implementation (now
-> on the [`rust` branch](../../tree/rust)); file names reference `src/*.rs`.
-> The `main` branch is a 1:1 TypeScript port (same modules, `src/*.ts`,
-> byte/pixel-identical output — see `reference/parity-ts.mjs`), so every
-> design decision below applies unchanged.
+> **Branch note** — these notes were written for the Rust implementation and
+> ported forward. `main` is the TypeScript npm package (`src/*.ts`); the
+> [`rust` branch](../../tree/rust) carries the same pipeline (`src/*.rs`) and
+> is kept at semantic parity — same patch-grid token model, same escapes,
+> same atlas, same proxy — verified byte/pixel-exact by
+> `reference/parity-ts.mjs`. Only the npm packaging and the Claude Agent SDK
+> glue are TS-only. Every design decision below applies to both.
 
 ## 1. Origin
 
@@ -27,8 +29,11 @@ model it serves.
 
 So the design moved from **implicit** (proxy rewrites everything) to
 **explicit** (the model calls a tool when it wants the cut). First as a node
-MCP wrapping pxpipe's library, then — this repo — as a single-binary Rust
-rewrite. The imaging stage keeps the `pxpipe` name: the mechanic is theirs.
+MCP wrapping pxpipe's library, then as a single-binary Rust rewrite (now the
+`rust` branch), then — after distribution won the argument — as the
+zero-dependency TypeScript package on `main`. The imaging stage keeps the
+`pxpipe` name: the mechanic is theirs. (Implicit mode later returned with
+rules — see "the middlebox, readmitted" below.)
 
 ## 2. The pipeline
 
@@ -246,14 +251,14 @@ pasting logs. The entry split (`src/cli.ts` runs `main()`; `src/main.ts` is
 now an importable library) is what makes this module possible without
 starting a server as an import side effect.
 
-## 3. Why Rust (measured, not vibes)
+## 3. The Rust chapter (and why `main` is TypeScript now)
 
 The MCP is stdio: clients spawn it per session, so **startup latency and
-resident memory are the product**, not just throughput. Options were
-benchmarked on this machine's real workload (126 MB log distill) before
-rewriting: node 4.20 s, bun 3.48 s, rust 2.44 s (2.31 s final). Go was ruled
-out on regex-engine throughput; Zig/C on ecosystem risk for zero additional
-win over Rust.
+resident memory are the product**, not just throughput. Before the first
+rewrite, options were benchmarked on this machine's real workload (126 MB
+log distill): node 4.20 s, bun 3.48 s, rust 2.44 s (2.31 s final). Go was
+ruled out on regex-engine throughput; Zig/C on ecosystem risk for zero
+additional win over Rust. The Rust numbers against the node reference:
 
 | metric | node reference | tanuki (rust) |
 |---|---:|---:|
@@ -275,15 +280,30 @@ Two implementation choices keep it light:
   computes exact page geometry without ever touching pixel data.
 
 Honest reading: the pipeline speedup is 1.4–1.7×, not 10× — PNG deflate
-dominates and both zlib implementations are good. The decisive wins are
+dominates and both zlib implementations are good. The decisive wins were
 startup (~10×), memory (~60×), and deployment (one binary).
+
+Then distribution won: `npx tanuki-context` beats "download a binary for
+your platform" for MCP users, and a careful TS port matched Rust where it
+matters — 113 MB distill 3.35 s (bun) vs 3.27 s (rust); spawn→first MCP
+response 86 ms (bun) / 106 ms (node) vs the node reference's 152 ms; idle
+RSS 50/80 MB vs 177 MB; 0.97 MB tarball, zero runtime dependencies. So
+`main` became the 1:1 TypeScript port (proven byte/pixel-identical by
+`reference/parity-ts.mjs`), and the Rust implementation lives on as the
+`rust` branch, maintained at parity for anyone who wants the static binary.
 
 ## 4. Parity as a discipline
 
-The node implementation didn't get deleted — it moved to
-`reference/node-mcp/` and became the test oracle. Two harnesses:
+Nothing got deleted when an implementation was superseded: the node MCP
+moved to `reference/node-mcp/` and the Rust pipeline to the `rust` branch,
+and both became test oracles. Three harnesses:
 
-- `reference/parity.mjs` — same input through both engines; asserts distill
+- `reference/parity-ts.mjs` — TS vs the `rust`-branch binary: distill stats
+  deep-equal, every estimate knob combo, render JSON + pixel-exact PNGs
+  (IDAT inflated and byte-compared), and a full MCP session including error
+  paths. Both sides bill the same 28-px patch grid, so estimate JSON is
+  compared field-for-field.
+- `reference/parity.mjs` — the original node-vs-rust harness; asserts distill
   counts (runs, exact-tier, template-tier, important-kept) and render
   geometry (pages, image tokens).
 - `reference/benchmark.mjs` — the full timed matrix (every level × every
@@ -304,7 +324,7 @@ Getting to *identical* (not "close") surfaced three real porting lessons:
    tier byte-identical (560,779 = 560,779).
 3. **Geometry is data, not code.** Extracting the atlas instead of
    re-rasterizing the fonts is what made render parity trivially exact —
-   same coverage bytes in, same pixels out, same pixels/750 out.
+   same coverage bytes in, same pixels out, same patch count out.
 
 ## 5. Fidelity model (what can be trusted when)
 
@@ -317,6 +337,8 @@ Getting to *identical* (not "close") surfaced three real porting lessons:
 | ladder L4 | prose is gist-only — never use where verbatim prose matters |
 | codebook | reversible: every sigil is defined in the trailing `·legend·` line; validated byte-exact by a vision read-back |
 | tiny 4×6 font | legible but lossy at the glyph level (99.7% char-accuracy measured; `M`/`H` confusable) — opt-in, verify before trusting exact identifiers |
+| unassigned codepoints | render as readable `[U+HEX]` escapes (invisible formatting codepoints blit as blank cells) — nothing drops silently |
+| proxy mode | system prompt/tools/latest message/`cache_control` never touched; in-place rewrites only, marked overtly; text-cheaper requests forward byte-for-byte |
 | stats | savings counted against *all* billed input (input + cache reads + cache creates) — ignoring cache reads would fake the number |
 
 That last row is a story of its own: the first stats implementation read
@@ -326,10 +348,11 @@ this project reports now names its denominator.
 
 ## 6. What we'd change with more time
 
-- Parallelize distill's masking pass (rayon) — it's embarrassingly parallel
-  per line; single-threaded was chosen for binary weight.
-- A native `transform` tool (full `/v1/messages` body rewrite) — currently
-  only the reference node MCP has it; tanuki covers render/estimate/
-  distill/compress/stats.
-- Color/class-tick render variants (pxpipe has them behind flags; the
+- **High-res vision tier.** Claude 4.7+ models accept 2576-px / 4784-token
+  pages; a `tier` knob would nearly double chars-per-page where the reader
+  supports it. Needs a transcription-accuracy A/B first, same as tiny font.
+- **Multi-provider proxy.** The middlebox speaks Anthropic `/v1/messages`
+  only; OpenAI/Gemini image pricing differs enough (32-px patches, tile
+  models) that each upstream needs its own gate math.
+- **Color/class-tick render variants** (pxpipe has them behind flags; the
   production dense path we ported doesn't use them).
