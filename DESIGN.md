@@ -202,6 +202,32 @@ Two further properties:
   silent-confabulation risk. pack and codebook are deterministic and
   reversible; that line holds.
 
+### Implicit mode — the middlebox, readmitted with rules
+
+Section 1 explains why we left the proxy model: pxpipe relocates the system
+prompt into a user-turn wrapper that reads like an injection, and an agent
+refused it. That verdict was about the *relocation*, not about middleboxes as
+such. `tanuki-context proxy` brings the deployment shape back (point
+`ANTHROPIC_BASE_URL` at it, zero client changes) under five rules that keep
+the rewrite recognizable and consensual in spirit:
+
+1. system prompt and tool definitions are never touched;
+2. nothing moves between roles or positions — an oversized text block becomes
+   an overt `[tanuki-context: …]` marker plus PNG pages *in the same slot*
+   (Anthropic allows image blocks in user content and inside tool_results);
+3. the latest message is never imaged (the model may need to quote it);
+4. `cache_control` blocks are never touched (rewriting defeats their cache);
+5. imaging happens only when `estimate` wins by a margin (default ≥25% and
+   ≥300 tokens); everything else forwards byte-for-byte.
+
+Responses stream through untouched; usage is scraped from the stream and the
+savings row appended to the same events log `tanuki_stats` reads, with the
+baseline defined as actual billed tokens plus the estimated text cost of the
+imaged blocks. Explicit MCP mode remains the default and the recommendation;
+the proxy exists for clients you can't modify. Wire behaviour is covered by
+`test/proxy.test.ts` (transform rules unit-tested, plus a live
+proxy-to-mock-upstream session asserting passthrough and the events row).
+
 ## 3. Why Rust (measured, not vibes)
 
 The MCP is stdio: clients spawn it per session, so **startup latency and

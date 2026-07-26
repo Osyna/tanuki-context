@@ -273,9 +273,16 @@ footer{border-top:1px solid var(--line2);margin-top:48px;padding:34px 0 60px}
   <h2>Pick by who you trust to decide</h2>
   <div class="verdict">
     <p>
-      <b>Run pxpipe</b> when you can't touch the client and want the whole request compressed,
-      system prompt included, and you accept a rewriting middlebox in your API path to get it.
-      Nothing else does that job.
+      <b>Run pxpipe</b> when you want the whole request compressed, system prompt included, across
+      multiple providers, and you accept a rewriting middlebox in your API path to get it. That
+      coverage is still theirs alone.
+    </p>
+    <p>
+      <b>Can't touch the client but want the tanuki rules?</b> <code>npx tanuki-context proxy</code>
+      runs the same middlebox shape with the relocation problem removed: oversized user and
+      tool_result blocks become an overt marker plus PNG pages in the same slot, the system prompt
+      and tool docs are never touched, the latest message stays text, cache_control blocks are
+      skipped, and anything text-cheaper forwards byte-for-byte.
     </p>
     <p>
       <b>Run tanuki-context</b> when your agent speaks MCP and you want the model to choose:

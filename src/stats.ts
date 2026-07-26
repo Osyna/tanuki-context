@@ -14,7 +14,7 @@ export class Float {
   constructor(public readonly value: number) {}
 }
 
-function eventsPath(): string {
+export function eventsPath(): string {
   const p = process.env.TANUKI_EVENTS;
   if (p !== undefined) {
     return p;
