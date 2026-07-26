@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tanuki-context vs pxpipe: same engine, different contract</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0d120e; --panel:#131a14; --panel2:#18211a; --line:#243026; --line2:#1c261e;
+  --paper:#e9e4d6; --dim:#9aa392; --faint:#5f6a5c;
+  --moss:#a5c96b; --moss-dark:#4d6b2b;          /* tanuki */
+  --copper:#d98e5f; --copper-dark:#7a4a2b;      /* pxpipe */
+  --alert:#d96a6a;
+  --disp:"Fraunces",Georgia,serif;
+  --body:"Alegreya Sans",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --w:920px;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--ink);color:var(--paper);
+  font-family:var(--body);font-size:17.5px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(900px 480px at 85% -5%, rgba(165,201,107,.055), transparent 62%),
+    radial-gradient(760px 420px at -8% 18%, rgba(217,142,95,.05), transparent 60%);
+}
+::selection{background:var(--moss);color:var(--ink)}
+a{color:var(--moss);text-decoration:none;border-bottom:1px solid var(--moss-dark)}
+a:hover{border-bottom-color:var(--moss)}
+.wrap{max-width:var(--w);margin:0 auto;padding:0 24px}
+code,.m{font-family:var(--mono);font-size:.84em;background:var(--panel2);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;color:var(--moss)}
+.cop{color:var(--copper)} .mos{color:var(--moss)}
+
+header{padding:72px 0 36px;border-bottom:1px solid var(--line2)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint)}
+h1{font-family:var(--disp);font-weight:900;font-size:clamp(36px,6.4vw,64px);line-height:1.03;letter-spacing:-.015em;margin:18px 0 0}
+h1 em{font-style:normal;color:var(--moss)}
+.stand{max-width:66ch;color:var(--dim);font-size:clamp(17px,2vw,19.5px);margin-top:24px}
+.stand b{color:var(--paper);font-weight:700}
+
+section{padding:52px 0 8px}
+h2{font-family:var(--disp);font-weight:600;font-size:clamp(24px,3.4vw,33px);letter-spacing:-.01em;margin:0 0 6px}
+.sub{font-family:var(--mono);font-size:12px;color:var(--faint);letter-spacing:.14em;text-transform:uppercase;margin-bottom:14px}
+p{max-width:70ch;color:var(--dim);margin:0 0 15px}
+p b,li b{color:var(--paper);font-weight:700}
+ul{max-width:70ch;color:var(--dim);padding-left:22px;margin:0 0 15px}
+li{margin-bottom:7px}
+
+table{border-collapse:collapse;width:100%;margin:18px 0 8px;font-size:15px}
+th{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+td{padding:9px 12px;border-bottom:1px solid var(--line2);color:var(--dim);vertical-align:top}
+td:first-child{color:var(--paper)}
+td.n{font-family:var(--mono);font-size:13.5px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+tr.win td{background:rgba(165,201,107,.05)}
+.tag{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.tag.t{color:var(--moss);border-color:var(--moss-dark)}
+.tag.p{color:var(--copper);border-color:var(--copper-dark)}
+
+.meter{margin:20px 0 6px}
+.mrow{display:grid;grid-template-columns:210px 1fr 92px;gap:14px;align-items:center;padding:8px 0;border-top:1px solid var(--line2)}
+.mrow:first-child{border-top:none}
+.mname{font-family:var(--mono);font-size:12.5px;color:var(--paper)}
+.mtrack{height:20px;background:var(--panel);border:1px solid var(--line2);border-radius:5px;overflow:hidden;position:relative}
+.mfill{position:absolute;inset:0 auto 0 0;width:0;transition:width .9s cubic-bezier(.22,.61,.36,1);border-radius:4px 0 0 4px;
+  background-image:repeating-linear-gradient(90deg,rgba(255,255,255,.14) 0 1px,transparent 1px 8px)}
+.f-cop{background-color:var(--copper)} .f-mos{background-color:var(--moss)} .f-dim{background-color:#3c4a3e}
+.mval{font-family:var(--mono);font-size:13px;color:var(--dim);text-align:right;font-variant-numeric:tabular-nums}
+.mval b{color:var(--paper)}
+.mnote{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55}
+
+.quote{border-left:3px solid var(--copper-dark);background:linear-gradient(90deg,rgba(217,142,95,.06),transparent 70%);
+  padding:16px 20px;margin:20px 0;max-width:72ch;color:var(--dim);font-size:16px}
+.quote .m{color:var(--copper)}
+.verdict{border:1px solid var(--moss-dark);border-radius:12px;background:linear-gradient(180deg,rgba(165,201,107,.07),rgba(165,201,107,.015));
+  padding:22px 26px;margin:26px 0;max-width:none}
+.verdict p{max-width:none}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+.card h3{font-family:var(--disp);font-weight:600;font-size:18px;margin:0 0 8px;color:var(--paper)}
+.card p{font-size:15px;margin:0}
+footer{border-top:1px solid var(--line2);margin-top:48px;padding:34px 0 60px}
+.src{font-family:var(--mono);font-size:12.5px;color:var(--dim);line-height:1.8}
+.src .k{color:var(--faint)}
+@media(max-width:700px){
+  .cards{grid-template-columns:1fr}
+  .mrow{grid-template-columns:1fr;gap:5px}
+  .mval{text-align:left}
+}
+@media(prefers-reduced-motion:reduce){.mfill{transition:none}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">field report &middot; 2026-07-26 &middot; all figures measured, scripts in-repo</div>
+    <h1>Same engine.<br>Different <em>contract</em>.</h1>
+    <p class="stand">
+      pxpipe proved that pixels are cheaper than tokens, and its imaging engine is genuinely good;
+      good enough that we ported it glyph-for-glyph. This report is about the part we
+      couldn't keep: the <b>transparent proxy</b>. We ran it, measured a real 76.5% input-token cut,
+      and then watched a security-conscious agent refuse its own configuration because a rewriting
+      proxy is indistinguishable from an attacker. tanuki-context keeps pxpipe's renderer and
+      replaces the proxy with explicit MCP tools the model calls on purpose. Below: what that
+      trade costs, what it buys, and the numbers for both sides.
+    </p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section id="credit">
+  <div class="sub">01 &middot; credit first</div>
+  <h2>What pxpipe got right</h2>
+  <p>
+    The core insight is theirs and it holds: an image's token cost is fixed by pixel dimensions,
+    not by how much text is inside it. Their README claims ~3.1 chars per image-token on real
+    Claude Code traffic and 18.4 chars per vision-token for a dense page. We reproduce the dense-page
+    figure exactly; under the 28-px patch pricing they adopted in v0.11 (and we adopted the same week)
+    a full 1568&times;728 page is 56&times;26 = 1,456 tokens, which puts the same page at
+    <b>19.3 chars per vision-token</b>. Their correction made everyone's pages 4&ndash;5% cheaper. Good fix.
+  </p>
+  <p>
+    We didn't rebuild their renderer, we extracted it. Page geometry, the Spleen 5&times;8 atlas,
+    reflow, wrapping, page splits: byte-faithful. When upstream repainted the confusable
+    <code>K</code> glyph (their A/B: K&rarr;H misreads went 42&rarr;1), we regenerated our atlas from
+    their build the same day. The benchmark in this repo drives both renderers on identical files:
+    <b>25/25 parity rows pass</b> against pxpipe v0.11.0's own code. So when we say "same engine"
+    it's not a figure of speech. The disagreement is entirely about who decides what gets imaged.
+  </p>
+</section>
+
+<section id="proxy">
+  <div class="sub">02 &middot; the disagreement</div>
+  <h2>A transparent proxy has a structural problem</h2>
+  <p>
+    pxpipe sits between your agent and the API and rewrites requests in flight. To image the system
+    prompt it has to move it somewhere a vision block can live, so it lands in a user-turn wrapper:
+  </p>
+  <div class="quote">
+    The relocated prompt arrives labelled <span class="m">&lt;system-reminder&gt; &hellip; not written by the user</span>.
+    That is, almost word for word, what a prompt injection looks like. One of our agents read its own
+    rewritten request, flagged it, and refused to proceed. It was right to. From inside the model
+    there is no way to tell a helpful rewriting proxy from a hostile one.
+  </div>
+  <p>
+    This isn't a bug pxpipe can patch. It's what "transparent" means. The same silence has a second
+    cost: the model never gets to say <i>no</i>. If it needs to quote a hash or a config line back
+    exactly, tough; the proxy already imaged it. pxpipe mitigates with gates and skip-reasons, but
+    the model, the one party that knows what it needs, isn't consulted.
+  </p>
+  <p>
+    tanuki's answer is boring: make it a tool call. The model runs <code>tanuki_estimate</code>
+    (geometry only, never touches pixels, safe to call on everything), reads an exact verdict, and
+    renders only when the pipeline wins. Nothing is rewritten behind anyone's back. The system
+    prompt stays where the API put it.
+  </p>
+  <div class="cards">
+    <div class="card">
+      <h3><span class="cop">pxpipe</span>: implicit</h3>
+      <p>Proxy rewrites every request. Zero client integration. Covers system prompt, tool docs,
+      history. Model can't opt out, and can't tell the rewrite from an attack.</p>
+    </div>
+    <div class="card">
+      <h3><span class="mos">tanuki</span>: explicit</h3>
+      <p>MCP tools the model calls per payload. Needs an MCP client and model cooperation. Can't
+      touch the system prompt. Everything imaged was chosen, estimated, and decodable.</p>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="sub">03 &middot; what the tool contract buys</div>
+  <h2>Two stages pxpipe doesn't have, then the same pixels</h2>
+  <p>
+    A proxy has to be fast and safe on arbitrary traffic, so pxpipe images more or less what it
+    receives. A tool gets handed a specific payload with intent, and that changes what you can do
+    <i>before</i> pixels. tanuki distills logs first (repeated lines collapse to one exemplar plus a
+    count; near-dupes fold into templates; error and warn lines are never touched), then optionally
+    compresses prose on a 5-level ladder with an exact-recall guard for code, hashes and paths.
+    Character cuts multiply through pixel cuts, which is where the numbers get silly.
+  </p>
+  <p>One real 200 KB journal log (1,623 lines), this machine, this week:</p>
+  <div class="meter" id="m1">
+    <div class="mrow"><div class="mname">raw text</div><div class="mtrack"><div class="mfill f-dim" data-w="100"></div></div><div class="mval"><b>51,168</b> tok</div></div>
+    <div class="mrow"><div class="mname">imaged (pxpipe path)</div><div class="mtrack"><div class="mfill f-cop" data-w="21"></div></div><div class="mval"><b>10,752</b> &minus;79%</div></div>
+    <div class="mrow"><div class="mname">distill &rarr; imaged</div><div class="mtrack"><div class="mfill f-mos" data-w="12"></div></div><div class="mval"><b>6,160</b> &minus;88%</div></div>
+    <div class="mrow"><div class="mname">distill + codebook + tiny</div><div class="mtrack"><div class="mfill f-mos" data-w="5"></div></div><div class="mval"><b>2,576</b> &minus;95%</div></div>
+  </div>
+  <p class="mnote">
+    Imaging alone gets &minus;79%. The stages in front more than double it. All 272 error/warn lines
+    verbatim in the output; distill reported 1,624 &rarr; 890 lines. Reproduce:
+    <span class="m">npx tanuki-context estimate &lt;log&gt; 2 --distill --codebook --font tiny</span>
+  </p>
+  <p style="margin-top:22px">
+    On top of distill sit three density knobs, all off pxpipe's parity path, all reversible or
+    legend-decodable. Measured against the shared imaging baseline (level 0, patch pricing):
+  </p>
+  <table>
+    <thead><tr><th>knob</th><th>mechanism</th><th>code</th><th>prose</th><th>log</th></tr></thead>
+    <tbody>
+      <tr><td><code>pack</code> (default)</td><td>single-cell tabs, <code>&#8677;N</code> indent runs, width-trimmed pages. Byte-exact round-trip, unit-tested</td><td class="n">&minus;5%</td><td class="n">&minus;0%</td><td class="n">&minus;0%</td></tr>
+      <tr><td><code>codebook</code></td><td>repeated long tokens and path prefixes become one-cell sigils; expansion carried in a visible <code>&middot;legend&middot;</code> line</td><td class="n">&minus;10%</td><td class="n">&minus;0%</td><td class="n">&minus;40%</td></tr>
+      <tr><td><code>font: tiny</code></td><td>same atlas box-filtered to 4&times;6 cells; 32.1 chars per vision-token. 99.7% read-back in our A/B, so it's opt-in</td><td class="n">&minus;43%</td><td class="n">&minus;40%</td><td class="n">&minus;40%</td></tr>
+      <tr class="win"><td><b>stacked</b></td><td>everything above</td><td class="n"><b>&minus;43%</b></td><td class="n"><b>&minus;40%</b></td><td class="n"><b>&minus;65%</b></td></tr>
+    </tbody>
+  </table>
+  <p class="mnote">
+    Corpora: this repo's README (prose), src/main.ts (code), a 400-line path-heavy synthetic log.
+    The full table prints on every <span class="m">bun test</span> run; 9 tests assert the floors,
+    the pack round-trip, codebook reversibility, and append-stable pages.
+  </p>
+  <p style="margin-top:20px">
+    One more thing a proxy can't easily justify but a tool can: <b>tiny payloads</b>. pxpipe's page
+    is always full-width, so a two-line error costs a full-width row of patches. tanuki's
+    <code>pack</code> trims page width to the widest actual row. A 70-char error line: 17 tokens as
+    text, 56 as a full-width image, <b>13 packed</b>. The verdict flips, and <code>estimate</code>
+    is how you find out for free.
+  </p>
+</section>
+
+<section id="footprint">
+  <div class="sub">04 &middot; operational weight</div>
+  <h2>What you install, what it costs to run</h2>
+  <table>
+    <thead><tr><th>metric</th><th>tanuki-context</th><th>pxpipe</th></tr></thead>
+    <tbody>
+      <tr><td>shape</td><td>MCP stdio server, npm package, <b>zero runtime deps</b>, 0.97 MB tarball</td><td>local proxy + dashboard + reader profiles, node_modules tree</td></tr>
+      <tr><td>integration</td><td>one line of MCP client config</td><td>none (that's the point of a proxy), but it must sit in your request path</td></tr>
+      <tr><td>spawn &rarr; first MCP response</td><td class="n">86 ms (bun) / 106 ms (node)</td><td class="n">152 ms (reference server)</td></tr>
+      <tr><td>idle RSS</td><td class="n">50 MB (bun) / 80 MB (node)</td><td class="n">177 MB</td></tr>
+      <tr><td>distill, 12 MB rclone log</td><td class="n">0.34 s</td><td class="n">0.49 s (reference impl., identical counts)</td></tr>
+      <tr><td>emoji / astral planes</td><td>rendered (92,812 codepoints; unifont_upper tier)</td><td>escaped as <code>[U+HEX]</code></td></tr>
+      <tr><td>unassigned codepoints</td><td colspan="2">both escape as <code>[U+HEX]</code>; nothing drops silently (their fix, we adopted it)</td></tr>
+      <tr><td>providers</td><td>Anthropic patch pricing (28-px grid)</td><td>Anthropic, OpenAI, Gemini, Grok reader profiles</td></tr>
+    </tbody>
+  </table>
+  <p class="mnote">
+    Timing/RSS measured on the same machine (Ryzen 7 9700X), same files, benchmark harness in
+    <span class="m">reference/benchmark.mjs</span>. The 12 MB distill compares suppression counts
+    across engines and they match exactly.
+  </p>
+</section>
+
+<section id="honesty">
+  <div class="sub">05 &middot; the numbers game</div>
+  <h2>Read both headline claims carefully</h2>
+  <p>
+    pxpipe's README leads with "~59&ndash;70% lower end-to-end bill." Ours could lead with
+    "&minus;95% on a journal log." Both are true and both are marketing until you name the
+    denominator. Their number mixes workloads and includes cache pricing effects; our &minus;95% is
+    one log with every knob on. The honest comparables:
+  </p>
+  <ul>
+    <li><b>Imaging alone, identical input:</b> identical by construction. 25/25 parity, same pixels, same patch count. Nobody wins this row, which is the point.</li>
+    <li><b>Real traffic, proxy mode:</b> 76.5% input-token cut. That's pxpipe's own event log on our traffic, counted against a free <code>count_tokens</code> counterfactual. It's a good number. It's also the number an earlier stats script inflated to 99.6% by ignoring 6.5M cache-read tokens, which is why every figure in tanuki now names what it's divided by.</li>
+    <li><b>Log-shaped payloads, tool mode:</b> &minus;88 to &minus;95% total. No proxy equivalent exists because the stages that do it (distill, codebook) need to know what the payload is.</li>
+  </ul>
+  <p>
+    Their context-window chart ("1M tokens &rarr; ~19M chars imaged") is arithmetic on the same
+    density we share, so we have no quarrel with it. If anything the tiny font extends it: at 32.1
+    chars per vision-token the same 1M-token window holds ~32M characters, with the stated 99.7%
+    read-back caveat attached.
+  </p>
+</section>
+
+<section id="verdict">
+  <div class="sub">06 &middot; so which one</div>
+  <h2>Pick by who you trust to decide</h2>
+  <div class="verdict">
+    <p>
+      <b>Run pxpipe</b> when you can't touch the client and want the whole request compressed,
+      system prompt included, and you accept a rewriting middlebox in your API path to get it.
+      Nothing else does that job.
+    </p>
+    <p>
+      <b>Run tanuki-context</b> when your agent speaks MCP and you want the model to choose:
+      estimate first, render when it wins, distill logs before they ever become pixels, and keep
+      every transform decodable from the page itself. You give up system-prompt coverage; you get
+      back consent, selectivity, and two extra compression stages the proxy can't reach.
+    </p>
+    <p style="margin-bottom:0">
+      They also compose. tanuki upstream of the API, pxpipe in front of it, nothing conflicts;
+      the engines are the same code lineage and now share the same token model. Our position, since
+      an agent already voted with its refusal: the imaging belongs in the open, where the model can
+      see what's being done to its own context.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap" style="padding:0">
+    <p class="src">
+      <span class="k">this repo //</span> github.com/Osyna/tanuki-context @ d5b0dcf &middot; MIT<br>
+      <span class="k">upstream //</span> github.com/teamchong/pxpipe @ v0.11.0 (patch pricing #27, K surgery #127, [U+HEX] escapes #96 all adopted here)<br>
+      <span class="k">reproduce //</span> <span class="m">bun test</span> (knob table + invariants) &middot; <span class="m">node reference/benchmark.mjs</span> (25/25 parity vs pxpipe's renderer, timing, 12 MB distill) &middot; <span class="m">bun reference/methods-report.mjs</span> (per-knob HTML) &middot; <span class="m">bun run parity</span> (byte-exact pixels vs the frozen rust branch)<br>
+      <span class="k">machine //</span> AMD Ryzen 7 9700X &middot; node v26.4.0 &middot; bun 1.3.14 &middot; 2026-07-26<br>
+      <span class="k">caveats //</span> read-back accuracy figures (99.7% tiny-font, byte-exact legend reconstruction) come from the rust-era A/B, one model family; re-run before betting exact-quote workflows on them. Savings depend on content shape: prose without repeats gets &minus;40%, not &minus;95%.
+    </p>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var fills=document.querySelectorAll('.mfill');
+  function paint(){fills.forEach(function(f){f.style.width=f.getAttribute('data-w')+'%';});}
+  if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches){paint();return;}
+  if('IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){paint();io.disconnect();}});},{threshold:.2});
+    io.observe(document.getElementById('m1'));
+  }else{setTimeout(paint,100);}
+})();
+</script>
+</body>
+</html>
