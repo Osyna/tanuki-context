@@ -8,6 +8,7 @@
 //!      tanuki-context render <file> [level] [outdir]
 //!      tanuki-context stash <file>
 //!      tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+//!      tanuki-context run [--query re] -- <command> [args...]
 //!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
 mod atlas;
@@ -27,6 +28,7 @@ use std::io::{BufRead, Write};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_INLINE_PAGES: usize = 6;
+const RUN_INLINE_MAX: usize = 8000; // chars (~2k tokens) the run wrapper prints inline
 
 struct PipelineOut {
     stage0: Option<Value>,
@@ -592,9 +594,61 @@ fn main() {
                 max_pages: num("--max-pages", d.max_pages as f64) as usize,
             });
         }
+        Some("run") => {
+            // rtk-style wrapper: run the command, hand the agent distilled output
+            // instead of the firehose, keep the full capture fetchable. Exit code
+            // passes through untouched.
+            let sep = args.iter().position(|a| a == "--");
+            let cmd = sep
+                .map(|i| &args[i + 1..])
+                .filter(|c| !c.is_empty())
+                .expect("usage: tanuki-context run [--query re] -- <command> [args...]");
+            let query = args
+                .iter()
+                .position(|a| a == "--query")
+                .filter(|&qi| qi < sep.unwrap())
+                .and_then(|qi| args.get(qi + 1))
+                .map(String::as_str);
+            let out = std::process::Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .output()
+                .unwrap_or_else(|e| panic!("spawn failed: {e}"));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let captured = if stderr.is_empty() {
+                stdout.into_owned()
+            } else {
+                format!("{stdout}\n--- stderr ---\n{stderr}")
+            };
+            let code = out.status.code().unwrap_or(0);
+            let d = distill::distill_log(&captured, query, 2);
+            let s = &d.stats;
+            let mut lines = vec![format!(
+                "[tanuki run] exit {code} · {} -> {} lines · {}% of chars removed",
+                s["origLines"], s["outLines"], s["savedPct"]
+            )];
+            // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
+            // if real usage ever wants one.
+            if d.distilled.chars().count() <= RUN_INLINE_MAX
+                || captured.chars().count() <= RUN_INLINE_MAX
+            {
+                lines.push(d.distilled);
+                if captured.chars().count() > RUN_INLINE_MAX {
+                    let (id, _) = stash::stash_text(&captured).expect("write stash");
+                    lines.push(format!(
+                        "full output stashed: tanuki-context fetch {id} [--query re] [--lines a-b]"
+                    ));
+                }
+            } else {
+                let (_id, overview) = stash::stash_text(&captured).expect("write stash");
+                lines.push(overview);
+            }
+            print!("{}\n", lines.join("\n"));
+            std::process::exit(code);
+        }
         Some("serve") | None => serve(),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch] ...");
+            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run] ...");
             std::process::exit(1);
         }
     }

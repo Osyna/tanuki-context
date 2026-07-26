@@ -87,7 +87,20 @@ pub struct Distilled {
 
 pub fn distill_log(text: &str, query: Option<&str>, context: usize) -> Distilled {
     let clean = ANSI.replace_all(text, "");
-    let lines: Vec<&str> = clean.split('\n').collect();
+    // rtk-style truncation for terminal progress: a captured line full of \r
+    // frames ("45%\r46%\r...done") is one line on a real terminal - keep only
+    // the final frame, exactly what the screen would have shown. A lone
+    // trailing \r is CRLF, not a frame boundary: strip it first.
+    let lines: Vec<&str> = clean
+        .split('\n')
+        .map(|l| {
+            let s = l.strip_suffix('\r').unwrap_or(l);
+            match s.rfind('\r') {
+                Some(cr) => &s[cr + 1..],
+                None => s,
+            }
+        })
+        .collect();
     let orig_lines = lines.len();
     let masked: Vec<String> = lines.iter().map(|l| mask_line(l)).collect();
     let important: Vec<bool> = lines.iter().map(|l| IMPORTANT.is_match(l)).collect();
@@ -321,5 +334,26 @@ mod order_tests {
         let alpha = tail.find("alpha service").expect("alpha group in summary");
         let beta = tail.find("beta worker").expect("beta group in summary");
         assert!(alpha < beta, "equal-count groups must keep first-seen order");
+    }
+}
+#[cfg(test)]
+mod cr_tests {
+    use super::*;
+
+    #[test]
+    fn crlf_lines_survive_as_plain_lines() {
+        let d = distill_log("foo\r\nbar", None, 2);
+        assert_eq!(d.distilled, "foo\nbar");
+        assert_eq!(d.stats["origLines"], 2);
+        assert_eq!(distill_log("foo\r", None, 2).distilled, "foo");
+    }
+
+    #[test]
+    fn cr_progress_frames_collapse_to_last_frame() {
+        let d = distill_log("pull: 10%\rpull: 99%\rpull: done", None, 2);
+        assert_eq!(d.distilled, "pull: done");
+        assert_eq!(d.stats["origLines"], 1);
+        // CRLF-terminated frame line: strip the CRLF \r first, then collapse
+        assert_eq!(distill_log("pull: 1%\rpull: ok\r\nnext", None, 2).distilled, "pull: ok\nnext");
     }
 }
