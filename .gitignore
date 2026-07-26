@@ -4,3 +4,4 @@ node_modules/
 reference/**/*.html
 *.bak
 tools/data/
+.bench-journal.log
