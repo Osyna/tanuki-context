@@ -41,6 +41,52 @@ npx tanuki-context render build.log 2 ./pages --codebook
 # → ./pages/page0.png ...
 ```
 
+## Clients
+
+Any MCP client works — the default command is a stdio MCP server. Ready-made
+wiring, per client:
+
+**OMP (oh-my-pi)** — `~/.omp/agent/mcp.json`, or `.omp/mcp.json` in the project:
+
+```json
+{ "mcpServers": { "tanuki-context": { "command": "npx", "args": ["-y", "tanuki-context"] } } }
+```
+
+**jcode** — `~/.jcode/mcp.json`, or `.jcode/mcp.json` in the project (jcode is
+stdio-only; `"shared": true` reuses one server across sessions):
+
+```json
+{ "mcpServers": { "tanuki-context": { "command": "npx", "args": ["-y", "tanuki-context"], "shared": true } } }
+```
+
+**pi** — pi has no MCP layer; this package doubles as a pi extension
+(`"pi"` manifest in package.json), so it installs as a native pi package:
+
+```
+pi install npm:tanuki-context
+```
+
+The five `tanuki_*` tools register natively (typebox schemas); under the hood
+the extension spawns this package's own stdio server per session.
+
+**Claude Code**:
+
+```
+claude mcp add tanuki-context -- npx -y tanuki-context
+```
+
+**Prefer the Rust engine?** Install the parity-maintained binary and point any
+of the entries above at it:
+
+```
+cargo install --git https://github.com/Osyna/tanuki-context --branch rust
+```
+
+then use `"command": "tanuki-context", "args": []` in the JSON snippets, or
+`TANUKI_BIN=~/.cargo/bin/tanuki-context` for the pi extension. Same five
+tools, same numbers — `reference/parity-ts.mjs` asserts the two engines
+byte-identical.
+
 ## How it works
 
 ```mermaid
@@ -241,6 +287,7 @@ box-filtered to the same cells.
 | --------------------- | ------------------------------------------------------------------------ |
 | `src/main.ts`         | MCP stdio server (hand-rolled JSON-RPC) + CLI (entry: `src/cli.ts`)       |
 | `src/agent.ts`        | Claude Agent SDK glue: `withTanuki`, in-process `tanukiSdkServer`         |
+| `src/pi.ts`           | pi extension: five native tools over a spawned stdio server (`TANUKI_BIN` picks the engine) |
 | `src/distill.ts`      | stage 0: 3-pass log distiller (runs, blocks, template near-dupes, query) |
 | `src/ladder.ts`       | stage 1: levels 0-4 with the exact-recall guard                           |
 | `src/codebook.ts`     | repeated tokens and path prefixes to sigils plus `·legend·` (opt-in)      |

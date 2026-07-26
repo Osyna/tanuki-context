@@ -251,6 +251,23 @@ pasting logs. The entry split (`src/cli.ts` runs `main()`; `src/main.ts` is
 now an importable library) is what makes this module possible without
 starting a server as an import side effect.
 
+### Client wiring (OMP, jcode, pi)
+
+MCP-native clients (OMP, jcode, Claude Code) need only a config entry; the
+README carries the exact snippets. pi is the interesting case: it has no MCP
+layer at all — tools come from TypeScript extensions. Rather than duplicate
+the pipeline behind pi's tool API, `src/pi.ts` is a ~180-line stdio JSON-RPC
+client that spawns a `tanuki-context` server and forwards `tools/call`
+verbatim; pi's `ToolResult` content blocks are structurally identical to
+MCP's (`{type:"text"|"image", data, mimeType}`), so results pass through
+untouched. That thinness is what makes the extension engine-agnostic:
+`TANUKI_BIN` swaps the spawned server for the Rust binary and nothing else
+changes — one code path, both engines, and the parity harness guarantees the
+numbers match. The npm package doubles as a pi package via the `"pi"`
+manifest field (`pi install npm:tanuki-context`); `typebox` stays out of the
+runtime dependencies because pi provides it to extensions (documented
+"Available Imports"), preserving the zero-dependency claim.
+
 ## 3. The Rust chapter (and why `main` is TypeScript now)
 
 The MCP is stdio: clients spawn it per session, so **startup latency and
