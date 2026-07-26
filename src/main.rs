@@ -6,6 +6,8 @@
 //! CLI: tanuki-context distill <file> [query]
 //!      tanuki-context estimate <file> [level] [--distill]
 //!      tanuki-context render <file> [level] [outdir]
+//!      tanuki-context stash <file>
+//!      tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
 //!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
 mod atlas;
@@ -15,6 +17,8 @@ mod ladder;
 mod png;
 mod proxy;
 mod render;
+mod sha256;
+mod stash;
 mod stats;
 
 use base64::Engine;
@@ -242,6 +246,42 @@ fn tool_compress(args: &Value) -> Value {
     ])
 }
 
+/// Stash fetch gate: pages win only when they clearly beat raw text
+/// (>=25% and >=300 tokens cheaper, and few enough pages to inline).
+fn stash_pages_win(tokens: u64, pages: usize, raw_tok: u64) -> bool {
+    tokens as f64 <= raw_tok as f64 * 0.75
+        && raw_tok as i64 - tokens as i64 >= 300
+        && pages <= MAX_INLINE_PAGES
+}
+
+fn tool_stash(args: &Value) -> Result<Value, String> {
+    let text = args["text"].as_str().unwrap_or("");
+    let (_, overview) = stash::stash_text(text).map_err(|e| format!("stash failed: {e}"))?;
+    Ok(json!([{ "type": "text", "text": overview }]))
+}
+
+fn tool_fetch(args: &Value) -> Result<Value, String> {
+    let id = args["id"].as_str().unwrap_or("");
+    let slice = stash::fetch_slice(id, args["query"].as_str(), args["lines"].as_str())?;
+    let r = render::render_text(&slice, true, true, render::Font::Normal);
+    let chars = slice.chars().count();
+    let raw_tok = text_tokens(chars);
+    if !stash_pages_win(r.tokens, r.pages.len(), raw_tok) {
+        return Ok(json!([{ "type": "text", "text": slice }]));
+    }
+    let marker = format!(
+        "[tanuki-context stash {id}: slice of {chars} chars imaged as {} PNG page(s), ~{} vs ~{raw_tok} text tokens. ↵=newline →=tab ⇥N=indent]",
+        r.pages.len(),
+        r.tokens,
+    );
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut content = vec![json!({ "type": "text", "text": marker })];
+    for page in &r.pages {
+        content.push(json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }));
+    }
+    Ok(json!(content))
+}
+
 fn level_schema() -> Value {
     json!({ "type": "integer", "minimum": 0, "maximum": 4 })
 }
@@ -273,6 +313,16 @@ fn tools_list() -> Value {
             "name": "tanuki_stats",
             "description": "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates).",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "tanuki_stash",
+            "description": "Park bulky text outside the context window (content-addressed file under TANUKI_STASH or ~/.tanuki/stash) and get back a compact map: distill stats, top repeats, first/last lines, and the stash id. Pay a few hundred tokens now, fetch slices later - the retrieval pattern, with tanuki pricing on the way back.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop }, "required": ["text"] }
+        },
+        {
+            "name": "tanuki_fetch",
+            "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" } }, "required": ["id"] }
         }
     ] })
 }
@@ -290,6 +340,8 @@ fn tools_call(params: &Value) -> Result<Value, String> {
         "tanuki_stats" => {
             json!([{ "type": "text", "text": serde_json::to_string_pretty(&stats::px_stats()).unwrap() }])
         }
+        "tanuki_stash" => tool_stash(args)?,
+        "tanuki_fetch" => tool_fetch(args)?,
         other => return Err(format!("unknown tool: {other}")),
     };
     Ok(json!({ "content": content }))
@@ -455,6 +507,59 @@ fn main() {
                 json!({ "medianMs": times[times.len() / 2], "runs": runs, "result": result })
             );
         }
+        Some("stash") => {
+            let file = args.get(2).expect("usage: tanuki-context stash <file>");
+            let text = std::fs::read_to_string(file).expect("read file");
+            let (_id, overview) = stash::stash_text(&text).expect("write stash");
+            println!("{overview}");
+        }
+        Some("fetch") => {
+            // tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+            let id = args
+                .get(2)
+                .expect("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]");
+            let mut outdir: Option<&str> = None;
+            let (mut query, mut lines) = (None, None);
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--query" => {
+                        query = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    "--lines" => {
+                        lines = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    other => {
+                        outdir.get_or_insert(other);
+                        i += 1;
+                    }
+                }
+            }
+            let slice = stash::fetch_slice(id, query, lines).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1)
+            });
+            let r = render::render_text(&slice, true, true, render::Font::Normal);
+            let raw_tok = text_tokens(slice.chars().count());
+            if stash_pages_win(r.tokens, r.pages.len(), raw_tok) {
+                println!(
+                    "{}",
+                    json!({ "mode": "pages", "pages": r.pages.len(),
+                            "imageTokens": r.tokens, "rawTextTokens": raw_tok })
+                );
+                if let Some(dir) = outdir {
+                    std::fs::create_dir_all(dir).expect("mkdir");
+                    for (i, page) in r.pages.iter().enumerate() {
+                        std::fs::write(format!("{dir}/page{i}.png"), &page.png).expect("write png");
+                    }
+                }
+            } else {
+                println!("{}", json!({ "mode": "text" }));
+                println!("{slice}");
+            }
+        }
         Some("proxy") => {
             // tanuki-context proxy [--port N] [--upstream URL] [--level N] [--distill]
             //   [--codebook] [--font tiny] [--min-chars N] [--ratio X] [--min-save N] [--max-pages N]
@@ -489,7 +594,7 @@ fn main() {
         }
         Some("serve") | None => serve(),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render] ...");
+            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch] ...");
             std::process::exit(1);
         }
     }
@@ -558,5 +663,65 @@ mod tests {
             "text": text, "level": 3, "distill": true, "codebook": true, "font": "tiny",
         }));
         assert_eq!(plain["recommend"], knobbed["recommend"]);
+    }
+
+    #[test]
+    fn stash_fetch_small_slice_stays_text() {
+        stash::with_test_dir("gate-text", || {
+            let (id, _) = stash::stash_text("tiny one\ntiny two\ntiny three").unwrap();
+            let content = tool_fetch(&json!({ "id": id, "lines": "1-2" })).unwrap();
+            assert_eq!(content, json!([{ "type": "text", "text": "tiny one\ntiny two" }]));
+        })
+    }
+
+    #[test]
+    fn stash_fetch_big_slice_returns_pages_with_marker() {
+        stash::with_test_dir("gate-pages", || {
+            let big: String = (0..400)
+                .map(|i| format!("row {i:04} the quick brown tanuki jumps over the lazy log line payload\n"))
+                .collect();
+            let (id, _) = stash::stash_text(&big).unwrap();
+            let content = tool_fetch(&json!({ "id": id, "lines": "1-400" })).unwrap();
+            let arr = content.as_array().unwrap();
+
+            // recompute the gate inputs independently
+            let slice = stash::fetch_slice(&id, None, Some("1-400")).unwrap();
+            let r = render::render_text(&slice, true, true, render::Font::Normal);
+            let chars = slice.chars().count();
+            let raw = text_tokens(chars);
+            assert!(stash_pages_win(r.tokens, r.pages.len(), raw), "premise: gate must fire");
+
+            let marker = format!(
+                "[tanuki-context stash {id}: slice of {chars} chars imaged as {} PNG page(s), ~{} vs ~{raw} text tokens. ↵=newline →=tab ⇥N=indent]",
+                r.pages.len(),
+                r.tokens,
+            );
+            assert_eq!(arr[0], json!({ "type": "text", "text": marker }));
+            assert_eq!(arr.len(), 1 + r.pages.len());
+            for img in &arr[1..] {
+                assert_eq!(img["type"], "image");
+                assert_eq!(img["mimeType"], "image/png");
+                assert!(img["data"].as_str().unwrap().len() > 100);
+            }
+        })
+    }
+
+    #[test]
+    fn stash_tool_errors_route_through_jsonrpc_error_path() {
+        stash::with_test_dir("gate-errs", || {
+            // neither arg
+            let e = tools_call(&json!({ "name": "tanuki_fetch", "arguments": { "id": "x" } }));
+            assert_eq!(e.unwrap_err(), "give exactly one of query or lines");
+            // unknown id
+            let e = tools_call(&json!({
+                "name": "tanuki_fetch", "arguments": { "id": "000000000000", "lines": "1-2" },
+            }));
+            assert_eq!(e.unwrap_err(), "unknown stash id: 000000000000");
+            // stash overview comes back as a single text block
+            let v = tools_call(&json!({ "name": "tanuki_stash", "arguments": { "text": "a\nb" } })).unwrap();
+            let text = v["content"][0]["text"].as_str().unwrap();
+            assert!(text.starts_with("stashed "), "{text}");
+            assert!(!text.ends_with('\n'));
+        })
     }
 }
