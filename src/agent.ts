@@ -34,7 +34,7 @@ export const TANUKI_TOOL_NAMES = [
 /// Canned guidance for agents. Used as the SDK server `instructions` block and
 /// exported so teams can append it to a shared system prompt.
 export const TANUKI_INSTRUCTIONS = `tanuki-context turns bulky text (logs, command output, docs) into dense PNG pages that cost a fraction of the text tokens.
-Workflow: call tanuki_estimate first (instant, exact, never renders pixels). Its "recommend" field prices the reversible route; for logs, recommend.withDistill prices the distill route - do not probe combos by hand. If the verdict says "PIPELINE cheaper", call tanuki_render with the recommended knobs and use the returned pages instead of pasting the text.
+Workflow: call tanuki_estimate first (instant, exact, never renders pixels). Its "recommend" field prices the reversible route; for logs, recommend.withDistill prices the distill route - do not probe combos by hand. If the verdict says "PIPELINE cheaper", call tanuki_render with the recommended knobs and use the returned pages instead of pasting the text. Pass model:"<your model>" and cached:true when the text is already in the prompt cache - the returned "cost" field prices it in real dollars, and cached content is usually cheaper left as text (a cache-read token is ~0.1x a fresh one), so do not image it.
 For logs, pass distill:true (repeats collapse, error/warn lines stay verbatim; add query:"regex" to slice). For prose you will not quote verbatim, level 2-3 shrinks it further. codebook:true helps path-heavy logs. Never image content you must quote byte-exact at level 4 or font tiny.
 For huge references you will only consult occasionally: tanuki_stash parks the text outside context for a few hundred tokens of map; tanuki_fetch pulls slices later, auto-imaged when pages win.
 Pages decode as: \u21b5 = newline, \u2192 = tab, \u21e5N = N leading spaces, a trailing \u00b7legend\u00b7 line maps sigils back to full tokens.`;
@@ -127,6 +127,8 @@ export function tanukiSdkToolSpecs(z: ZodNamespace): SdkToolSpec[] {
     pack: z.boolean().optional().describe("indent RLE + width trim, lossless (default true)"),
     font: z.enum(["normal", "tiny"]).optional().describe("tiny = 4x6 cells, ~40% fewer tokens, gated"),
     codebook: z.boolean().optional().describe("repeated tokens/paths -> sigils + legend"),
+    model: z.string().optional().describe("estimate: price the decision for this model (opus/sonnet/haiku/gpt/gemini)"),
+    cached: z.boolean().optional().describe("estimate: text already prompt-cached this turn? imaging it usually loses"),
   };
   const wrap = (blocks: unknown[]): { content: unknown[] } => ({ content: blocks });
   const guard = async (fn: () => unknown[]): Promise<{ content: unknown[]; isError?: boolean }> => {
@@ -145,7 +147,7 @@ export function tanukiSdkToolSpecs(z: ZodNamespace): SdkToolSpec[] {
     },
     {
       name: "tanuki_estimate",
-      description: "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Instant; call this first.",
+      description: "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Pass model and/or cached:true for a real-dollar 'cost' verdict (cached content usually should not be imaged). Instant; call this first.",
       inputSchema: pipe,
       handler: (args) => guard(() => [{ type: "text", text: jstring(toolEstimate(args), true) }]),
     },

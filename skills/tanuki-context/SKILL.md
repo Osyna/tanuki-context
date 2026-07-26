@@ -1,6 +1,6 @@
 ---
 name: tanuki-context
-version: 0.4.1
+version: 0.5.0
 description: |
   Cut input-token cost by rendering bulky text (logs, command output, long
   docs) as dense PNG pages the model reads at a fraction of the price, or by
@@ -34,6 +34,12 @@ verbatim, and every drop is counted.
      `{ id, lines: "a-b" }`. Big slices arrive as pages automatically.
    - `"TEXT cheaper"` -> just use the text. Small inputs are not worth an
      image even when the math technically favors one.
+   - **Already cached?** If the text is already in the prompt cache (a file
+     the harness re-sends every turn), pass `{ model: "<your model>",
+     cached: true }`. `tanuki_estimate` adds a `cost` block in real dollars:
+     a cache-read token costs ~0.1x a fresh one, so imaging cached content
+     usually *loses* even with fewer tokens - `cost.cheaper` says "TEXT" and
+     you leave it alone. Pass `model` alone to price a one-shot decision.
 3. **For noisy logs**, add `distill: true` (and `query: "regex"` for a
    slice). Error/warn/fail lines survive verbatim; repeats become one
    exemplar plus an exact xN count.

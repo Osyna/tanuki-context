@@ -244,6 +244,32 @@ Two further properties:
   map 305 tok; the every-failure-line slice 4,704 as pages vs 22,111 as
   text. Storage is `$TANUKI_STASH` or `~/.tanuki/stash`, plain files, the
   user's own bytes.
+- **situation-aware cost (`estimate` model/cached): the "codeburn calculation."**
+  The verdict compared token *counts* — `imageTokens < rawTextTokens` — which
+  equals real cost only when both sides bill at the same per-token rate. On
+  Anthropic they do *uncached* (image/visual tokens bill at the input rate), so
+  the count was a correct proxy there and still is. It is wrong in the two spots
+  §5/§6 already flagged in prose: **cached** content (a cache-read token costs
+  ~0.1× a fresh one, so imaging content that would ride the cache is a net loss)
+  and **non-Anthropic** providers (images priced on a different, tile-based
+  count). Borrowed from [codeburn](https://github.com/getagentseal/codeburn),
+  which prices every call by real input/output/**cache-read**/cache-write rates
+  because not all tokens cost the same; and from
+  [headroom](https://github.com/headroomlabs-ai/headroom)'s content-router
+  premise that the *decision* should be situation-aware, not one fixed
+  threshold. Passing `model` and/or `cached:true` to `tanuki_estimate` adds a
+  `cost` block (real dollars, `cheaper`, `savedPct`, `breakevenImageTokens`).
+  Only the *ratios* (cache-read, image) drive the verdict; absolute $/Mtok are
+  labeled list prices (`RATES_AS_OF`) overridable via `TANUKI_RATES`, so a price
+  drift is a config edit, not a code change — the calibration knob a real price
+  table needs. Image-token *counts* stay Anthropic patch-grid, so the dollar
+  figure is Anthropic-calibrated and the non-Anthropic `note` says so. Gated by
+  construction: no `model`/`cached` argument ⇒ no `cost` field, so the default
+  result and the parity harness stay byte-identical. Rejected from both sources:
+  Headroom's output-token steering (verbosity notes, effort routing) is model
+  behavior, not deterministic accounting — the same LLMLingua line we hold; and
+  codeburn's live LiteLLM price fetch would break the zero-dependency claim, so
+  hardcoded fallbacks + an env override stand in.
 
 ### Implicit mode — the middlebox, readmitted with rules
 

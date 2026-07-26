@@ -73,6 +73,13 @@ No AI client at all, just curious what it would save you:
 npx tanuki-context estimate some-big-file.log 0
 ```
 
+Price the decision in real dollars — a cache-read token costs ~0.1× a fresh
+one, so `--cached` flips the verdict when the text would ride the prompt cache:
+
+```
+npx tanuki-context estimate some-big-file.log 0 --model claude-opus-4 --cached
+```
+
 ## Installing it: two ways, same tools
 
 **npm (the default).** `npx -y tanuki-context` downloads a 0.98 MB tarball
@@ -122,13 +129,16 @@ Leave it alone when:
   proxy gate both say so.
 - **your bill is output-dominated.** tanuki cuts input tokens only. If
   most of your spend is the model's own output, fix that first.
-- **you are not on Anthropic pricing.** Verdicts use Anthropic's
-  28-px patch grid. OpenAI and Google price images differently (tiles,
-  fixed per-image rates), so every verdict needs re-deriving before you
-  trust it there.
-- **the bulk is already prompt-cached.** Cache reads cost a tenth of
-  fresh input; imaging content that was riding the cache can be a net
-  loss. The proxy never touches `cache_control` blocks for this reason.
+- **you are not on Anthropic pricing.** Image-token *counts* use Anthropic's
+  28-px patch grid; OpenAI and Google price images differently (tiles, fixed
+  per-image rates). Pass `model` to `tanuki_estimate` for a cost verdict with
+  that provider's rates — but the count itself is Anthropic-calibrated, and the
+  result's `note` says so. Re-derive before trusting dollars there.
+- **the bulk is already prompt-cached.** Cache reads cost a tenth of fresh
+  input, so imaging content that was riding the cache is usually a net loss.
+  Pass `cached:true` to `tanuki_estimate` and the `cost` verdict computes it —
+  it flips to "TEXT cheaper" exactly when the cache makes text the cheaper byte.
+  The proxy never touches `cache_control` blocks for the same reason.
 
 ## The three ways to run it
 
