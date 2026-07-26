@@ -279,6 +279,8 @@ describe("dist/cli.js MCP session", () => {
       "tanuki_distill",
       "tanuki_compress",
       "tanuki_stats",
+      "tanuki_stash",
+      "tanuki_fetch",
     ]);
 
     // estimate JSON from our own server; fields asserted below

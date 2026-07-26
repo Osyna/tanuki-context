@@ -153,6 +153,26 @@ const TOOLS: { name: string; label: string; description: string; parameters: unk
     parameters: Type.Object({}),
     snippet: "Session savings summary from the tanuki/pxpipe event log",
   },
+  {
+    name: "tanuki_stash",
+    label: "Tanuki Stash",
+    description:
+      "Park bulky text outside the context window (content-addressed file under TANUKI_STASH or ~/.tanuki/stash) and get back a compact map: distill stats, top repeats, first/last lines, and the stash id. Pay a few hundred tokens now, fetch slices later - the retrieval pattern, with tanuki pricing on the way back.",
+    parameters: Type.Object({ text: textProp }),
+    snippet: "Park huge text on disk for a few hundred tokens of map; fetch slices later",
+  },
+  {
+    name: "tanuki_fetch",
+    label: "Tanuki Fetch",
+    description:
+      "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
+    parameters: Type.Object({
+      id: Type.String(),
+      query: Type.Optional(Type.String()),
+      lines: Type.Optional(Type.String()),
+    }),
+    snippet: "Pull a stashed slice; big answers arrive as cheap dense pages",
+  },
 ];
 
 export default function (pi: ExtensionAPI) {

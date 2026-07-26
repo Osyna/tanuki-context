@@ -215,6 +215,19 @@ Two further properties:
   trade read-back accuracy. The same lazy-engineering rule that shaped the
   pipeline — stop at the cheapest step that suffices — applied to the
   protocol around it.
+- **stash + fetch: the retrieval pattern, absorbed.** Inspired directly by
+  [context-mode](https://www.npmjs.com/package/context-mode)'s model —
+  content parked outside the window, queried on demand — after measuring it
+  head to head. Retrieval's two weak spots are awareness (a blind store; the
+  model must guess what to ask) and big answers (returned at full text
+  price). `tanuki_stash` fixes the first with a ~300-token deterministic map
+  (distill stats, top repeats, first/last lines, a content-address id);
+  `tanuki_fetch` fixes the second by running slices through the proxy gate —
+  pages when they win by ≥25%/300 tokens, text otherwise. Content-addressed
+  ids (sha256/12) make re-stashing free. Measured on the 200 KB journal:
+  map 305 tok; the every-failure-line slice 4,704 as pages vs 22,111 as
+  text. Storage is `$TANUKI_STASH` or `~/.tanuki/stash`, plain files, the
+  user's own bytes.
 
 ### Implicit mode — the middlebox, readmitted with rules
 

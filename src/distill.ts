@@ -62,7 +62,7 @@ function isRustWs(cp: number): boolean {
 }
 
 /** Rust `str::trim` (Unicode-whitespace on both ends). */
-function rustTrim(s: string): string {
+export function rustTrim(s: string): string {
   let a = 0;
   let b = s.length;
   while (a < b && isRustWs(s.charCodeAt(a))) a++;
@@ -140,7 +140,7 @@ function coarseKey(masked: string): string {
 }
 
 /** Rust `truncate_chars`: first n codepoints of s. */
-function truncateChars(s: string, n: number): string {
+export function truncateChars(s: string, n: number): string {
   let i = 0;
   let c = 0;
   const len = s.length;
