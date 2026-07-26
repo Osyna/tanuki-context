@@ -20,8 +20,8 @@ const TMP = mkdtempSync(path.join(os.tmpdir(), "tanuki-methods-"));
 // ---- samples: real repo content + a synthetic path-heavy log (reproducible) --
 function pathLog(n) {
   const dirs = [
-    "/var/lib/backup/snapshots/2026-07-15/home/irvin/Projects/tanuki-context/src",
-    "/var/lib/backup/snapshots/2026-07-15/home/irvin/Projects/pxpipe/dist/assets",
+    "/var/lib/backup/snapshots/2026-07-15/home/user/Projects/tanuki-context/src",
+    "/var/lib/backup/snapshots/2026-07-15/home/user/Projects/pxpipe/dist/assets",
     "/srv/k8s/volumes/pvc-8842/containers/ingest-worker/logs",
   ];
   let seed = 7;
