@@ -10,7 +10,6 @@ import {
   NL_LITERAL,
   NL_SENTINEL,
   estimateText,
-  imageTokens,
   neutralizePack,
   reflowPack,
   renderText,
@@ -39,7 +38,7 @@ const LOG = (() => {
 
 const textTokens = (s: string): number => Math.round([...s].length / 4);
 const est = (text: string, pack: boolean, font: "normal" | "tiny"): number =>
-  imageTokens(estimateText(text, true, pack, font).pixels);
+  estimateText(text, true, pack, font).tokens;
 
 // ------------------------------------------------- pack: lossless round-trip
 
@@ -139,9 +138,10 @@ describe("codebook is reversible", () => {
 // ------------------------------------------------------- the results table
 
 describe("measured savings vs pxpipe baseline", () => {
-  // floors deliberately below the commit's claims (log -62, source -51,
-  // prose -38) so corpus drift doesn't flake the suite.
-  const FLOORS = { prose: 30, source: 45, log: 55 };
+  // floors deliberately below the measured cuts under the 28-px patch model
+  // (log -65, source -43, prose -40; the patch model cut the BASELINE ~4%,
+  // so relative knob savings sit below the old px/750 claims).
+  const FLOORS = { prose: 30, source: 38, log: 55 };
 
   test("stacked knobs clear the claimed floors on all three corpora", () => {
     const rows: string[] = [];

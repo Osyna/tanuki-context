@@ -13,7 +13,7 @@ import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
-import { estimateText, imageTokens, parseFont, renderText } from "./render.ts";
+import { estimateText, parseFont, renderText } from "./render.ts";
 import { Float, pxStats } from "./stats.ts";
 
 const VERSION = "0.1.0";
@@ -213,7 +213,7 @@ function toolEstimate(args: unknown): Record<string, unknown> {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
-  const imgTok = imageTokens(est.pixels);
+  const imgTok = est.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
   const rawTok = textTokens(origChars);
@@ -243,7 +243,7 @@ function toolRender(args: unknown): unknown[] {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
-  const imgTok = imageTokens(r.pixels);
+  const imgTok = r.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
   const rawTok = textTokens(origChars);
@@ -587,7 +587,7 @@ function main(): void {
       const font = parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal");
       const p = stage01(text, level, false, null, useCb);
       const r = renderText(p.compressed, true, pack, font);
-      const tok = imageTokens(r.pixels);
+      const tok = r.tokens;
       process.stdout.write(
         jstring(
           {
@@ -639,7 +639,7 @@ function main(): void {
           const r = renderText(p.compressed, true, false, "normal");
           result = {
             pages: r.pages.length,
-            imageTokens: imageTokens(r.pixels),
+            imageTokens: r.tokens,
             stage1Chars: charCount(p.compressed),
             dropped: r.dropped,
           };
