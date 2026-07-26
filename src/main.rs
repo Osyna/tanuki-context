@@ -13,6 +13,7 @@
 
 mod atlas;
 mod codebook;
+mod cost;
 mod distill;
 mod ladder;
 mod png;
@@ -149,7 +150,9 @@ fn tool_estimate(args: &Value) -> Value {
     let img_tok = est.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
-    json!({
+    let model = args["model"].as_str();
+    let cached = args["cached"].as_bool().unwrap_or(false);
+    let mut out = json!({
         "engine": "pxpipe",
         "level": format!("{} {}", p.level, name),
         "loss": loss,
@@ -167,7 +170,13 @@ fn tool_estimate(args: &Value) -> Value {
         "font": if font == render::Font::Tiny { "tiny" } else { "normal" },
         "codebook": if a.codebook { json!(p.cb_entries) } else { json!(false) },
         "verdict": if img_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
-    })
+    });
+    // Situation-aware real cost: only when a model or cache state is supplied,
+    // so the default result (and the parity harness) stay byte-identical.
+    if model.is_some() || cached {
+        out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached);
+    }
+    out
 }
 
 fn tool_render(args: &Value) -> Value {
@@ -302,8 +311,8 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_estimate",
-            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route - one call replaces manual knob probing.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" } }, "required": ["text"] }
+            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4) and/or cached:true to add a 'cost' field that prices the decision in real dollars: a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
@@ -418,7 +427,7 @@ fn main() {
         }
         Some("estimate") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]",
+                "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -430,13 +439,21 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .map(String::as_str)
                 .unwrap_or("normal");
-            let v = tool_estimate(&json!({
+            let model = args
+                .iter()
+                .position(|a| a == "--model")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            let mut req = json!({
                 "text": text, "level": level,
                 "distill": flag("--distill"),
                 "pack": !flag("--no-pack"),
                 "font": font,
                 "codebook": flag("--codebook"),
-            }));
+                "cached": flag("--cached"),
+            });
+            if let Some(m) = model { req["model"] = json!(m); }
+            let v = tool_estimate(&req);
             println!("{}", serde_json::to_string(&v).unwrap());
         }
         Some("render") => {
