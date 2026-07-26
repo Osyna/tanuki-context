@@ -166,6 +166,34 @@ describe("measured savings vs pxpipe baseline", () => {
   });
 });
 
+// -------------------------------------------------- recommend: ladder walk
+
+describe("recommend: server-side knob walk in one estimate call", () => {
+  test("repetitive log: recommends distill and beats the naive probe", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const log = Array.from(
+      { length: 400 },
+      (_, i) => `2026-07-26 INFO copied /srv/data/prod/batch/segment_${String(i % 9).padStart(5, "0")}.parquet ok`,
+    ).join("\n");
+    const e = toolEstimate({ text: log, level: 0 });
+    // unchecked cast: toolEstimate returns Record<string, unknown>; shape is asserted below
+    const rec = e.recommend as Record<string, number | boolean>;
+    expect(Object.keys(rec).sort()).toEqual(["codebook", "distill", "imageTokens", "pages", "tinyImageTokens"]);
+    expect(rec.distill).toBe(true);
+    expect(rec.imageTokens).toBeLessThan(e.imageTokens as number);
+    expect(rec.tinyImageTokens).toBeLessThanOrEqual(rec.imageTokens as number);
+  });
+
+  test("plain short prose: zero knobs recommended (earliest combo wins ties)", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: "One plain paragraph that repeats nothing and is not a log.", level: 0 });
+    // unchecked cast: shape asserted in the sibling test
+    const rec = e.recommend as Record<string, number | boolean>;
+    expect(rec.distill).toBe(false);
+    expect(rec.codebook).toBe(false);
+  });
+});
+
 // ------------------------------------------------ append-stable pagination
 
 describe("append-stable pages (prompt-cache reuse)", () => {

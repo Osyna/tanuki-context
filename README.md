@@ -58,8 +58,10 @@ That is the MCP stdio server. Register it in any client:
 Or poke at the CLI first. Real output, same 200 KB journal slice:
 
 ```
-npx tanuki-context estimate journal.log 2 --distill --codebook
-# { "imageTokens": 3920, "rawTextTokens": 51200, "pages": 3, "verdict": "PIPELINE cheaper", ... }
+npx tanuki-context estimate journal.log 0
+# { "imageTokens": 10752, "verdict": "PIPELINE cheaper",
+#   "recommend": { "distill": true, "codebook": true, "imageTokens": 3920,
+#                  "pages": 3, "tinyImageTokens": 2352 }, ... }
 npx tanuki-context render journal.log 2 ./pages --codebook
 # ./pages/page0.png ...
 ```
@@ -168,10 +170,15 @@ repetition to bite, `pack` needs indentation.
 | tool              | arguments                                                 | returns                                          |
 | ----------------- | --------------------------------------------------------- | ------------------------------------------------ |
 | `tanuki_render`   | `text, level?, distill?, query?, pack?, font?, codebook?` | PNG page blocks + savings breakdown              |
-| `tanuki_estimate` | same as render                                            | exact page geometry and token math, numbers only |
+| `tanuki_estimate` | same as render                                            | page geometry, token math, and a `recommend` field: the cheapest safe knob set, priced |
 | `tanuki_distill`  | `text, query?`                                            | stage 0 alone; output stays greppable text       |
 | `tanuki_compress` | `text, level`                                             | stage 1 alone                                    |
 | `tanuki_stats`    | none                                                      | savings summary from the session event log       |
+
+`estimate` walks the safe knob ladder server-side (plain, codebook, distill,
+both, at level 0) and returns the first rung that holds as `recommend`, with
+the tiny-font price alongside. Probing those combos by hand costs about 590
+tokens of tool chatter; the walk is one call.
 
 `estimate` never touches pixel data. Call it on everything; render only when
 the verdict says the pipeline wins.
@@ -219,6 +226,12 @@ it never does:
 - image the latest message (you may need to quote it)
 - rewrite blocks carrying `cache_control` (that would break their cache)
 - rewrite anything when text is cheaper; those requests forward byte-for-byte
+
+One thing it deliberately reuses: when the same oversized block appears
+twice in one request (agents re-read files constantly), the second
+byte-identical copy becomes a one-line pointer to the pages above instead
+of the same pages again. Exact repeats only; a one-byte difference images
+independently.
 
 Responses stream through untouched. Savings land in `~/.pxpipe/events.jsonl`
 (the same file `tanuki_stats` reads), with the baseline named: what Anthropic

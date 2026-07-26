@@ -105,6 +105,32 @@ describe("transform rules", () => {
     expect(Array.isArray(c)).toBe(true);
     expect(c[0].text).toStartWith("[tanuki-context:");
   });
+
+  test("byte-identical repeat of an imaged block becomes a pointer, no images", () => {
+    const body = JSON.stringify({ messages: [msg("user", BIG), msg("user", BIG), msg("user", "latest")] });
+    const r = transformRequestBody(body, CFG);
+    expect(r).not.toBeNull();
+    const m = parse(r).messages;
+    const first = m[0].content as Block[];
+    const second = m[1].content as Block[];
+    const firstImages = first.filter((b) => b.type === "image").length;
+    expect(firstImages).toBeGreaterThan(0);
+    expect(second.length).toBe(1);
+    expect(second[0].type).toBe("text");
+    expect(second[0].text).toContain("byte-identical to a block imaged above");
+    expect(r!.imagedBlocks).toBe(2);
+    expect(r!.imageCount).toBe(firstImages); // the repeat added zero images
+    expect(r!.savedTokens).toBeGreaterThan(Math.round(BIG.length / 4)); // repeat saved ~its whole text cost
+  });
+
+  test("a one-byte difference is not a duplicate", () => {
+    const body = JSON.stringify({ messages: [msg("user", BIG), msg("user", `${BIG}!`), msg("user", "latest")] });
+    const r = transformRequestBody(body, CFG);
+    expect(r).not.toBeNull();
+    const m = parse(r).messages;
+    expect((m[0].content as Block[]).some((b) => b.type === "image")).toBe(true);
+    expect((m[1].content as Block[]).some((b) => b.type === "image")).toBe(true);
+  });
 });
 
 describe("wire behaviour", () => {
