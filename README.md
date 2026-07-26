@@ -73,20 +73,22 @@ No AI client at all, just curious what it would save you:
 npx tanuki-context estimate some-big-file.log 0
 ```
 
-## The two modes
+## The three ways to run it
 
 **Explicit (MCP tools) — the default and the recommendation.** Your AI gets
-five tools. It calls `tanuki_estimate` on bulky text, reads the verdict, and
-renders only when the pipeline wins. The model stays in charge and can see
-exactly what happened to every byte. Since 0.2.0 the estimate answer includes
-a `recommend` field — the cheapest safe settings, already priced — so one
-call replaces a whole round of trial and error:
+seven tools. It calls `tanuki_estimate` on bulky text, reads the verdict,
+and renders only when the pipeline wins. The model stays in charge and can
+see exactly what happened to every byte. The estimate answer prices the
+knobs for you — reversible ones as the headline, the lossy-but-counted
+distill route separately, because "cheapest" and "safe" are different
+claims:
 
 ```
 npx tanuki-context estimate journal.log 0
 # { "imageTokens": 10752, "verdict": "PIPELINE cheaper",
-#   "recommend": { "distill": true, "codebook": true, "imageTokens": 4256,
-#                  "pages": 3, "tinyImageTokens": 2576 }, ... }
+#   "recommend": { "codebook": true, "imageTokens": 8624, "pages": 6,
+#                  "tinyImageTokens": 5208,
+#                  "withDistill": { "codebook": true, "imageTokens": 4256 } }, ... }
 ```
 
 **Implicit (proxy) — for clients you can't modify.** A small local relay.
@@ -100,7 +102,27 @@ npx tanuki-context proxy                    # listens on 127.0.0.1:8484
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
 ```
 
-Both modes run the same engine and log their savings to the same file, which
+**The `run` wrapper — for the tokens that burn in your terminal.**
+[rtk](https://github.com/rtk-ai/rtk) proved that the cheapest place to cut
+agent tokens is command output, before it ever reaches the model, and does
+it with per-command parsers for a hundred-plus tools. tanuki adopts the
+shape with its own generic machinery: wrap any command, get the distilled
+output inline (repeats counted, errors verbatim, progress bars collapsed to
+their final frame), and — when the output is huge — the full capture parked
+in the stash. Measured, verbatim:
+
+```
+tanuki-context run -- npm install --loglevel silly typescript
+# [tanuki run] exit 0 · 137 -> 54 lines · 70% of chars removed
+# ... errors verbatim, ×N counts, the stash pointer when output is big ...
+```
+
+Exit codes pass through untouched, so agents and scripts can wrap blindly.
+If you want rtk's hand-tuned per-command output shapes, use rtk itself —
+the two stack fine (rtk for the commands it knows, `run` for everything
+else plus the stash escape hatch).
+
+All modes run the same engine and log their savings to the same file, which
 `tanuki_stats` summarizes.
 
 ## What people actually use it for
@@ -238,6 +260,56 @@ escapes. Nothing disappears silently.
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
 | append-stable pages | appending text never changes earlier pages | prompt caching keeps pricing them at cache rates |
 | stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |
+| `run` wrapper | wrap any command; distilled output inline, full capture stashed | -70% of chars on chatty commands, before tokenization |
+| progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
+
+## What wins where
+
+Six kinds of content, measured 2026-07-26 on this machine. All corpora are
+real: a resampled system journal, a fresh `cargo build -v` of a crate with
+three dependencies, an `npm install --loglevel silly`, this repo's own
+TypeScript sources and docs, and a `journalctl -o json` slice. Identifiers
+were rewritten to placeholders first; repetition and structure untouched.
+Numbers are tokens; "reversible" = pack + codebook only (byte-exact or
+legend-decodable), "distill route" = repeats collapsed with exact counts
+(honest for logs, wrong for code), "tiny" = the 4x6 font on top of the
+reversible pick (99.7% glyph read-back).
+
+| corpus | raw text | caveman (L4 text) | pxpipe export | tanuki reversible | tanuki distill route | tanuki tiny |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| system journal, 200 KB | 51,200 | 51,198 | 11,966 | 8,624 | **4,256** | 5,208 |
+| cargo build -v, 21 KB | 5,413 | 5,413 | 4,402 | **784** | 784 | 448 |
+| npm install silly, 12 KB | 3,131 | 3,128 | 1,922 | 504 | **224** | 336 |
+| TypeScript source, 111 KB | 28,349 | 28,024 | 53,554 † | **5,656** | 4,592 ‡ | 3,416 |
+| markdown docs, 51 KB | 12,909 | 11,797 | 14,139 † | **2,688** | 2,632 ‡ | 1,624 |
+| journalctl JSON, 200 KB | 51,200 | 51,200 | 12,129 | **10,696** | 7,840 | 6,384 |
+
+† pxpipe's own CLI prints the warning here ("70.5% more expensive" on the
+source corpus) and its proxy would refuse to image these — its export flow
+preserves layout, so deeply indented content renders sparse. The gap is
+tanuki's `pack` step collapsing indentation, not the engine (it is the same
+engine).
+‡ cheaper than the reversible route, but distill collapses similar-looking
+lines — fine for logs, not for code or docs you want intact. That is why
+`recommend` prices it separately instead of calling it safe.
+
+The same table as advice:
+
+| your content | use | expect |
+| --- | --- | --- |
+| noisy logs (journal, CI, install) | `distill: true`, add `codebook` for path-heavy ones | **-90 to -93%** |
+| build/tool output, live | `tanuki-context run -- <cmd>` | -70% of chars before tokens even enter |
+| source code | reversible knobs only (`pack` is on by default) | **-80%**, byte-exact |
+| docs / prose | reversible knobs; tiny font if read-back risk is fine | -79 to -87% |
+| structured JSON | reversible + codebook | -79% |
+| "I'll only need two slices of this" | `tanuki_stash` + `tanuki_fetch` | ~300-token map, slices from ~112 |
+| "one narrow answer, never the file" | [context-mode](https://www.npmjs.com/package/context-mode)-style retrieval, or a stash you never fetch from | ~270/question |
+| wordy prose that must stay text | ladder levels 2-4 (caveman) | -9% on real docs; it is the weakest tool here |
+
+Caveman-style text compression losing every matchup it enters is our own
+level 4 — we ship it, and the guard that makes it safe on code is exactly
+what makes it a no-op there. Text-side rewording just does not compete
+with pixel pricing.
 
 ## Benchmarks
 
@@ -266,7 +338,7 @@ the reference server is the original node MCP wrapping pxpipe's library):
 | distill a 12 MB log     | 0.42 s  | 0.31 s  | 0.28 s  | -        |
 | install                 | 0.98 MB tarball, zero deps | same | 5.7 MB static binary | node_modules tree |
 
-Correctness: 46 TypeScript tests, 32 Rust tests, and a 103-check parity
+Correctness: 48 TypeScript tests, 36 Rust tests, and a 103-check parity
 harness that holds the two engines to byte-identical JSON and
 pixel-identical PNGs on every knob combination, including distilled
 renders and a full MCP session with error paths.
@@ -458,6 +530,7 @@ npx tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--fon
 npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 npx tanuki-context stash <file>             # park text, print the map + id
 npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+npx tanuki-context run [--query re] -- <command> [args...]   # rtk-style wrapper
 ```
 
 The example page above is one command:
@@ -512,7 +585,7 @@ Node-compatible files:
 
 ```
 bun run build        # dist/cli.js + dist/agent.js + dist/pi.js
-bun test             # 46 tests
+bun test             # 48 tests
 bun run parity       # TS vs rust binary, 103 checks (needs TANUKI_BIN)
 ```
 
@@ -535,6 +608,15 @@ PXPIPE_DIST=~/Projects/pxpipe/dist node tools/gen-glyphs.mjs
   are the read-back evidence this README leans on. If you want the
   whole-bill transparent proxy with per-model profiles and eval receipts,
   use pxpipe itself; the two compose fine.
+- [rtk](https://github.com/rtk-ai/rtk) is where the `run` wrapper shape
+  comes from: cut command output before the model reads it. rtk does it
+  with hand-tuned parsers for 100+ commands; tanuki's `run` uses its
+  generic distill plus the stash escape hatch. Different tools, same
+  instinct, and they stack.
+- [context-mode](https://www.npmjs.com/package/context-mode) is where the
+  stash pattern comes from: content parked outside the window, queried on
+  demand. `tanuki_stash`/`tanuki_fetch` is that idea with a map up front
+  and imaged slices on the way back.
 - The bitmap fonts inside the atlas are
   [Spleen](https://github.com/fcambus/spleen) 5x8 by Frederic Cambus and
   [GNU Unifont](https://unifoundry.com/unifont/) (BMP coverage plus

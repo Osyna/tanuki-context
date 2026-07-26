@@ -9,6 +9,7 @@
 //!      tanuki-context render <file> [level] [outdir]
 //!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
+import { spawnSync } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
@@ -19,8 +20,9 @@ import { estimateText, parseFont, renderText } from "./render.ts";
 import { fetchSlice, stashText } from "./stash.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 const MAX_INLINE_PAGES = 6;
+const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
 // ------------------------------------------------------- serde_json parity
 
@@ -211,32 +213,33 @@ function pipeArgs(args: unknown): PipeArgs {
   };
 }
 
-/// Ladder walk, server-side: price the four safe knob combos (level 0) in one
-/// pass and name the first rung that holds, so the model does not spend tool
-/// rounds probing. Strictly-less keeps the earliest (fewest-knob) combo on
-/// ties. ponytail: runs 4 extra estimates + 1 distill per call; gate behind a
-/// flag if huge-input latency ever matters.
+/// Ladder walk, server-side: price the knob combos in one pass so the model
+/// does not spend tool rounds probing. The headline fields walk only the
+/// REVERSIBLE knobs (pack is byte-exact, codebook is legend-decodable);
+/// distill is lossy-but-counted and built for logs, so its walk is reported
+/// separately as `withDistill` - never labeled safe, because on source code
+/// collapsing similar-looking lines is not safe. Strictly-less keeps the
+/// earliest (fewest-knob) combo on ties. ponytail: 5 extra estimates + 1
+/// distill per call; gate behind a flag if huge-input latency ever matters.
 function recommendFor(text: string): Record<string, unknown> {
-  const distilled = distillLog(text, null, 2).distilled;
-  const bases: [boolean, string][] = [
-    [false, text],
-    [true, distilled],
-  ];
-  let best = { distill: false, codebook: false, text, tokens: Infinity, pages: 0 };
-  for (const [d, base] of bases) {
+  const walk = (base: string): { codebook: boolean; tokens: number; pages: number; text: string } => {
+    let best = { codebook: false, tokens: Infinity, pages: 0, text: base };
     for (const c of [false, true]) {
       const t = c ? codebookApply(base).text : base;
       const e = estimateText(t, true, true, parseFont("normal"));
-      if (e.tokens < best.tokens) best = { distill: d, codebook: c, text: t, tokens: e.tokens, pages: e.pages };
+      if (e.tokens < best.tokens) best = { codebook: c, tokens: e.tokens, pages: e.pages, text: t };
     }
-  }
-  const tiny = estimateText(best.text, true, true, parseFont("tiny"));
+    return best;
+  };
+  const rev = walk(text);
+  const dis = walk(distillLog(text, null, 2).distilled);
+  const tiny = estimateText(rev.text, true, true, parseFont("tiny"));
   return {
-    codebook: best.codebook,
-    distill: best.distill,
-    imageTokens: best.tokens,
-    pages: best.pages,
+    codebook: rev.codebook,
+    imageTokens: rev.tokens,
+    pages: rev.pages,
     tinyImageTokens: tiny.tokens,
+    withDistill: { codebook: dis.codebook, imageTokens: dis.tokens },
   };
 }
 
@@ -419,7 +422,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_estimate",
         description:
-          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field names the cheapest safe knob set (level 0), so one call replaces manual knob probing.",
+          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route - one call replaces manual knob probing.",
         inputSchema: {
           type: "object",
           properties: {
@@ -825,13 +828,45 @@ export function main(): void {
       }
       break;
     }
+    case "run": {
+      // rtk-style wrapper: run the command, hand the agent distilled output
+      // instead of the firehose, keep the full capture fetchable. Exit code
+      // passes through untouched.
+      const sep = argv.indexOf("--");
+      const cmd = sep !== -1 ? argv.slice(sep + 1) : [];
+      if (cmd.length === 0) fatal("usage: tanuki-context run [--query re] -- <command> [args...]");
+      const qi = argv.indexOf("--query");
+      const query = qi !== -1 && qi < sep ? (argv[qi + 1] ?? null) : null;
+      const r = spawnSync(cmd[0], cmd.slice(1), { encoding: "utf8", maxBuffer: 1 << 28 });
+      if (r.error !== undefined) fatal(`spawn failed: ${r.error.message}`);
+      const captured =
+        (r.stdout ?? "") + ((r.stderr ?? "") !== "" ? `\n--- stderr ---\n${r.stderr}` : "");
+      const code = r.status ?? 0;
+      const d = distillLog(captured, query, 2);
+      const s = d.stats as { origLines: number; outLines: number; savedPct: number };
+      const lines = [`[tanuki run] exit ${code} · ${s.origLines} -> ${s.outLines} lines · ${s.savedPct}% of chars removed`];
+      // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
+      // if real usage ever wants one.
+      if (charCount(d.distilled) <= RUN_INLINE_MAX || charCount(captured) <= RUN_INLINE_MAX) {
+        lines.push(d.distilled);
+        if (charCount(captured) > RUN_INLINE_MAX) {
+          const st = stashText(captured);
+          lines.push(`full output stashed: tanuki-context fetch ${st.id} [--query re] [--lines a-b]`);
+        }
+      } else {
+        const st = stashText(captured);
+        lines.push(st.overview);
+      }
+      process.stdout.write(lines.join("\n") + "\n");
+      process.exit(code);
+    }
     case "serve":
     case undefined:
       serve();
       break;
     default:
       process.stderr.write(
-        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch] ...\n`,
+        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run] ...\n`,
       );
       process.exit(1);
   }

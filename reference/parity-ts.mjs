@@ -29,6 +29,9 @@ function syntheticLog() {
   L.push("2026-07-15T10:05:01.999Z ERROR connection refused to db-primary:5432 after 3 retries");
   for (let i = 0; i < 100; i++)
     L.push(`2026-07-15T10:06:${String(i % 60).padStart(2, "0")}.000Z INFO  retry backoff sleeping 500ms`);
+  for (let i = 0; i < 20; i++)
+    L.push(`fetching chunk ${i}: 10%\rfetching chunk ${i}: 55%\rfetching chunk ${i}: 100% done`);
+  L.push("windows style line\r");
   L.push("done \u00e9\u00e8 \u4e2d\u6587\u30c6\u30b9\u30c8 \u{1F980} end");
   return L.join("\n");
 }

@@ -186,7 +186,15 @@ export function distillLog(
 ): Distilled {
   const context = minRun;
   const clean = text.replace(ANSI, "");
-  const lines = clean.split("\n");
+  // rtk-style truncation for terminal progress: a captured line full of \r
+  // frames ("45%\r46%\r...done") is one line on a real terminal - keep only
+  // the final frame, exactly what the screen would have shown. A lone
+  // trailing \r is CRLF, not a frame boundary: strip it first.
+  const lines = clean.split("\n").map((l) => {
+    const s = l.endsWith("\r") ? l.slice(0, -1) : l;
+    const cr = s.lastIndexOf("\r");
+    return cr === -1 ? s : s.slice(cr + 1);
+  });
   const nLines = lines.length;
   const origLines = nLines;
   const masked = new Array<string>(nLines);

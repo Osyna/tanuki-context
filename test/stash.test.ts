@@ -78,3 +78,28 @@ describe("stash", () => {
     expect(out[0].text).toContain("last: gamma");
   });
 });
+
+describe("run wrapper (rtk-style)", () => {
+  test("exit code passes through; frames collapse; errors verbatim", () => {
+    const script = 'for i in 1 2 3 4 5 6 7 8; do echo "copied file_$i.dat ok"; done; printf "pull: 10%%\\rpull: 99%%\\rpull: done\\n"; echo "ERROR real failure" >&2; exit 3';
+    const r = Bun.spawnSync(["node", "dist/cli.js", "run", "--", "sh", "-c", script]);
+    expect(r.exitCode).toBe(3);
+    const out = r.stdout.toString();
+    expect(out).toStartWith("[tanuki run] exit 3 ·");
+    expect(out).toContain("pull: done");
+    expect(out).not.toContain("pull: 10%");
+    expect(out).toContain("ERROR real failure");
+    expect(out).toContain("×8 (template)");
+  });
+
+  test("huge output is stashed with a fetch pointer", () => {
+    const script = 'i=0; while [ $i -lt 3000 ]; do echo "line $i of much repeated output padding padding"; i=$((i+1)); done';
+    const r = Bun.spawnSync(["node", "dist/cli.js", "run", "--", "sh", "-c", script], {
+      env: { ...process.env, TANUKI_STASH: DIR },
+    });
+    expect(r.exitCode).toBe(0);
+    const out = r.stdout.toString();
+    expect(out).toContain("stashed");
+    expect(out).toMatch(/fetch [0-9a-f]{12}|tanuki_fetch \{"id"/);
+  });
+});
