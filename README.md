@@ -229,6 +229,49 @@ harness that holds the two engines to byte-identical JSON and
 pixel-identical PNGs on every knob combination, including distilled
 renders and a full MCP session with error paths.
 
+## How it compares
+
+Five approaches to the same problem, measured on the same 200 KB journal
+(51,200 tokens raw) on the same machine. They are not five competitors —
+they are different answers to "does the model need to see this at all?",
+and several of them compose.
+
+| approach | what enters context | tokens | what the model can still do |
+| --- | --- | ---: | --- |
+| raw text (baseline) | everything, as text | 51,200 | everything, quotable |
+| caveman-style compression (tanuki ladder L4, stays text) | reworded text | 51,198 (-0%) | on a log: nothing changes — the exact-recall guard protects every line, and unguarded caveman would corrupt them. On prose it manages -6% (DESIGN.md). Wrong tool for logs |
+| ponytail strategy (send only the queried slice: `distill` + `query`) | matched + error lines, as text | 22,110 (-57%) | greppable, quotable text of everything important; the unmatched rest is gone |
+| [pxpipe](https://github.com/teamchong/pxpipe) (its own `export` CLI on this corpus) | 8 PNG pages + prompt + factsheet | ~11,965 (-77%) | read everything back; 96 precision-critical strings ride verbatim in the factsheet |
+| tanuki, distill + render | 4 PNG pages | 5,264 (-90%) | read everything that survives distill: repeats collapsed with exact counts, all 310 error/warn lines verbatim |
+| tanuki, + codebook + tiny font | 2 PNG pages | 2,576 (-95%) | same content, lossy glyphs (99.7% read-back) — opt-in |
+| [context-mode](https://www.npmjs.com/package/context-mode) (sandbox pass over the file) | one analysis result | ~270 per question (-99.5%) | only the answer it asked for; the file never enters context at all |
+
+Reading that honestly:
+
+- **context-mode wins whenever a question suffices.** If the model never
+  needs to *see* the log, ~270 tokens per query is unbeatable. The moment it
+  needs the material in front of it (debugging an unknown, quoting context,
+  "read all of this and tell me what's weird"), retrieval stops being the
+  same product. The two compose: keep the file in context-mode's sandbox,
+  render it with tanuki the day the model actually has to read it.
+- **pxpipe and tanuki are the same engine**, so the gap between -77% and
+  -90% here is not the imaging — it is distill (pxpipe does not de-noise
+  logs) plus the sidecar text its export flow pastes alongside. On prose,
+  where distill does nothing, the two land in the same place. pxpipe's
+  factsheet is a fidelity feature tanuki lacks: guaranteed-verbatim strings
+  next to the pages.
+- **Caveman-style prompt compression is the weakest option for logs**, and
+  tanuki's own level 4 proves it: the guard that makes it safe also makes
+  it a no-op on structured content. It exists for wordy prose.
+- **The ponytail row is a strategy, not a tool**: send only what is needed.
+  It beats nothing on this corpus except raw text, but it composes — the
+  22,110-token slice drawn as pages is 4,704 tokens, and `estimate` will
+  happily price that route for you.
+
+Every row is reproducible: rows 1-3 and 5-6 are single `tanuki-context`
+commands, the pxpipe row is `pxpipe export --stdin < your.log` on their
+CLI, the context-mode row is one `ctx_execute_file` call in its sandbox.
+
 ## Limits, plainly
 
 - **Rendering is exact; reading is a model skill.** Pages are pixel-faithful
