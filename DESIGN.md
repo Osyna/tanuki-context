@@ -107,10 +107,13 @@ reword what must survive byte-exact.
 
 The lossy levels are the safe subset of "Caveman"/token-optimizer-style
 prompt compression. We evaluated and rejected model-based token pruning
-(LLMLingua/RTK): it deletes tokens it judges unimportant, which is exactly
+(LLMLingua): it deletes tokens it judges unimportant, which is exactly
 the silent-confabulation risk pxpipe's own findings warn about. A
 deterministic, inspectable ladder with a protected-line guard gives the
-same win on prose without gambling exact strings.
+same win on prose without gambling exact strings. (An earlier revision
+lumped rtk into that rejection — wrong, and corrected below: rtk is
+deterministic rule-based filtering, not model-based pruning, and 0.4.0
+adopts two of its ideas.)
 
 ### Stage 2 — pxpipe imaging
 
@@ -202,19 +205,32 @@ Two further properties:
   content leaves every earlier page byte-identical (verified by hashing). That
   lets prompt-caching price the unchanged pages at cache rates across turns —
   the biggest lever in the base64 report, stacked on the imaging cut.
-- **still rejected: model-based pruning.** LLMLingua/RTK stays out for the same
+- **still rejected: model-based pruning.** LLMLingua stays out for the same
   reason as before — it deletes tokens it *judges* unimportant, the
   silent-confabulation risk. pack and codebook are deterministic and
   reversible; that line holds.
+- **adopted from [rtk](https://github.com/rtk-ai/rtk)** (deterministic,
+  rule-based — an earlier note here misfiled it next to LLMLingua): the
+  wrapper shape and progress-frame truncation. `tanuki-context run -- <cmd>`
+  passes the exit code through, prints distilled output inline, and stashes
+  the full capture past an 8,000-char budget, so nothing is unrecoverable.
+  Distill now also collapses `\r` progress frames to the final one — what a
+  real terminal would have shown (a lone trailing `\r` is CRLF and is
+  stripped, not collapsed). rtk's per-command parsers for 100+ tools stay
+  rtk's; our wrapper is the generic fallback and the two stack.
+- **`recommend` reshaped in 0.4.0 after the benchmark caught it.** The walk
+  used to label its cheapest combo "safe" — and on source code it picked
+  distill, which collapses similar-looking lines. Cheapest and safe are
+  different claims: the headline now walks reversible knobs only, and the
+  distill route is priced separately under `withDistill`.
 - **`recommend`: the knob walk is server-side.** Tool chatter is context
-  too: probing the four safe knob combos by hand costs ~590 tokens of
-  estimate rounds, and the tool-call overhead of using tanuki is as real as
-  the text it compresses. So every estimate walks the ladder itself (plain,
-  codebook, distill, both — level 0, in-process, no pixel work) and returns
-  the first rung that holds, plus the tiny-font price for anyone willing to
-  trade read-back accuracy. The same lazy-engineering rule that shaped the
-  pipeline — stop at the cheapest step that suffices — applied to the
-  protocol around it.
+  too: probing the knob combos by hand costs ~590 tokens of estimate
+  rounds, and the tool-call overhead of using tanuki is as real as the
+  text it compresses. So every estimate walks the combos itself (level 0,
+  in-process, no pixel work) and returns the first rung that holds, plus
+  the tiny-font price for anyone willing to trade read-back accuracy. The
+  same lazy-engineering rule that shaped the pipeline — stop at the
+  cheapest step that suffices — applied to the protocol around it.
 - **stash + fetch: the retrieval pattern, absorbed.** Inspired directly by
   [context-mode](https://www.npmjs.com/package/context-mode)'s model —
   content parked outside the window, queried on demand — after measuring it
