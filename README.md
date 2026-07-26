@@ -156,8 +156,24 @@ The reference scripts (`reference/node-mcp/compare.mjs`,
 `reference/node-mcp/biglog-report.mjs`) still generate the HTML comparison
 reports; they resolve pxpipe via `PXPIPE_ROOT` (default `~/Projects/pxpipe`).
 
-## Register (MCP)
+## Register (clients)
+
+Install a stable binary once:
+
+```
+cargo install --git https://github.com/Osyna/tanuki-context --branch rust
+# -> ~/.cargo/bin/tanuki-context
+```
+
+Any MCP client takes the same stdio entry:
 
 ```json
-{ "mcpServers": { "tanuki-context": { "command": "/path/to/tanuki-context", "args": [] } } }
+{ "mcpServers": { "tanuki-context": { "command": "tanuki-context", "args": [] } } }
 ```
+
+- **OMP (oh-my-pi)**: put that entry in `~/.omp/agent/mcp.json` (or project `.omp/mcp.json`).
+- **jcode**: `~/.jcode/mcp.json` (or project `.jcode/mcp.json`); add `"shared": true` to reuse one server across sessions.
+- **Claude Code**: `claude mcp add tanuki-context -- tanuki-context`.
+- **pi**: pi has no MCP layer — install the npm package as a pi extension and point it at this binary: `pi install npm:tanuki-context`, then launch pi with `TANUKI_BIN=~/.cargo/bin/tanuki-context`. The extension is a thin stdio client, so the Rust engine serves the tools; numbers are parity-locked either way.
+
+The npm/TS engine (`npx -y tanuki-context`) drops into the same JSON entries.
