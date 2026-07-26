@@ -383,7 +383,7 @@ fn main() {
         }
         Some("render") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]",
+                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -398,7 +398,7 @@ fn main() {
                     .map(String::as_str)
                     .unwrap_or("normal"),
             );
-            let p = stage01(&text, level, false, None, use_cb);
+            let p = stage01(&text, level, args.iter().any(|a| a == "--distill"), None, use_cb);
             let r = render::render_text(&p.compressed, true, pack, font);
             let tok = r.tokens;
             println!(
