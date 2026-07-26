@@ -20,7 +20,7 @@ import { estimateText, parseFont, renderText } from "./render.ts";
 import { fetchSlice, stashText } from "./stash.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 

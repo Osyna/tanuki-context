@@ -1,6 +1,6 @@
 {
   "name": "tanuki-context",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Token-cutting context pipeline as an MCP server: distill logs, compress text, render dense PNG pages (pxpipe imaging engine). Zero dependencies.",
   "license": "MIT",
   "type": "module",
@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "assets",
+    "skills",
     "README.md",
     "LICENSE"
   ],

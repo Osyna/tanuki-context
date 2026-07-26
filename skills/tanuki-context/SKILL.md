@@ -1,0 +1,60 @@
+---
+name: tanuki-context
+version: 0.4.1
+description: |
+  Cut input-token cost by rendering bulky text (logs, command output, long
+  docs) as dense PNG pages the model reads at a fraction of the price, or by
+  parking it outside context and fetching slices. Use when pasting or reading
+  anything over ~2,000 tokens of logs, build output, or documents; when a
+  session is close to its context limit; or before re-reading a large file.
+  Requires the tanuki-context MCP server (tanuki_* tools) and a
+  vision-capable model.
+---
+
+# tanuki-context: pay pixels, not tokens
+
+Text costs ~1 token per 4 characters. A dense PNG page costs a fixed 1,456
+tokens and carries up to 28,080 characters. The tanuki_* tools exploit that
+gap deterministically: nothing is summarized by a model, errors stay
+verbatim, and every drop is counted.
+
+## Workflow
+
+1. **Estimate first, always.** `tanuki_estimate { text }` is instant and
+   never renders pixels. Read two things from the answer:
+   - `recommend` - the cheapest reversible knob set (pack/codebook), priced.
+   - `recommend.withDistill` - the log route (repeats collapsed with exact
+     counts). Cheaper, and honest for logs; do not use it on source code.
+2. **Act on the verdict.**
+   - `"PIPELINE cheaper"` and you need the content in front of you ->
+     `tanuki_render` with the recommended knobs. Use the returned pages
+     instead of pasting the text.
+   - You only need parts of it, now or later -> `tanuki_stash { text }`
+     (returns a ~300-token map + id), then `tanuki_fetch { id, query }` or
+     `{ id, lines: "a-b" }`. Big slices arrive as pages automatically.
+   - `"TEXT cheaper"` -> just use the text. Small inputs are not worth an
+     image even when the math technically favors one.
+3. **For noisy logs**, add `distill: true` (and `query: "regex"` for a
+   slice). Error/warn/fail lines survive verbatim; repeats become one
+   exemplar plus an exact xN count.
+4. **Shell commands with chatty output**: run them as
+   `tanuki-context run -- <cmd>` instead of reading the firehose. Exit code
+   passes through; the full capture is stashed and fetchable.
+
+## Reading the pages
+
+`↵` = original newline · `→` = tab · `⇥N` = N leading spaces · a trailing
+`·legend·` line maps codebook sigils back to full tokens · `[U+XXXX]` = a
+codepoint the atlas has no glyph for · `[×N similar]` = N near-identical
+lines collapsed here.
+
+## Do not
+
+- Do not image content whose exact bytes you must retype later (secrets,
+  hashes, code you are about to edit). Rendering is exact; model read-back
+  of dense hex is not guaranteed.
+- Do not use `font: "tiny"` or ladder levels 2-4 on anything you may need
+  to quote. Tiny is a 99.7%-read-back trade; levels 2-4 reword prose.
+- Do not use `withDistill` numbers on source code or docs you want intact -
+  distill collapses similar-looking lines.
+- Do not probe knob combinations by hand; `recommend` already priced them.
