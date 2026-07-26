@@ -16,9 +16,10 @@ import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText } from "./render.ts";
+import { fetchSlice, stashText } from "./stash.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.2.3";
+export const VERSION = "0.3.0";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------- serde_json parity
@@ -361,6 +362,36 @@ export function toolCompress(args: unknown): unknown[] {
   ];
 }
 
+export function toolStash(args: unknown): unknown[] {
+  const text = asStr(jget(args, "text")) ?? "";
+  const s = stashText(text);
+  return [{ type: "text", text: s.overview }];
+}
+
+export function toolFetch(args: unknown): unknown[] {
+  const id = asStr(jget(args, "id")) ?? "";
+  const slice = fetchSlice(id, asStr(jget(args, "query")) ?? null, asStr(jget(args, "lines")) ?? null);
+  const rawTok = textTokens(charCount(slice));
+  const r = renderText(slice, true, true, parseFont("normal"));
+  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
+  if (!wins) {
+    return [{ type: "text", text: slice }];
+  }
+  const marker =
+    `[tanuki-context stash ${id}: slice of ${charCount(slice)} chars imaged as ${r.pages.length} PNG page(s), ` +
+    `~${r.tokens} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent]`;
+  const content: unknown[] = [{ type: "text", text: marker }];
+  for (const p of r.pages) {
+    const png = p.png;
+    content.push({
+      type: "image",
+      data: Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64"),
+      mimeType: "image/png",
+    });
+  }
+  return content;
+}
+
 function toolsList(): Record<string, unknown> {
   const textProp = { type: "string" };
   const levelSchema = { type: "integer", minimum: 0, maximum: 4 };
@@ -430,6 +461,22 @@ function toolsList(): Record<string, unknown> {
           "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates).",
         inputSchema: { type: "object", properties: {} },
       },
+      {
+        name: "tanuki_stash",
+        description:
+          "Park bulky text outside the context window (content-addressed file under TANUKI_STASH or ~/.tanuki/stash) and get back a compact map: distill stats, top repeats, first/last lines, and the stash id. Pay a few hundred tokens now, fetch slices later - the retrieval pattern, with tanuki pricing on the way back.",
+        inputSchema: { type: "object", properties: { text: textProp }, required: ["text"] },
+      },
+      {
+        name: "tanuki_fetch",
+        description:
+          "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string" }, query: { type: "string" }, lines: { type: "string" } },
+          required: ["id"],
+        },
+      },
     ],
   };
 }
@@ -455,6 +502,16 @@ function toolsCall(
       break;
     case "tanuki_stats":
       content = [{ type: "text", text: jstring(pxStats(), true) }];
+      break;
+    case "tanuki_stash":
+      content = toolStash(args);
+      break;
+    case "tanuki_fetch":
+      try {
+        content = toolFetch(args);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
       break;
     default:
       return { ok: false, error: `unknown tool: ${name}` };
@@ -718,13 +775,63 @@ export function main(): void {
       });
       break;
     }
+    case "stash": {
+      const file = argv[2] ?? fatal("usage: tanuki-context stash <file>");
+      const s = stashText(readFileOrDie(file));
+      process.stdout.write(s.overview + "\n");
+      break;
+    }
+    case "fetch": {
+      const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]");
+      const qi = argv.indexOf("--query");
+      const li = argv.indexOf("--lines");
+      let slice = "";
+      try {
+        slice = fetchSlice(id, qi !== -1 ? (argv[qi + 1] ?? null) : null, li !== -1 ? (argv[li + 1] ?? null) : null);
+      } catch (e) {
+        fatal(e instanceof Error ? e.message : String(e));
+      }
+      const rawTok = textTokens(charCount(slice));
+      const r = renderText(slice, true, true, parseFont("normal"));
+      const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
+      if (!wins) {
+        process.stdout.write(jstring({ mode: "text" }, false) + "\n" + slice + "\n");
+        break;
+      }
+      process.stdout.write(
+        jstring({ imageTokens: r.tokens, mode: "pages", pages: r.pages.length, rawTextTokens: rawTok }, false) + "\n",
+      );
+      const flagVals = new Set([qi + 1, li + 1]);
+      let dir: string | undefined;
+      for (let i = 3; i < argv.length; i++) {
+        if (!argv[i].startsWith("--") && !flagVals.has(i)) {
+          dir = argv[i];
+          break;
+        }
+      }
+      if (dir !== undefined) {
+        try {
+          mkdirSync(dir, { recursive: true });
+        } catch {
+          fatal("mkdir");
+        }
+        for (let i = 0; i < r.pages.length; i++) {
+          try {
+            writeFileSync(`${dir}/page${i}.png`, r.pages[i].png);
+          } catch {
+            fatal("write png");
+          }
+        }
+      }
+      break;
+    }
     case "serve":
     case undefined:
       serve();
       break;
     default:
       process.stderr.write(
-        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render] ...\n`,
+        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch] ...\n`,
       );
       process.exit(1);
   }

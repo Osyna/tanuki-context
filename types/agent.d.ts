@@ -7,6 +7,8 @@ export declare const TANUKI_TOOL_NAMES: readonly [
   "tanuki_distill",
   "tanuki_compress",
   "tanuki_stats",
+  "tanuki_stash",
+  "tanuki_fetch",
 ];
 
 /** Canned agent guidance: estimate first, render on a winning verdict,

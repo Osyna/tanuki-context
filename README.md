@@ -115,7 +115,7 @@ Both modes run the same engine and log their savings to the same file, which
   Agent SDK glue (below), with a canned instruction block that teaches every
   agent the estimate-first habit.
 
-## The five tools
+## The seven tools
 
 | tool              | what it does                                                | when to reach for it                     |
 | ----------------- | ----------------------------------------------------------- | ---------------------------------------- |
@@ -123,7 +123,48 @@ Both modes run the same engine and log their savings to the same file, which
 | `tanuki_render`   | the full pipeline, returns PNG pages + a breakdown           | when estimate says the pipeline wins     |
 | `tanuki_distill`  | de-noises a log, output stays text                          | when you want greppable text, not images |
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
+| `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
+| `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big  | after a stash, when you actually need it |
 | `tanuki_stats`    | totals from the session's savings log                       | end-of-session accounting                |
+
+### Stash: the retrieval pattern, absorbed
+
+Sometimes even 5,000 tokens of pages is too much — the model may only need
+two slices of that log, ever. That is retrieval territory (context-mode's
+home game), and since 0.3.0 tanuki plays it too, with two twists.
+
+`tanuki_stash` writes the text to a content-addressed file (nothing enters
+context) and returns a map. The real one, for the 200 KB journal — 305
+tokens:
+
+```
+stashed a57d29474429 · 204800 bytes · 1434 lines
+distill map: 1434 -> 641 lines · 51% of chars removable · 310 error/warn lines
+top repeats:
+  ×156  2026-07-26T11:10:53+02:00 demo-box tailscaled[740]: magicsock: derp-18 does not know about peer [xfiv4], removing route
+  ×99   2026-07-26T11:27:22+02:00 demo-box tailscaled[740]: open-conn-track: flow TCP ... got RST by peer
+  ...
+first: 2026-07-26T11:10:32+02:00 demo-box tailscaled[740]: [RATELIMIT] ...
+last: 2026-07-26T16:19:40+02:00 demo-box wpa_supplicant[844]: wlan0: CTRL-EVENT-REGDOM ...
+fetch: tanuki_fetch {"id":"a57d29474429","query":"<regex>"} or {"id":"a57d29474429","lines":"a-b"}
+```
+
+Twist one: that map is *awareness*. A pure retrieval store tells the model
+nothing — it has to fish with blind queries. This tells it the time range,
+the noisiest units, the error count, and what the repetition looks like,
+for the price of one paragraph.
+
+Twist two: fetches come back at tanuki pricing. Measured on that stash:
+
+| fetch                          | as text | via tanuki_fetch        |
+| ------------------------------ | ------: | ----------------------- |
+| every error/reset line (query) |  22,111 | **4,704** (4 PNG pages) |
+| lines 1-12                     |     446 | **112** (1 page)        |
+| lines 1-2                      |     ~20 | ~20 (stays text)        |
+
+The gate is the proxy's: pages only when they win by >=25% and >=300
+tokens, six pages max, text otherwise. Same engine, same honesty — the
+slice arrives verbatim or drawn, never paraphrased.
 
 ---
 
@@ -196,6 +237,7 @@ escapes. Nothing disappears silently.
 | `recommend` | the estimate call walks all safe knob combos server-side | saves ~590 tokens of tool-call probing |
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
 | append-stable pages | appending text never changes earlier pages | prompt caching keeps pricing them at cache rates |
+| stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |
 
 ## Benchmarks
 
@@ -224,17 +266,17 @@ the reference server is the original node MCP wrapping pxpipe's library):
 | distill a 12 MB log     | 0.42 s  | 0.31 s  | 0.28 s  | -        |
 | install                 | 0.98 MB tarball, zero deps | same | 5.7 MB static binary | node_modules tree |
 
-Correctness: 39 TypeScript tests, 23 Rust tests, and a 92-check parity
+Correctness: 46 TypeScript tests, 32 Rust tests, and a 103-check parity
 harness that holds the two engines to byte-identical JSON and
 pixel-identical PNGs on every knob combination, including distilled
 renders and a full MCP session with error paths.
 
 ## How it compares
 
-Five approaches to the same problem, measured on the same 200 KB journal
-(51,200 tokens raw) on the same machine. They are not five competitors —
-they are different answers to "does the model need to see this at all?",
-and several of them compose.
+Six approaches to the same problem, measured on the same 200 KB journal
+(51,200 tokens raw) on the same machine. They are not competitors — they
+are different answers to "does the model need to see this at all?", and
+several of them compose.
 
 | approach | what enters context | tokens | what the model can still do |
 | --- | --- | ---: | --- |
@@ -244,16 +286,19 @@ and several of them compose.
 | [pxpipe](https://github.com/teamchong/pxpipe) (its own `export` CLI on this corpus) | 8 PNG pages + prompt + factsheet | ~11,965 (-77%) | read everything back; 96 precision-critical strings ride verbatim in the factsheet |
 | tanuki, distill + render | 4 PNG pages | 5,264 (-90%) | read everything that survives distill: repeats collapsed with exact counts, all 310 error/warn lines verbatim |
 | tanuki, + codebook + tiny font | 2 PNG pages | 2,576 (-95%) | same content, lossy glyphs (99.7% read-back) — opt-in |
+| tanuki, stash + fetch (0.3.0) | a 305-token map now, slices on demand | 305 + 112..4,704 per slice | knows the log's shape immediately; opens only the slices it needs, imaged when big, text when small |
 | [context-mode](https://www.npmjs.com/package/context-mode) (sandbox pass over the file) | one analysis result | ~270 per question (-99.5%) | only the answer it asked for; the file never enters context at all |
 
 Reading that honestly:
 
-- **context-mode wins whenever a question suffices.** If the model never
-  needs to *see* the log, ~270 tokens per query is unbeatable. The moment it
-  needs the material in front of it (debugging an unknown, quoting context,
-  "read all of this and tell me what's weird"), retrieval stops being the
-  same product. The two compose: keep the file in context-mode's sandbox,
-  render it with tanuki the day the model actually has to read it.
+- **context-mode wins whenever a narrow question suffices.** If the model
+  never needs to *see* the log, ~270 tokens per query is unbeatable. Its
+  blind spots are awareness (the store tells the model nothing until it
+  guesses the right question) and big answers (a large slice comes back at
+  full text price). `tanuki_stash`/`tanuki_fetch` is that pattern with both
+  spots covered: a 305-token map up front, and slices that arrive as pages
+  whenever pages win. For the "show me every failure line" job measured
+  above: 305 + 4,704 = 5,009 tokens vs 22,111 for the same lines as text.
 - **pxpipe and tanuki are the same engine**, so the gap between -77% and
   -90% here is not the imaging — it is distill (pxpipe does not de-noise
   logs) plus the sidecar text its export flow pastes alongside. On prose,
@@ -411,6 +456,8 @@ npx tanuki-context distill <file> [query]   # stats JSON to stdout
 npx tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
+npx tanuki-context stash <file>             # park text, print the map + id
+npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
 ```
 
 The example page above is one command:
@@ -465,8 +512,8 @@ Node-compatible files:
 
 ```
 bun run build        # dist/cli.js + dist/agent.js + dist/pi.js
-bun test             # 39 tests
-bun run parity       # TS vs rust binary, 92 checks (needs TANUKI_BIN)
+bun test             # 46 tests
+bun run parity       # TS vs rust binary, 103 checks (needs TANUKI_BIN)
 ```
 
 Regenerating glyphs after a pxpipe atlas rebuild (needs a pxpipe checkout

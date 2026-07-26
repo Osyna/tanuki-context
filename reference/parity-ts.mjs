@@ -38,23 +38,9 @@ const check = (label, ok, detail) => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${!ok && detail ? `\n        ${detail}` : ""}`);
   if (!ok) failures++;
 };
-// Rust iterates a randomized HashMap when ranking repeats: entries with TIED
-// counts land in nondeterministic order (the rust binary itself varies across
-// runs). Canonicalize topRepeats by (count desc, exemplar) before comparing.
-const canon = (v) => {
-  if (Array.isArray(v)) return v.map(canon);
-  if (v && typeof v === "object") {
-    const o = {};
-    for (const k of Object.keys(v)) {
-      o[k] = k === "topRepeats" && Array.isArray(v[k])
-        ? v[k].map(canon).sort((a, b) => (b.count - a.count) || (a.exemplar < b.exemplar ? -1 : a.exemplar > b.exemplar ? 1 : 0))
-        : canon(v[k]);
-    }
-    return o;
-  }
-  return v;
-};
-const deq = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+// Both engines emit topRepeats in deterministic first-seen order since the
+// rust HashMap tie-order fix — compare everything exactly, no canonicalizing.
+const deq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // Decode a grayscale filter-0 PNG produced by either encoder -> raw pixel bytes.
 function pngPixels(buf) {
@@ -142,6 +128,35 @@ for (const file of files) {
       else if (!a.px.equals(b.px)) { pxOk = false; pxDetail = `page${i} pixel mismatch`; }
     }
     check(`render pixels ${extra.join(" ") || "(pack)"}`, pxOk, pxDetail);
+  }
+
+  // stash/fetch CLI: id + overview byte-equal, slices byte-equal, imaged
+  // fetches pixel-equal. Separate stash dirs prove both engines write.
+  {
+    const dTs = path.join(tmp, `stash-ts-${name}`);
+    const dRs = path.join(tmp, `stash-rs-${name}`);
+    const sTs = tsRun(["stash", file], { env: { ...process.env, TANUKI_STASH: dTs } });
+    const sRs = rsRun(["stash", file], { env: { ...process.env, TANUKI_STASH: dRs } });
+    check("stash overview", sTs === sRs, `ts=${JSON.stringify(sTs.slice(0, 200))}\n        rs=${JSON.stringify(sRs.slice(0, 200))}`);
+    const id = sTs.split(" ")[1];
+    const fTs = tsRun(["fetch", id, "--lines", "3-40"], { env: { ...process.env, TANUKI_STASH: dTs } });
+    const fRs = rsRun(["fetch", id, "--lines", "3-40"], { env: { ...process.env, TANUKI_STASH: dRs } });
+    check("fetch lines slice", fTs === fRs, "");
+    const oTs = path.join(tmp, `fetch-ts-${name}`);
+    const oRs = path.join(tmp, `fetch-rs-${name}`);
+    const qTs = tsRun(["fetch", id, oTs, "--query", "error|ERROR"], { env: { ...process.env, TANUKI_STASH: dTs } });
+    const qRs = rsRun(["fetch", id, oRs, "--query", "error|ERROR"], { env: { ...process.env, TANUKI_STASH: dRs } });
+    let qOk = qTs === qRs;
+    let qDetail = qOk ? "" : `ts=${qTs.slice(0, 160)} rs=${qRs.slice(0, 160)}`;
+    if (qOk && qTs.startsWith('{"imageTokens"')) {
+      const pages = JSON.parse(qTs.split("\n")[0]).pages;
+      for (let i = 0; qOk && i < pages; i++) {
+        const a = pngPixels(readFileSync(path.join(oTs, `page${i}.png`)));
+        const b = pngPixels(readFileSync(path.join(oRs, `page${i}.png`)));
+        if (a.w !== b.w || a.h !== b.h || !a.px.equals(b.px)) { qOk = false; qDetail = `fetch page${i} mismatch`; }
+      }
+    }
+    check("fetch query (gated)", qOk, qDetail);
   }
 }
 

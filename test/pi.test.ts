@@ -44,12 +44,14 @@ describe("pi extension (TS engine)", () => {
   });
   afterAll(() => shutdown());
 
-  test("registers the five tanuki tools with object schemas", () => {
+  test("registers the seven tanuki tools with object schemas", () => {
     expect([...tools.keys()].sort()).toEqual([
       "tanuki_compress",
       "tanuki_distill",
       "tanuki_estimate",
+      "tanuki_fetch",
       "tanuki_render",
+      "tanuki_stash",
       "tanuki_stats",
     ]);
     for (const t of tools.values()) {

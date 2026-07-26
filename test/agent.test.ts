@@ -45,6 +45,8 @@ describe("config helpers", () => {
       "mcp__tanuki__tanuki_distill",
       "mcp__tanuki__tanuki_compress",
       "mcp__tanuki__tanuki_stats",
+      "mcp__tanuki__tanuki_stash",
+      "mcp__tanuki__tanuki_fetch",
     ]);
     expect(tanukiAllowedTools("ctx")[0]).toBe("mcp__ctx__tanuki_render");
   });
@@ -127,7 +129,7 @@ describe("real Agent SDK", () => {
     // point node at the real file, not the npx fallback
     expect(cfg.command).toBe(process.execPath);
     expect(cfg.args[0]).toEndWith("dist/cli.js");
-    expect(dist.tanukiAllowedTools().length).toBe(5);
+    expect(dist.tanukiAllowedTools().length).toBe(7);
     const server = (await dist.tanukiSdkServer()) as { type: string };
     expect(server.type).toBe("sdk");
   });
