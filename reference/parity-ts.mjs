@@ -54,7 +54,25 @@ const canon = (v) => {
   }
   return v;
 };
-const deq = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+// v0.11 divergence: the TS pipeline bills Anthropic 28-px patches
+// (⌈w/28⌉×⌈h/28⌉ per page); the frozen rust branch still bills round(px/750).
+// Token-DERIVED values are intentionally different — normalize them out so
+// every other field (geometry, chars, pages, pixels, stats) must still match.
+const TOK_KEYS = new Set(["imageTokens", "totalSavedPct", "verdict"]);
+function normTok(v) {
+  if (typeof v === "string") {
+    if (v.startsWith("{")) { try { return normTok(JSON.parse(v)); } catch {} }
+    return v.replace(/~\d+ image-tokens/g, "~# image-tokens").replace(/TOTAL -\d+%/g, "TOTAL -#%");
+  }
+  if (Array.isArray(v)) return v.map(normTok);
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const [k, val] of Object.entries(v)) o[k] = TOK_KEYS.has(k) ? "#" : normTok(val);
+    return o;
+  }
+  return v;
+}
+const deq = (a, b) => JSON.stringify(canon(normTok(a))) === JSON.stringify(canon(normTok(b)));
 
 // Decode a grayscale filter-0 PNG produced by either encoder -> raw pixel bytes.
 function pngPixels(buf) {
@@ -174,7 +192,7 @@ for (let i = 0; i < Math.min(tsOut.length, rsOut.length); i++) {
     let detail = ok ? "" : `content len ${ta.length} vs ${tb.length}`;
     for (let j = 0; ok && j < tb.length; j++) {
       if (tb[j].type === "text") {
-        ok = ta[j].type === "text" && ta[j].text === tb[j].text;
+        ok = ta[j].type === "text" && normTok(ta[j].text) === normTok(tb[j].text);
         if (!ok) detail = `text block ${j}:\n        ts=${JSON.stringify(ta[j].text)}\n        rs=${JSON.stringify(tb[j].text)}`;
       } else {
         const pa = pngPixels(Buffer.from(ta[j].data, "base64"));

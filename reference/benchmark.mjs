@@ -3,7 +3,7 @@
 // real content, timing both engines in-process (median of N runs, discarded
 // warmup), asserting token parity, and emitting a self-contained HTML report.
 //   node reference/benchmark.mjs [out.html]
-import { readFileSync, writeFileSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
@@ -12,7 +12,9 @@ import { distillLog } from "./node-mcp/distill.mjs";
 import { compressText, LEVELS } from "./node-mcp/compress.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BIN = process.env.TANUKI_BIN || path.join(HERE, "..", "target", "release", "tanuki-context");
+// TANUKI_BIN may point at the rust-branch binary; default is the TS CLI.
+const CMD = (process.env.TANUKI_BIN ||
+  (existsSync(path.join(HERE, "..", "dist", "cli.js")) ? "node dist/cli.js" : "bun src/main.ts")).split(" ");
 const PXPIPE = process.env.PXPIPE_ROOT || path.join(process.env.HOME, "Projects", "pxpipe");
 const OUT = process.argv[2] || path.join(HERE, "benchmark-report.html");
 const RUNS = 3;
@@ -40,11 +42,13 @@ try {
   const j = execSync("journalctl --user -n 3000 --no-pager -o short-iso 2>/dev/null", { encoding: "utf8", maxBuffer: 1 << 26 });
   if (j.length > 100_000) samples.push({ name: "service log · journalctl --user, 3000 lines (real)", kind: "log", file: tmpFile("bm-journal.txt", j) });
 } catch { /* skip */ }
-const SYNC = path.join(PXPIPE, "demo", "logs", "sync.log");
+// 12 MB corpus: first 2 MB is a byte-real slice of the original 126 MB rclone
+// log; the rest cycles those real lines with volatile fields rewritten.
+const SYNC = path.join(PXPIPE, "demo", "logs", "sync-12mb.log");
 let syncFull = null;
 try {
   if (statSync(SYNC).size > 1 << 20) {
-    samples.push({ name: "sync log · 2 MB slice of a real 126 MB rclone log", kind: "log", file: tmpFile("bm-sync2mb.txt", readFileSync(SYNC, "utf8").slice(0, 2 * 1024 * 1024)) });
+    samples.push({ name: "sync log · 2 MB real slice of an rclone log", kind: "log", file: tmpFile("bm-sync2mb.txt", readFileSync(SYNC, "utf8").slice(0, 2 * 1024 * 1024)) });
     syncFull = SYNC;
   }
 } catch { /* skip */ }
@@ -60,14 +64,16 @@ async function nodePipeline(text, { level = 0, distill = false } = {}) {
     const { pages } = await renderTextToImages(neutralize(compressed), { reflow: true });
     const px = pages.reduce((a, p) => a + (p.width || 0) * (p.height || 0), 0);
     if (i > 0) times.push(performance.now() - t0);
-    out = { pages: pages.length, imageTokens: Math.round(px / 750), stage1Chars: [...compressed].length };
+    // v0.11: Anthropic bills 28-px patches, same model tanuki uses
+    const tok = pages.reduce((a, p) => a + Math.ceil((p.width || 1) / 28) * Math.ceil((p.height || 1) / 28), 0);
+    out = { pages: pages.length, imageTokens: tok, stage1Chars: [...compressed].length };
   }
   return { medianMs: median(times), ...out };
 }
 function rustPipeline(file, { level = 0, distill = false } = {}) {
   const argv = ["bench", file, "pipeline", String(level), String(RUNS)];
   if (distill) argv.push("--distill");
-  const r = JSON.parse(execFileSync(BIN, argv, { encoding: "utf8", maxBuffer: 1 << 28 }));
+  const r = JSON.parse(execFileSync(CMD[0], [...CMD.slice(1), ...argv], { encoding: "utf8", maxBuffer: 1 << 28, cwd: path.join(HERE, "..") }));
   return { medianMs: r.medianMs, ...r.result };
 }
 function nodeDistillTimed(text) {
@@ -119,13 +125,13 @@ for (const s of samples) {
   }
 }
 
-// full 126MB distill speed (both engines, counts compared)
+// full 12MB distill speed (both engines, counts compared)
 let bigLog = null;
 if (syncFull) {
   process.stderr.write(`  full sync.log distill (both engines)\n`);
   const text = readFileSync(syncFull, "utf8");
   const nd = nodeDistillTimed(text);
-  const rd = JSON.parse(execFileSync(BIN, ["bench", syncFull, "distill", "0", String(RUNS)], { encoding: "utf8", maxBuffer: 1 << 28 }));
+  const rd = JSON.parse(execFileSync(CMD[0], [...CMD.slice(1), "bench", syncFull, "distill", "0", String(RUNS)], { encoding: "utf8", maxBuffer: 1 << 28, cwd: path.join(HERE, "..") }));
   const match = nd.stats.suppressedLines === rd.result.suppressedLines && nd.stats.templateSuppressed === rd.result.templateSuppressed;
   match ? parityOk++ : parityFail++;
   bigLog = { chars: text.length, nodeMs: nd.medianMs, rustMs: rd.medianMs, match,
@@ -134,10 +140,10 @@ if (syncFull) {
 }
 
 const weights = [
-  await serverWeight("tanuki-context (rust)", BIN, []),
+  await serverWeight("tanuki-context (ts)", CMD[0], CMD.slice(1)),
   await serverWeight("pxpipe MCP (node)", "node", [path.join(HERE, "node-mcp", "server.mjs")]),
 ];
-const binMb = statSync(BIN).size / 1048576;
+const binMb = statSync(existsSync(path.join(HERE, "..", "dist", "cli.js")) ? path.join(HERE, "..", "dist", "cli.js") : CMD[CMD.length - 1]).size / 1048576;
 const cpu = (readFileSync("/proc/cpuinfo", "utf8").match(/model name\s*:\s*(.+)/) || [])[1] || "unknown CPU";
 const nodeV = process.version;
 
@@ -147,7 +153,7 @@ for (const s of samples) {
   for (const r of s.rows)
     console.log(`  ${r.label.padEnd(24)} tok ${String(r.rust.imageTokens).padStart(7)} ${r.match ? "=" : "MISMATCH"}  node ${r.node.medianMs.toFixed(0).padStart(6)}ms  rust ${r.rust.medianMs.toFixed(0).padStart(6)}ms  ${r.speedup.toFixed(1)}x`);
 }
-if (bigLog) console.log(`\nfull 126MB distill: node ${(bigLog.nodeMs / 1000).toFixed(2)}s  rust ${(bigLog.rustMs / 1000).toFixed(2)}s  counts ${bigLog.match ? "identical" : "MISMATCH"}`);
+if (bigLog) console.log(`\nfull 12MB distill: node ${(bigLog.nodeMs / 1000).toFixed(2)}s  ts ${(bigLog.rustMs / 1000).toFixed(2)}s  counts ${bigLog.match ? "identical" : "MISMATCH"}`);
 console.log(`\nparity: ${parityOk} ok, ${parityFail} fail`);
 
 // ---- HTML -----------------------------------------------------------------------
@@ -218,15 +224,15 @@ code{background:#0000003d;padding:1px 6px;border-radius:5px;color:#c9cdff}
 <div class="chips">
   <div class="chip"><b class="${parityFail ? "bad" : ""}">${parityOk}/${parityOk + parityFail}</b><span>parity checks passed (tokens + pages${bigLog ? " + distill counts" : ""})</span></div>
   <div class="chip"><b>${Math.min(...speedups).toFixed(1)}–${Math.max(...speedups).toFixed(1)}×</b><span>rust speedup range</span></div>
-  ${bigLog ? `<div class="chip"><b>${(bigLog.nodeMs / 1000).toFixed(1)}s → ${(bigLog.rustMs / 1000).toFixed(1)}s</b><span>distill, real 126 MB log (${bigLog.match ? "counts identical" : "COUNTS DIFFER"})</span></div>` : ""}
+  ${bigLog ? `<div class="chip"><b>${(bigLog.nodeMs / 1000).toFixed(1)}s → ${(bigLog.rustMs / 1000).toFixed(1)}s</b><span>distill, 12 MB rclone log (${bigLog.match ? "counts identical" : "COUNTS DIFFER"})</span></div>` : ""}
   <div class="chip"><b>${weights[1].firstResponseMs.toFixed(0)}ms → ${weights[0].firstResponseMs.toFixed(0)}ms</b><span>MCP first response</span></div>
   <div class="chip"><b>${weights[1].rssMb.toFixed(0)}MB → ${weights[0].rssMb.toFixed(1)}MB</b><span>server RSS</span></div>
 </div>
 ${samples.map(sampleCard).join("")}
-${bigLog ? `<div class="card"><h2>Full-scale distill · real 126 MB rclone sync log (${fmt(bigLog.chars)} chars)</h2>
+${bigLog ? `<div class="card"><h2>Full-scale distill · 12 MB rclone sync log (${fmt(bigLog.chars)} chars)</h2>
 <table><thead><tr><th>Engine</th><th>Median time</th><th>Chars cut</th><th>Exact ×N suppressed</th><th>Same-template suppressed</th></tr></thead><tbody>
 <tr><td class="lv">node reference</td><td class="num">${(bigLog.nodeMs / 1000).toFixed(2)} s</td><td class="num">−${bigLog.savedPct}%</td><td class="num">${fmt(bigLog.exact)}</td><td class="num">${fmt(bigLog.tmpl)}</td></tr>
-<tr><td class="lv">tanuki (rust)</td><td class="num">${(bigLog.rustMs / 1000).toFixed(2)} s</td><td class="num">−${bigLog.savedPct}%</td><td class="num">${fmt(bigLog.exact)} <span class="ok">${bigLog.match ? "✓ identical" : ""}</span></td><td class="num">${fmt(bigLog.tmpl)} <span class="ok">${bigLog.match ? "✓ identical" : ""}</span></td></tr>
+<tr><td class="lv">tanuki (ts)</td><td class="num">${(bigLog.rustMs / 1000).toFixed(2)} s</td><td class="num">−${bigLog.savedPct}%</td><td class="num">${fmt(bigLog.exact)} <span class="ok">${bigLog.match ? "✓ identical" : ""}</span></td><td class="num">${fmt(bigLog.tmpl)} <span class="ok">${bigLog.match ? "✓ identical" : ""}</span></td></tr>
 </tbody></table></div>` : ""}
 <div class="card"><h2>MCP server weight</h2>
 <table><thead><tr><th>Server</th><th>First response</th><th>RSS</th><th>Deployable</th></tr></thead><tbody>
@@ -234,10 +240,10 @@ ${bigLog ? `<div class="card"><h2>Full-scale distill · real 126 MB rclone sync 
 <tr><td class="lv">${esc(weights[0].label)}</td><td class="num">${weights[0].firstResponseMs.toFixed(0)} ms</td><td class="num">${weights[0].rssMb.toFixed(1)} MB</td><td>one ${binMb.toFixed(1)} MB static binary</td></tr>
 </tbody></table></div>
 <div class="card"><h2>Methodology</h2><p class="note">
-<b>Inputs are real</b>: pxpipe source files (code), pxpipe docs (prose), this machine's live journal, and a 126 MB rclone sync log. Both engines receive byte-identical files.<br>
+<b>Inputs are real</b>: pxpipe source files (code), pxpipe docs (prose), this machine's live journal, and a 12 MB rclone sync log (first 2 MB byte-real, remainder cycled from the same real lines with volatile fields rewritten). Both engines receive byte-identical files.<br>
 <b>Timing is in-process</b> for both engines (rust: <code>tanuki-context bench</code>; node: same functions the reference MCP calls), median of ${RUNS} runs after one discarded warmup — process startup is excluded from op timings and reported separately in the server-weight table.<br>
-<b>Pipeline per row</b>: optional distill (stage 0) → ladder level (stage 1) → pxpipe imaging (stage 2, PNG encode included). Tokens = pixels/750 (Anthropic's pixel pricing); baseline = raw text at chars/4.<br>
-<b>Parity is asserted, not assumed</b>: every row compares pages + image tokens across engines (✓), and the 126 MB distill compares suppression counts. A mismatch would be flagged in red.<br>
+<b>Pipeline per row</b>: optional distill (stage 0) → ladder level (stage 1) → pxpipe imaging (stage 2, PNG encode included). Tokens = 28-px patches, ⌈w/28⌉×⌈h/28⌉ per page (Anthropic's patch pricing); baseline = raw text at chars/4.<br>
+<b>Parity is asserted, not assumed</b>: every row compares pages + image tokens across engines (✓), and the 12 MB distill compares suppression counts. A mismatch would be flagged in red.<br>
 Levels: 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up, code/IDs/hashes/paths are never reworded; distill always keeps error/warn lines verbatim.</p></div>
 </div></body></html>`;
 

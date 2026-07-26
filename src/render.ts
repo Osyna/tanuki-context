@@ -224,14 +224,44 @@ export function splitPages(lines: string[], maxLines: number, maxChars: number):
   return pages;
 }
 
-/// Shared front half of render/estimate: (neutralize -> reflow ->) wrap -> page.
+/// pxpipe v0.11 (#96): a codepoint absent from the atlas renders as a readable
+/// `[U+HEX]` escape instead of a lost cell — except invisible/formatting
+/// codepoints, which stay (and blit as a blank cell, not a ▯).
+export function isEscapeExempt(cp: number): boolean {
+  if (cp < 0x20) return true; // C0 controls (tabs are expanded before this runs)
+  if (cp >= 0x7f && cp <= 0x9f) return true; // DEL + C1 controls
+  if (cp >= 0x0300 && cp <= 0x036f) return true; // combining diacritics
+  if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || cp === 0xfeff)
+    return true; // zero-width / word-joiner / BOM
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return true; // variation selectors
+  if (cp >= 0xe0100 && cp <= 0xe01ef) return true; // variation selectors supplement
+  return false;
+}
+
+export function escapeMissingGlyphs(text: string): string {
+  let out: string | null = null; // lazily materialized on first miss
+  let i = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (rank(cp) < 0 && !isEscapeExempt(cp)) {
+      if (out === null) out = text.slice(0, i);
+      out += `[U+${cp.toString(16).toUpperCase()}]`;
+    } else if (out !== null) {
+      out += ch;
+    }
+    i += ch.length;
+  }
+  return out ?? text;
+}
+
+/// Shared front half of render/estimate: (neutralize -> reflow ->) escape -> wrap -> page.
 function prepPages(text: string, useReflow: boolean, pack: boolean, g: Geom): string[][] {
   const prepped = useReflow
     ? pack
       ? reflowPack(neutralizePack(text))
       : reflow(neutralize(text))
     : text;
-  return splitPages(wrapLines(prepped, g.cols), g.maxLines, g.maxChars);
+  return splitPages(wrapLines(escapeMissingGlyphs(prepped), g.cols), g.maxLines, g.maxChars);
 }
 
 /// Page pixel width: full (pxpipe) unless `pack`, then trimmed to the widest
@@ -314,9 +344,13 @@ function renderPage(lines: string[], g: Geom, pack: boolean, font: Font): Page {
       const baseX = PAD_X + col * g.cw;
       let advance = blit(fb, width, baseX, baseY, ch.codePointAt(0)!, g, font);
       if (advance === 0) {
-        dropped++;
-        if (ch !== " ") blit(fb, width, baseX, baseY, FALLBACK_CP, g, font);
         advance = 1;
+        if (isEscapeExempt(ch.codePointAt(0)!)) {
+          // invisible formatting char: blank cell, not content loss
+        } else {
+          dropped++;
+          if (ch !== " ") blit(fb, width, baseX, baseY, FALLBACK_CP, g, font);
+        }
       }
       col += advance;
     }
@@ -330,6 +364,7 @@ function renderPage(lines: string[], g: Geom, pack: boolean, font: Font): Page {
 export interface Rendered {
   pages: Page[];
   pixels: number;
+  tokens: number;
   dropped: number;
 }
 
@@ -338,17 +373,20 @@ export function renderText(text: string, useReflow: boolean, pack: boolean, font
   const g = geom(font);
   const pages = prepPages(text, useReflow, pack, g).map((p) => renderPage(p, g, pack, font));
   let pixels = 0;
+  let tokens = 0;
   let dropped = 0;
   for (const p of pages) {
     pixels += p.width * p.height;
+    tokens += patchTokens(p.width, p.height);
     dropped += p.dropped;
   }
-  return { pages, pixels, dropped };
+  return { pages, pixels, tokens, dropped };
 }
 
 export interface Estimated {
   pages: number;
   pixels: number;
+  tokens: number;
 }
 
 /// Same geometry as renderText without blitting/encoding — exact, fast,
@@ -362,13 +400,22 @@ export function estimateText(
   const g = geom(font);
   const pageLines = prepPages(text, useReflow, pack, g);
   let pixels = 0;
+  let tokens = 0;
   for (const p of pageLines) {
-    pixels += pageWidth(p, g, pack) * (2 * PAD_Y + p.length * g.ch);
+    const w = pageWidth(p, g, pack);
+    const h = 2 * PAD_Y + p.length * g.ch;
+    pixels += w * h;
+    tokens += patchTokens(w, h);
   }
-  return { pages: pageLines.length, pixels };
+  return { pages: pageLines.length, pixels, tokens };
 }
 
-/// Session convention: image tokens = round(pixels / 750).
-export function imageTokens(pixels: number): number {
-  return Math.round(pixels / 750);
+/// Anthropic bills by 28×28-px PATCHES: ⌈w/28⌉×⌈h/28⌉ visual tokens (the old
+/// pixels/750 was a ~4-5% continuous approximation of the same 784 px²/patch
+/// grid). Pages are always ≤ 1568×728 = 56×26 = 1456 patches, inside the
+/// standard tier's long-edge (1568) and token (1568) limits, so the documented
+/// pre-billing downscale never fires and the raw patch count IS the cost.
+export const PATCH_PX = 28;
+export function patchTokens(width: number, height: number): number {
+  return Math.ceil(width / PATCH_PX) * Math.ceil(height / PATCH_PX);
 }

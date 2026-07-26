@@ -119,7 +119,7 @@ A faithful port of pxpipe's production dense renderer:
   first so the sentinel can't collide.
 - **wrap** at 312 columns, by codepoint; wide (CJK) glyphs take 2 cells.
 - **page**: ≤90 rows / 28,080 chars per page → 1568×728 px max (Anthropic's
-  no-resample bound; ≈1,522 tokens/page at pixels/750).
+  no-resample bound; 56×26 = 1,456 tokens/page under the 28-px patch grid).
 - **blit**: 5×8 anti-aliased glyph cells (max-blend coverage), invert to
   black-on-white, grayscale PNG.
 
@@ -130,8 +130,22 @@ approximate. On top of pxpipe's BMP coverage (Spleen 5×8 + Unifont) we add
 the **astral planes** from GNU `unifont_upper` (16×16/8×16 1-bit bitmaps
 box-filtered to the same 10×8/5×8 AA cells), so emoji and plane-1+ symbols
 render instead of dropping — the one place tanuki deliberately exceeds the
-reference. Only unassigned codepoints fall back to `▯`, and they're counted
-and reported, never silent.
+reference. Unassigned codepoints become readable `[U+HEX]` escapes (pxpipe
+v0.11 semantics); invisible formatting codepoints (zero-width, variation
+selectors, combining marks) blit as blank cells. Nothing drops silently.
+
+**pxpipe v0.11 sync** (adopted upstream changes, 2026-07): image tokens are
+billed by Anthropic's documented **28×28-px patch grid** — `Σ ⌈w/28⌉×⌈h/28⌉`
+per page — replacing the older `pixels/750` fit (a ~4–5% continuous
+approximation of the same 784 px²/patch grid; pages never exceed the standard
+tier's 1568-px/1568-token limits, so the pre-billing downscale never fires).
+The atlas carries upstream's **glyph surgery**: Spleen 5×8 `K` repainted
+diagonal-legged (was Hamming-1 from `H`, the atlas's worst confusable; now
+Hamming-8 — upstream's paired A/B cut K→H confusions 42→1). And missing
+glyphs escape as `[U+HEX]` per upstream #96. The frozen `rust` branch keeps
+the px/750 model, so the parity harness compares everything EXCEPT
+token-derived fields (`imageTokens`, `totalSavedPct`, `verdict`), which are
+normalized out; geometry, chars, pages, and pixels still match byte-exact.
 
 ### Stage 2 extensions (tanuki-only, parity-safe)
 
@@ -148,8 +162,9 @@ and reproduced by `reference/methods-report.mjs`.
   1568-px-wide row. Reconstruction stays byte-exact (`↵`=newline, `→`=tab,
   `⇥N`=indent); pre-existing `→`/`⇥` are swapped to literal stand-ins first,
   exactly as reflow already does for `↵`. A round-trip unit test proves it.
-  Measured: **−14% image-tokens on source code, −0% on prose** — prose has no
-  indent runs to pack, and width-trim only helps pages no row fills.
+  Measured: **−5% image-tokens on source code, −0% on prose** — prose has no
+  indent runs to pack, width-trim only helps pages no row fills, and the
+  28-px patch grid quantizes away part of the old px-exact trim win.
 
 - **codebook** (opt-in) — the direct, legitimate inversion of the base64
   "models negotiate an encoding in-context" finding: not obscurity but a
@@ -157,23 +172,24 @@ and reproduced by `reference/methods-report.mjs`.
   ladder, recurring long tokens and path prefixes (≥12 chars, ≥3×, net-positive
   only) are replaced by single-cell sigils defined once in a trailing `·legend·`
   line. Because every atlas codepoint costs one flat cell, a 60-char path prefix
-  seen 30× collapses to 30 cells + one legend entry. Measured: **−37% on a
-  path-heavy log**; ~0 on code/prose (nothing repeats enough to beat the legend
-  cost). Validated for the oversight property the paper actually worries about:
+  seen 30× collapses to 30 cells + one legend entry. Measured: **−40% on a
+  path-heavy log**, **−10% on code** (repo paths and long identifiers repeat
+  enough to clear the legend cost), ~0 on plain prose.
+  Validated for the oversight property the paper actually worries about:
   a vision model read the `·legend·` line and reconstructed the first log line
   **byte-exact** — model-readable and inspectable, not a covert channel.
 
 - **tiny 4×6 font** (opt-in, experimental) — the "the tokenizer itself" lever.
   The same atlas glyphs are box-filtered from the 5×8 cell into a 4×6 one
   (390 cols × 120 rows/page vs 312 × 90), so the same text needs fewer pixels.
-  Measured: **−38–40% image-tokens** across every sample kind. The cost is the
+  Measured: **−40–43% image-tokens** across every sample kind. The cost is the
   density↔accuracy frontier the report names: at 4-px width a vision read-back
   scored **99.7% char-accuracy** with a single `M`→`H` glyph confusion. So it
   ships opt-in and gated — fine for logs and bulk prose; verify before trusting
   it with `M_`/`H_`-sensitive identifiers.
 
-Stacked (`pack + codebook + tiny`) the log class reaches **−62%** below the
-pxpipe baseline, source code **−51%**, prose **−38%**.
+Stacked (`pack + codebook + tiny`) the log class reaches **−65%** below the
+pxpipe baseline, source code **−43%**, prose **−40%** (28-px patch model).
 
 Two further properties:
 

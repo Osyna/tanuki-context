@@ -4,19 +4,20 @@
 Zero dependencies. 0.97 MB tarball. Runs anywhere Node >= 18 runs. MIT.
 
 Your model pays roughly 1 token per 4 characters to read text. A rendered PNG
-page prices at pixels / 750, which works out to 3+ characters per token.
+page is billed by Anthropic's 28×28-pixel patch grid (⌈w/28⌉×⌈h/28⌉ visual
+tokens), which works out to 3+ characters per token on dense pages.
 tanuki-context uses that gap: it takes bulky context (logs, docs, command
 output), optionally distills and compresses it, then renders it as dense PNG
 pages that a vision-capable model reads at a fraction of the cost.
 
-The same 200 KB noisy log (5,081 lines), measured:
+A 200 KB noisy journal log (1,623 lines), measured:
 
 | how it enters context            |         tokens |     saved |
 | -------------------------------- | -------------: | --------: |
-| pasted as raw text               |         51,130 |         0 |
-| rendered as pages                |         11,106 |  **-78%** |
-| distilled first, then rendered   |          1,121 |  **-98%** |
-| distilled + codebook + tiny font |            656 |  **-99%** |
+| pasted as raw text               |         51,168 |         0 |
+| rendered as pages                |         10,752 |  **-79%** |
+| distilled first, then rendered   |          6,160 |  **-88%** |
+| distilled + codebook + tiny font |          2,576 |  **-95%** |
 
 ```
 npx tanuki-context
@@ -35,7 +36,7 @@ you up front whether the pipeline wins:
 
 ```
 npx tanuki-context estimate build.log 2 --distill --codebook
-# → { "imageTokens": 1087, "rawTextTokens": 51130, "verdict": "PIPELINE cheaper", ... }
+# → { "imageTokens": 4312, "rawTextTokens": 51168, "verdict": "PIPELINE cheaper", ... }
 npx tanuki-context render build.log 2 ./pages --codebook
 # → ./pages/page0.png ...
 ```
@@ -49,7 +50,7 @@ flowchart LR
     B -- no --> D
     C --> D["stage 1: ladder<br/>compression level 0-4"]
     D --> E["stage 2: imaging<br/>312-col pages, 5x8 cells<br/>width-trimmed"]
-    E --> F["PNG pages<br/>tokens = pixels / 750"]
+    E --> F["PNG pages<br/>tokens = 28-px patches"]
 ```
 
 Three stages, each optional except the last:
@@ -58,8 +59,8 @@ Three stages, each optional except the last:
 cycles collapse to one exemplar plus a `xN` count; near-duplicates that differ
 only in timestamps, ids, or numbers fold into a template. Error and warning
 lines never get touched. A `query` regex returns only the slice you care
-about, with context. Measured on the 200 KB log above: 5,081 lines to 757,
-90% fewer characters, all 440 important lines kept verbatim.
+about, with context. Measured on the 200 KB log above: 1,624 lines to 890,
+43% fewer characters, all 272 important lines kept verbatim.
 
 **Stage 1, the ladder.** Five compression levels, from passthrough to
 telegraphic. From level 2 up an exact-recall guard keeps code, identifiers,
@@ -80,8 +81,8 @@ level 3 for reference material, level 4 when only the gist matters.
 **Stage 2, imaging.** The renderer packs text into 312-column pages of 5x8
 antialiased cells (1568 x 728 px max, short pages get width-trimmed) and
 encodes grayscale PNGs. Full Unicode: 92,812 codepoints including CJK,
-Cyrillic, and emoji / astral planes. Unassigned codepoints fall back to `▯`
-and are counted in the response, so nothing disappears silently.
+Cyrillic, and emoji / astral planes. Unassigned codepoints render as readable
+`[U+HEX]` escapes (pxpipe v0.11 semantics), so nothing disappears silently.
 
 ### Picking a route
 
@@ -105,10 +106,10 @@ legend-decodable:
 
 | knob                | what it does                                                                | code | prose |  log |
 | ------------------- | --------------------------------------------------------------------------- | ---: | ----: | ---: |
-| `pack` (default on) | single-cell tabs, `⇥N` indent runs, width-trimmed pages; byte-exact         | -14% |   -0% |  -0% |
-| `codebook`          | repeated tokens and path prefixes become 1-cell sigils plus a `·legend·` line | -19% | -0% | -37% |
-| `font: "tiny"`      | glyphs box-filtered into 4x6 cells; 99.7% read-back, skip it for exact code  | -40% |  -38% | -40% |
-| all three stacked   |                                                                              | **-51%** | **-38%** | **-62%** |
+| `pack` (default on) | single-cell tabs, `⇥N` indent runs, width-trimmed pages; byte-exact         |  -5% |   -0% |  -0% |
+| `codebook`          | repeated tokens and path prefixes become 1-cell sigils plus a `·legend·` line | -10% |  -0% | -40% |
+| `font: "tiny"`      | glyphs box-filtered into 4x6 cells; 99.7% read-back, skip it for exact code  | -43% |  -40% | -40% |
+| all three stacked   |                                                                              | **-43%** | **-40%** | **-65%** |
 
 ## Tools (MCP, stdio)
 
