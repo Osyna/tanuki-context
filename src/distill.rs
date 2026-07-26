@@ -142,8 +142,13 @@ pub fn distill_log(text: &str, query: Option<&str>, context: usize) -> Distilled
     }
 
     // pass 2: global near-dupe suppression (exact masked key, then coarse template)
+    // `ord` = insertion index: std HashMap iteration order is per-process
+    // random, which fed the stable sort below random tie order (the summary
+    // came out in a different order on every run). The TS engine's Map
+    // iterates in insertion order; mirror that exactly.
     struct Entry {
         count: usize,
+        ord: usize,
         exemplar: String,
     }
     let mut seen: HashMap<String, Entry> = HashMap::new();
@@ -175,6 +180,7 @@ pub fn distill_log(text: &str, query: Option<&str>, context: usize) -> Distilled
             key,
             Entry {
                 count: 1,
+                ord: seen.len(),
                 exemplar: l.clone(),
             },
         );
@@ -190,24 +196,23 @@ pub fn distill_log(text: &str, query: Option<&str>, context: usize) -> Distilled
                 ck,
                 Entry {
                     count: 1,
+                    ord: coarse_seen.len(),
                     exemplar: l.clone(),
                 },
             );
             pass2.push(l);
         }
     }
-    let mut top: Vec<(usize, &str, &str)> = seen
-        .values()
-        .filter(|e| e.count > KEEP_FIRST)
+    let mut exact: Vec<&Entry> = seen.values().filter(|e| e.count > KEEP_FIRST).collect();
+    exact.sort_by_key(|e| e.ord);
+    let mut templ: Vec<&Entry> = coarse_seen.values().filter(|e| e.count > coarse_keep).collect();
+    templ.sort_by_key(|e| e.ord);
+    let mut top: Vec<(usize, &str, &str)> = exact
+        .iter()
         .map(|e| (e.count, "exact", e.exemplar.as_str()))
-        .chain(
-            coarse_seen
-                .values()
-                .filter(|e| e.count > coarse_keep)
-                .map(|e| (e.count, "template", e.exemplar.as_str())),
-        )
+        .chain(templ.iter().map(|e| (e.count, "template", e.exemplar.as_str())))
         .collect();
-    top.sort_by_key(|e| std::cmp::Reverse(e.0));
+    top.sort_by_key(|e| std::cmp::Reverse(e.0)); // stable: ties keep first-seen order, exact before template
     top.truncate(TOP_CAP);
     if suppressed + template_suppressed > 0 {
         pass2.push(format!(
@@ -288,4 +293,33 @@ pub fn distill_log(text: &str, query: Option<&str>, context: usize) -> Distilled
         "query": query,
     });
     Distilled { distilled, stats }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    /// Two exact groups with equal counts (a tie for the stable sort): the
+    /// summary must list them in first-seen order, and two fresh runs must
+    /// agree byte-for-byte (each run builds new HashMaps with new RandomState,
+    /// so this fails loudly if map iteration order ever leaks again).
+    #[test]
+    fn summary_tie_order_is_first_seen_and_deterministic() {
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..12u32 {
+            let (a, b) = ((b'a' + (i as u8 * 2) % 26) as char, (b'a' + (i as u8 * 2 + 1) % 26) as char);
+            lines.push("alpha service heartbeat ok".to_string());
+            lines.push(format!("fill{a}{a} words differ here"));
+            lines.push("beta worker checkpoint ok".to_string());
+            lines.push(format!("fill{b}{b} words also differ"));
+        }
+        let text = lines.join("\n");
+        let one = distill_log(&text, None, 2);
+        let two = distill_log(&text, None, 2);
+        assert_eq!(one.distilled, two.distilled, "distill must be deterministic");
+        let tail = &one.distilled[one.distilled.find("repeated lines suppressed").expect("summary present")..];
+        let alpha = tail.find("alpha service").expect("alpha group in summary");
+        let beta = tail.find("beta worker").expect("beta group in summary");
+        assert!(alpha < beta, "equal-count groups must keep first-seen order");
+    }
 }
