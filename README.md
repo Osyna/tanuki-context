@@ -124,10 +124,42 @@ legend-decodable:
 `estimate` never touches pixel data, so it is safe to call on everything and
 only render when the verdict says the pipeline wins.
 
+## Implicit mode (proxy)
+
+If you can't touch the client, tanuki can also run as a local middlebox, the
+way pxpipe deploys, but with rules that avoid the injection-shaped rewrite
+that made us leave the proxy model in the first place:
+
+```
+npx tanuki-context proxy                    # listens on 127.0.0.1:8484
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
+```
+
+What it does to a `/v1/messages` request: oversized text blocks in user
+messages and tool results are replaced **in place** by a short visible marker
+plus PNG page blocks, only when `estimate` says imaging wins by a clear
+margin (default: at least 25% and 300 tokens cheaper). What it never does:
+
+- touch the system prompt or tool definitions
+- move content between roles or positions
+- image the latest message (you may need to quote it)
+- rewrite blocks carrying `cache_control` (that would break their cache)
+- rewrite anything when text is cheaper; those requests pass byte-for-byte
+
+Responses stream through untouched. Savings are logged to
+`~/.pxpipe/events.jsonl` (same format `tanuki_stats` reads), with the
+baseline named: what Anthropic billed plus the estimated cost of the imaged
+blocks as text.
+
+Knobs: `--port N` `--upstream URL` `--level 0-4` `--distill` `--codebook`
+`--font tiny` `--min-chars N` `--ratio X` `--min-save N` `--max-pages N`.
+Defaults are conservative: level 0, no distill, no codebook, normal font.
+
 ## CLI
 
 ```
 npx tanuki-context                          # MCP stdio server (default)
+npx tanuki-context proxy [--port 8484] [--upstream URL] [knobs]   # implicit middlebox
 npx tanuki-context distill <file> [query]   # stats JSON to stdout
 npx tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codebook]
@@ -161,6 +193,7 @@ box-filtered to the same cells.
 | `src/ladder.ts`       | stage 1: levels 0-4 with the exact-recall guard                           |
 | `src/codebook.ts`     | repeated tokens and path prefixes to sigils plus `·legend·` (opt-in)      |
 | `src/render.ts`       | stage 2: reflow, pack, wrap, page split, AA blit, tiny 4x6 font           |
+| `src/proxy.ts`        | implicit mode: local Anthropic middlebox, in-place block imaging          |
 | `src/atlas.ts`        | glyph atlas (92,812 codepoints): metadata eager, pixels inflated lazily   |
 | `src/png.ts`          | minimal grayscale PNG encoder (`node:zlib`, filter-0 rows)                |
 | `src/stats.ts`        | event log summary                                                         |

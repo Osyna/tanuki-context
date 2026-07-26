@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-//! tanuki-context — token-cutting context pipeline, all Rust.
+//! tanuki-context — token-cutting context pipeline.
 //!   pipeline: text -> distill (stage 0, logs) -> ladder level 0-4 (stage 1)
 //!             -> pxpipe imaging (stage 2, name kept from the original mechanic)
 //!
@@ -7,12 +7,14 @@
 //! CLI: tanuki-context distill <file> [query]
 //!      tanuki-context estimate <file> [level] [--distill]
 //!      tanuki-context render <file> [level] [outdir]
+//!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
+import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText } from "./render.ts";
 import { Float, pxStats } from "./stats.ts";
 
@@ -660,13 +662,39 @@ function main(): void {
       );
       break;
     }
+    case "proxy": {
+      const num = (flag: string, dflt: number): number => {
+        const i = argv.indexOf(flag);
+        if (i === -1 || argv[i + 1] === undefined) return dflt;
+        const v = Number(argv[i + 1]);
+        return Number.isFinite(v) ? v : dflt;
+      };
+      const ui = argv.indexOf("--upstream");
+      const fi = argv.indexOf("--font");
+      startProxy({
+        port: num("--port", 8484),
+        upstream:
+          ui !== -1 && argv[ui + 1] !== undefined
+            ? argv[ui + 1]
+            : (process.env.TANUKI_UPSTREAM ?? "https://api.anthropic.com"),
+        level: num("--level", PROXY_DEFAULTS.level),
+        distill: argv.includes("--distill"),
+        codebook: argv.includes("--codebook"),
+        font: parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal"),
+        minChars: num("--min-chars", PROXY_DEFAULTS.minChars),
+        ratio: num("--ratio", PROXY_DEFAULTS.ratio),
+        minSave: num("--min-save", PROXY_DEFAULTS.minSave),
+        maxPages: num("--max-pages", PROXY_DEFAULTS.maxPages),
+      });
+      break;
+    }
     case "serve":
     case undefined:
       serve();
       break;
     default:
       process.stderr.write(
-        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|distill|estimate|render] ...\n`,
+        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render] ...\n`,
       );
       process.exit(1);
   }
