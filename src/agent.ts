@@ -32,7 +32,7 @@ export const TANUKI_TOOL_NAMES = [
 /// Canned guidance for agents. Used as the SDK server `instructions` block and
 /// exported so teams can append it to a shared system prompt.
 export const TANUKI_INSTRUCTIONS = `tanuki-context turns bulky text (logs, command output, docs) into dense PNG pages that cost a fraction of the text tokens.
-Workflow: call tanuki_estimate first (instant, exact, never renders pixels). If the verdict says "PIPELINE cheaper", call tanuki_render with the same arguments and use the returned pages instead of pasting the text.
+Workflow: call tanuki_estimate first (instant, exact, never renders pixels). Its "recommend" field already names the cheapest safe knob set, priced - do not probe combos by hand. If the verdict says "PIPELINE cheaper", call tanuki_render with the recommended knobs and use the returned pages instead of pasting the text.
 For logs, pass distill:true (repeats collapse, error/warn lines stay verbatim; add query:"regex" to slice). For prose you will not quote verbatim, level 2-3 shrinks it further. codebook:true helps path-heavy logs. Never image content you must quote byte-exact at level 4 or font tiny.
 Pages decode as: \u21b5 = newline, \u2192 = tab, \u21e5N = N leading spaces, a trailing \u00b7legend\u00b7 line maps sigils back to full tokens.`;
 

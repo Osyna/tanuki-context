@@ -210,6 +210,35 @@ function pipeArgs(args: unknown): PipeArgs {
   };
 }
 
+/// Ladder walk, server-side: price the four safe knob combos (level 0) in one
+/// pass and name the first rung that holds, so the model does not spend tool
+/// rounds probing. Strictly-less keeps the earliest (fewest-knob) combo on
+/// ties. ponytail: runs 4 extra estimates + 1 distill per call; gate behind a
+/// flag if huge-input latency ever matters.
+function recommendFor(text: string): Record<string, unknown> {
+  const distilled = distillLog(text, null, 2).distilled;
+  const bases: [boolean, string][] = [
+    [false, text],
+    [true, distilled],
+  ];
+  let best = { distill: false, codebook: false, text, tokens: Infinity, pages: 0 };
+  for (const [d, base] of bases) {
+    for (const c of [false, true]) {
+      const t = c ? codebookApply(base).text : base;
+      const e = estimateText(t, true, true, parseFont("normal"));
+      if (e.tokens < best.tokens) best = { distill: d, codebook: c, text: t, tokens: e.tokens, pages: e.pages };
+    }
+  }
+  const tiny = estimateText(best.text, true, true, parseFont("tiny"));
+  return {
+    codebook: best.codebook,
+    distill: best.distill,
+    imageTokens: best.tokens,
+    pages: best.pages,
+    tinyImageTokens: tiny.tokens,
+  };
+}
+
 export function toolEstimate(args: unknown): Record<string, unknown> {
   const a = pipeArgs(args);
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
@@ -237,6 +266,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
     verdict: imgTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
+    recommend: recommendFor(a.text),
   };
 }
 
@@ -358,7 +388,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_estimate",
         description:
-          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff.",
+          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field names the cheapest safe knob set (level 0), so one call replaces manual knob probing.",
         inputSchema: {
           type: "object",
           properties: {

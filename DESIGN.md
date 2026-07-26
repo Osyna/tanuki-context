@@ -206,6 +206,15 @@ Two further properties:
   reason as before — it deletes tokens it *judges* unimportant, the
   silent-confabulation risk. pack and codebook are deterministic and
   reversible; that line holds.
+- **`recommend`: the knob walk is server-side.** Tool chatter is context
+  too: probing the four safe knob combos by hand costs ~590 tokens of
+  estimate rounds, and the tool-call overhead of using tanuki is as real as
+  the text it compresses. So every estimate walks the ladder itself (plain,
+  codebook, distill, both — level 0, in-process, no pixel work) and returns
+  the first rung that holds, plus the tiny-font price for anyone willing to
+  trade read-back accuracy. The same lazy-engineering rule that shaped the
+  pipeline — stop at the cheapest step that suffices — applied to the
+  protocol around it.
 
 ### Implicit mode — the middlebox, readmitted with rules
 
@@ -224,6 +233,13 @@ the rewrite recognizable and consensual in spirit:
 4. `cache_control` blocks are never touched (rewriting defeats their cache);
 5. imaging happens only when `estimate` wins by a margin (default ≥25% and
    ≥300 tokens); everything else forwards byte-for-byte.
+
+One reuse rule sits on top: a block byte-identical to one already imaged in
+the same request is not imaged again — it becomes a one-line pointer to the
+pages above. Agent transcripts repeat themselves (the same file read three
+times, the same build output pasted twice), and the cheapest page is the one
+you don't re-send. Exact matches only, so the rule is as deterministic as
+the rest; near-duplicates image independently.
 
 Responses stream through untouched; usage is scraped from the stream and the
 savings row appended to the same events log `tanuki_stats` reads, with the

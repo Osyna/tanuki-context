@@ -136,8 +136,30 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
   let imageCount = 0;
   let savedTokens = 0;
 
+  // ponytail rung 2, applied to the wire: a byte-identical repeat of a block
+  // we already imaged in THIS request (agents re-read files constantly) gets
+  // a one-line pointer instead of the same pages again. Exact repeats only;
+  // near-dupes still image independently.
+  const seen = new Map<string, number>(); // exact block text -> page count
+
   const imageBlock = (text: string): ImagedBlock | null => {
-    const done = maybeImage(text, cfg);
+    const priorPages = seen.get(text);
+    let done: ImagedBlock | null;
+    if (priorPages !== undefined) {
+      const chars = charCount(text);
+      const marker =
+        `[tanuki-context: ${chars} chars, byte-identical to a block imaged above ` +
+        `(${priorPages} PNG page(s)); not repeated]`;
+      done = {
+        blocks: [{ type: "text", text: marker }],
+        origChars: chars,
+        pages: 0,
+        savedTokens: Math.round(chars / 4) - Math.round(charCount(marker) / 4),
+      };
+    } else {
+      done = maybeImage(text, cfg);
+      if (done) seen.set(text, done.pages);
+    }
     if (done) {
       imagedBlocks++;
       origChars += done.origChars;
@@ -316,7 +338,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · in-place blocks only · latest message never imaged · cache_control skipped\n` +
+        `  rules: system prompt & tools untouched · in-place blocks only · latest message never imaged · cache_control skipped · identical blocks imaged once\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });
