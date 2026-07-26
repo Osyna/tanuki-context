@@ -14,6 +14,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { costVerdict } from "./cost.ts";
+import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
@@ -21,7 +22,7 @@ import { estimateText, parseFont, renderText } from "./render.ts";
 import { fetchSlice, stashText } from "./stash.ts";
 import { Float, pxStats } from "./stats.ts";
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -140,6 +141,7 @@ interface PipelineOut {
   protectedLines: number;
   level: number;
   cbEntries: number;
+  table: { rows: number; cols: number } | null;
 }
 
 /** Stages 0 + 0.5 + 1: optional distill, optional codebook, then ladder level. */
@@ -149,15 +151,22 @@ function stage01(
   useDistill: boolean,
   query: string | null,
   useCodebook: boolean,
+  useTable: boolean,
 ): PipelineOut {
-  let working: string;
+  let working = text;
+  let table: { rows: number; cols: number } | null = null;
+  if (useTable) {
+    const t = tableEncode(working);
+    if (t !== null) {
+      working = t.text;
+      table = { rows: t.rows, cols: t.cols };
+    }
+  }
   let stage0: Record<string, unknown> | null = null;
   if (useDistill || query !== null) {
-    const d = distillLog(text, query, 2);
+    const d = distillLog(working, query, 2);
     working = d.distilled;
     stage0 = d.stats as Record<string, unknown>;
-  } else {
-    working = text;
   }
   let cbEntries = 0;
   if (useCodebook) {
@@ -172,6 +181,7 @@ function stage01(
     protectedLines: c.protectedLines,
     level: c.level,
     cbEntries,
+    table,
   };
 }
 
@@ -199,6 +209,7 @@ interface PipeArgs {
   pack: boolean;
   font: string;
   codebook: boolean;
+  table: boolean;
 }
 
 function pipeArgs(args: unknown): PipeArgs {
@@ -211,17 +222,19 @@ function pipeArgs(args: unknown): PipeArgs {
     pack: asBool(jget(args, "pack")) ?? true,
     font: asStr(jget(args, "font")) ?? "normal",
     codebook: asBool(jget(args, "codebook")) ?? false,
+    table: asBool(jget(args, "table")) ?? false,
   };
 }
 
 /// Ladder walk, server-side: price the knob combos in one pass so the model
 /// does not spend tool rounds probing. The headline fields walk only the
-/// REVERSIBLE knobs (pack is byte-exact, codebook is legend-decodable);
-/// distill is lossy-but-counted and built for logs, so its walk is reported
-/// separately as `withDistill` - never labeled safe, because on source code
-/// collapsing similar-looking lines is not safe. Strictly-less keeps the
-/// earliest (fewest-knob) combo on ties. ponytail: 5 extra estimates + 1
-/// distill per call; gate behind a flag if huge-input latency ever matters.
+/// REVERSIBLE knobs (pack is byte-exact, codebook is legend-decodable, table
+/// is value-lossless columnar for whole-JSON input); distill is
+/// lossy-but-counted and built for logs, so its walk is reported separately
+/// as `withDistill` - never labeled safe, because on source code collapsing
+/// similar-looking lines is not safe. Strictly-less keeps the earliest
+/// (fewest-knob) combo on ties. ponytail: ~7 extra estimates + 1 distill per
+/// call; gate behind a flag if huge-input latency ever matters.
 function recommendFor(text: string): Record<string, unknown> {
   const walk = (base: string): { codebook: boolean; tokens: number; pages: number; text: string } => {
     let best = { codebook: false, tokens: Infinity, pages: 0, text: base };
@@ -232,13 +245,24 @@ function recommendFor(text: string): Record<string, unknown> {
     }
     return best;
   };
-  const rev = walk(text);
-  const dis = walk(distillLog(text, null, 2).distilled);
+  let rev = walk(text);
+  let table = false;
+  const tbl = tableEncode(text);
+  if (tbl !== null) {
+    const wt = walk(tbl.text);
+    if (wt.tokens < rev.tokens) {
+      rev = wt;
+      table = true;
+    }
+  }
+  const disBase = table && tbl !== null ? tbl.text : text;
+  const dis = walk(distillLog(disBase, null, 2).distilled);
   const tiny = estimateText(rev.text, true, true, parseFont("tiny"));
   return {
     codebook: rev.codebook,
     imageTokens: rev.tokens,
     pages: rev.pages,
+    table,
     tinyImageTokens: tiny.tokens,
     withDistill: { codebook: dis.codebook, imageTokens: dis.tokens },
   };
@@ -246,7 +270,7 @@ function recommendFor(text: string): Record<string, unknown> {
 
 export function toolEstimate(args: unknown): Record<string, unknown> {
   const a = pipeArgs(args);
-  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
   const imgTok = est.tokens;
@@ -272,20 +296,21 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     pack: a.pack,
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
+    table: p.table !== null ? p.table : false,
     verdict: imgTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     recommend: recommendFor(a.text),
   };
   // Situation-aware real cost: only when a model or cache state is supplied, so
   // the default token-count result (and the parity harness) stay byte-identical.
   if (model !== null || cached) {
-    out.cost = costVerdict(rawTok, imgTok, { model, cached });
+    out.cost = costVerdict(rawTok, imgTok, { model, cached }, { dims: est.dims });
   }
   return out;
 }
 
 export function toolRender(args: unknown): unknown[] {
   const a = pipeArgs(args);
-  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
   const imgTok = r.tokens;
@@ -294,6 +319,9 @@ export function toolRender(args: unknown): unknown[] {
   const rawTok = textTokens(origChars);
   const [name, loss] = LEVELS[p.level];
   let summary = "";
+  if (p.table !== null) {
+    summary += `table: ${p.table.rows} rows x ${p.table.cols} cols, keys stated once\n`;
+  }
   if (p.stage0 !== null) {
     const s0 = p.stage0;
     summary += `distill: ${s0["origLines"]} -> ${s0["outLines"]} lines (-${s0["savedPct"]}% chars, ${s0["collapsedRuns"]} runs, ${s0["suppressedLines"]} exact + ${s0["templateSuppressed"]} template suppressed, ${s0["importantKept"]} error/warn kept)\n`;
@@ -341,9 +369,20 @@ export function toolRender(args: unknown): unknown[] {
 
 export function toolDistill(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
-  const d = distillLog(text, asStr(jget(args, "query")), 2);
+  let working = text;
+  let table: { rows: number; cols: number } | null = null;
+  if (asBool(jget(args, "table")) ?? false) {
+    const t = tableEncode(working);
+    if (t !== null) {
+      working = t.text;
+      table = { rows: t.rows, cols: t.cols };
+    }
+  }
+  const d = distillLog(working, asStr(jget(args, "query")), 2);
+  const stats =
+    table !== null ? { ...(d.stats as Record<string, unknown>), table } : d.stats;
   return [
-    { type: "text", text: jstring(d.stats, true) },
+    { type: "text", text: jstring(stats, true) },
     { type: "text", text: d.distilled },
   ];
 }
@@ -412,7 +451,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_render",
         description:
-          "Token-cut pipeline: optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
+          "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
         inputSchema: {
           type: "object",
           properties: {
@@ -424,6 +463,7 @@ function toolsList(): Record<string, unknown> {
             pack: { type: "boolean" },
             font: { type: "string", enum: ["normal", "tiny"] },
             codebook: { type: "boolean" },
+            table: { type: "boolean" },
           },
           required: ["text"],
         },
@@ -431,7 +471,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_estimate",
         description:
-          "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4) and/or cached:true to add a 'cost' field that prices the decision in real dollars: a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
+          "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
         inputSchema: {
           type: "object",
           properties: {
@@ -443,6 +483,7 @@ function toolsList(): Record<string, unknown> {
             pack: { type: "boolean" },
             font: { type: "string", enum: ["normal", "tiny"] },
             codebook: { type: "boolean" },
+            table: { type: "boolean" },
             model: { type: "string" },
             cached: { type: "boolean" },
           },
@@ -452,10 +493,10 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_distill",
         description:
-          "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. Deterministic, order-preserving.",
+          "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. table:true first columnar-encodes whole-JSON input (keys stated once) so identical rows collapse harder. Deterministic, order-preserving.",
         inputSchema: {
           type: "object",
-          properties: { text: textProp, query: { type: "string" } },
+          properties: { text: textProp, query: { type: "string" }, table: { type: "boolean" } },
           required: ["text"],
         },
       },
@@ -472,7 +513,7 @@ function toolsList(): Record<string, unknown> {
       {
         name: "tanuki_stats",
         description:
-          "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates).",
+          "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates), and the output-token share of the bill — the part no input-side tool can cut.",
         inputSchema: { type: "object", properties: {} },
       },
       {
@@ -647,9 +688,15 @@ export function main(): void {
   const argv = process.argv.slice(1); // argv[0] = program, argv[1] = command (like env::args)
   switch (argv[1]) {
     case "distill": {
-      const file = argv[2] ?? fatal("usage: tanuki-context distill <file> [query]");
+      const file = argv[2] ?? fatal("usage: tanuki-context distill <file> [query] [--table]");
       const text = readFileOrDie(file);
-      const d = distillLog(text, argv[3] ?? null, 2);
+      let working = text;
+      if (argv.includes("--table")) {
+        const t = tableEncode(working);
+        if (t !== null) working = t.text;
+      }
+      const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
+      const d = distillLog(working, pos[0] ?? null, 2);
       process.stdout.write(jstring(d.stats, false) + "\n");
       break;
     }
@@ -657,7 +704,7 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
+          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
@@ -673,6 +720,7 @@ export function main(): void {
         pack: !argv.includes("--no-pack"),
         font,
         codebook: argv.includes("--codebook"),
+        table: argv.includes("--table"),
         model,
         cached: argv.includes("--cached"),
       });
@@ -683,7 +731,7 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]",
+          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
@@ -692,7 +740,7 @@ export function main(): void {
       const useCb = argv.includes("--codebook");
       const fi = argv.indexOf("--font");
       const font = parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal");
-      const p = stage01(text, level, argv.includes("--distill"), null, useCb);
+      const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
       const tok = r.tokens;
       process.stdout.write(
@@ -742,7 +790,7 @@ export function main(): void {
           const d = distillLog(text, null, 2);
           result = d.stats;
         } else {
-          const p = stage01(text, level, useDistill, null, false);
+          const p = stage01(text, level, useDistill, null, false, false);
           const r = renderText(p.compressed, true, false, "normal");
           result = {
             pages: r.pages.length,
@@ -784,6 +832,7 @@ export function main(): void {
             : (process.env.TANUKI_UPSTREAM ?? "https://api.anthropic.com"),
         level: num("--level", PROXY_DEFAULTS.level),
         distill: argv.includes("--distill"),
+        table: argv.includes("--table"),
         codebook: argv.includes("--codebook"),
         font: parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal"),
         minChars: num("--min-chars", PROXY_DEFAULTS.minChars),

@@ -177,8 +177,8 @@ describe("recommend: server-side knob walk in one estimate call", () => {
     ).join("\n");
     const e = toolEstimate({ text: log, level: 0 });
     // unchecked cast: toolEstimate returns Record<string, unknown>; shape is asserted below
-    const rec = e.recommend as { codebook: boolean; imageTokens: number; pages: number; tinyImageTokens: number; withDistill: { codebook: boolean; imageTokens: number } };
-    expect(Object.keys(rec).sort()).toEqual(["codebook", "imageTokens", "pages", "tinyImageTokens", "withDistill"]);
+    const rec = e.recommend as { codebook: boolean; imageTokens: number; pages: number; table: boolean; tinyImageTokens: number; withDistill: { codebook: boolean; imageTokens: number } };
+    expect(Object.keys(rec).sort()).toEqual(["codebook", "imageTokens", "pages", "table", "tinyImageTokens", "withDistill"]);
     // reversible headline never uses distill; the log route is priced under withDistill
     expect(rec.imageTokens).toBeLessThanOrEqual(e.imageTokens as number);
     expect(rec.withDistill.imageTokens).toBeLessThan(rec.imageTokens);
@@ -231,11 +231,125 @@ describe("cost: real-dollar verdict flips on cache state and provider", () => {
     expect(cost.note).toContain("cache-read");
   });
 
-  test("non-Anthropic model carries the approximate-dollars note", async () => {
+  test("openai: image tokens counted by the 512px tile rule, not the patch grid", async () => {
     const { toolEstimate } = await import("../src/main.ts");
     const e = toolEstimate({ text: log, level: 0, model: "gpt-5" });
-    const cost = e.cost as { note?: string };
+    const cost = e.cost as { imageTokens: number; note?: string };
+    expect(cost.note).toContain("512px tile");
+    // full page 1568x728: fits 2048, shortest 728 <= 768 -> ceil(1568/512)*ceil(728/512) = 4*2 = 8 tiles
+    // -> 85 + 170*8 = 1445/page, vs Anthropic's 1456 patch count. Counts must differ.
+    expect(cost.imageTokens).not.toBe(e.imageTokens as number);
+    expect(cost.imageTokens).toBeGreaterThan(0);
+  });
+
+  test("gemini: 768px tile rule, flagged approximate, cheaper pages than the patch grid", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const e = toolEstimate({ text: log, level: 0, model: "gemini-2.5-pro" });
+    const cost = e.cost as { imageTokens: number; note?: string };
     expect(cost.note).toContain("approximate");
+    // full page 1568x728 -> ceil(1568/768)*ceil(728/768) = 3*1 tiles * 258 = 774/page,
+    // roughly half of Anthropic's 1456 - gemini pages are cheaper, verdict must see that
+    expect(cost.imageTokens).toBeLessThan(e.imageTokens as number);
+  });
+
+  test("provider math is exact on known dims", async () => {
+    const { providerImageTokens } = await import("../src/cost.ts");
+    expect(providerImageTokens([[1568, 728]], "openai")).toBe(85 + 170 * 8); // 1445
+    expect(providerImageTokens([[1568, 728]], "gemini")).toBe(258 * 3); // 774
+    expect(providerImageTokens([[300, 200]], "gemini")).toBe(258); // <=384 flat
+    // openai downscale: 4096x4096 -> fit 2048 -> shortest 768 -> 768x768 -> 4 tiles
+    expect(providerImageTokens([[4096, 4096]], "openai")).toBe(85 + 170 * 4);
+  });
+});
+
+// ------------------------------------------------ table: columnar whole-JSON
+
+describe("table: value-lossless columnar encoding for whole-JSON input", () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({
+    ts: `2026-07-26T03:${String(i % 60).padStart(2, "0")}:00Z`,
+    level: i % 7 === 0 ? "error" : "info",
+    unit: `worker-${i % 4}.service`,
+    message: `copied segment_${String(i % 9).padStart(5, "0")}.parquet ok`,
+    pid: 1000 + (i % 32),
+  }));
+  const ndjson = rows.map((r) => JSON.stringify(r)).join("\n");
+  const asArray = JSON.stringify(rows, null, 2);
+
+  test("round-trip: decode(encode(x)) preserves every value (NDJSON and array forms)", async () => {
+    const { tableEncode, tableDecode } = await import("../src/table.ts");
+    for (const src of [ndjson, asArray]) {
+      const t = tableEncode(src);
+      expect(t).not.toBeNull();
+      const back = tableDecode(t!.text);
+      expect(back).not.toBeNull();
+      const decoded = back!.split("\n").map((l) => JSON.parse(l));
+      expect(decoded).toEqual(rows);
+    }
+  });
+
+  test("keys stated once: encoded form is materially smaller and rows/cols are counted", async () => {
+    const { tableEncode } = await import("../src/table.ts");
+    const t = tableEncode(ndjson);
+    expect(t!.rows).toBe(200);
+    expect(t!.cols).toBe(5);
+    // 5 keys x ~200 rows of repeated '"key":' scaffolding deleted
+    expect(t!.text.length).toBeLessThan(ndjson.length * 0.75);
+  });
+
+  test("gate: mixed prose+JSON stays text; the SIZE gate (not row count) decides tiny inputs", async () => {
+    const { tableEncode } = await import("../src/table.ts");
+    expect(tableEncode("some prose\n" + ndjson)).toBeNull();
+    expect(tableEncode('{"a":1}')).toBeNull(); // single object, not rows
+    // two rows with DISJOINT 1-char keys: the ·cols· header costs more than it saves
+    expect(tableEncode('{"a":1}\n{"b":2}')).toBeNull();
+    // two rows SHARING a key: scaffolding removal already wins
+    expect(tableEncode('{"aa":1}\n{"aa":2}')).not.toBeNull();
+  });
+
+  test("absent keys become empty cells and survive the round trip", async () => {
+    const { tableEncode, tableDecode } = await import("../src/table.ts");
+    const sparse = '{"a":1,"b":"x"}\n{"a":2}\n{"b":"y","c":true}';
+    const t = tableEncode(sparse);
+    expect(t).not.toBeNull();
+    const back = tableDecode(t!.text)!.split("\n").map((l) => JSON.parse(l));
+    expect(back).toEqual([{ a: 1, b: "x" }, { a: 2 }, { b: "y", c: true }]);
+  });
+
+  test("tabs and newlines inside string values cannot break the grammar", async () => {
+    const { tableEncode, tableDecode } = await import("../src/table.ts");
+    const tricky = '{"msg":"a\\tb\\nc","n":1}\n{"msg":"plain","n":2}';
+    const t = tableEncode(tricky);
+    expect(t).not.toBeNull();
+    const back = tableDecode(t!.text)!.split("\n").map((l) => JSON.parse(l));
+    expect(back[0].msg).toBe("a\tb\nc");
+  });
+
+  test("estimate: table knob applies, reports rows x cols, and beats the untabled run", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const plain = toolEstimate({ text: ndjson, level: 0 });
+    const tabled = toolEstimate({ text: ndjson, level: 0, table: true });
+    expect(tabled.table).toEqual({ rows: 200, cols: 5 });
+    expect(plain.table).toBe(false);
+    expect(tabled.imageTokens as number).toBeLessThanOrEqual(plain.imageTokens as number);
+    // recommend probes table on its own - no knob required
+    const rec = plain.recommend as { table: boolean };
+    expect(rec.table).toBe(true);
+  });
+
+  test("table + distill compose: distill still collapses tabled rows", async () => {
+    const { toolEstimate } = await import("../src/main.ts");
+    const dup = Array.from({ length: 300 }, (_, i) => JSON.stringify({
+      ts: `2026-07-26T03:00:${String(i % 3).padStart(2, "0")}Z`,
+      level: "info",
+      message: "heartbeat ok",
+    })).join("\n");
+    const tabledOnly = toolEstimate({ text: dup, level: 0, table: true });
+    const tabledDistilled = toolEstimate({ text: dup, level: 0, distill: true, table: true });
+    // composition claim: identical rows collapse harder AFTER tabling, so the
+    // stack strictly beats table alone. (When distill already flattens raw
+    // NDJSON to a couple of exemplars, the ·cols· header can cost ~1 token vs
+    // no-table - that is honest overhead, not a regression.)
+    expect(tabledDistilled.imageTokens as number).toBeLessThan(tabledOnly.imageTokens as number);
   });
 });
 

@@ -5,9 +5,10 @@
 //! the cheapest technique depends on the SITUATION — is the text already cached
 //! this turn, and which provider prices it. Only the RATIOS drive the verdict;
 //! absolute $/Mtok (list prices, overridable via TANUKI_RATES) drive the
-//! optional dollar figure. Image-token COUNTS here are Anthropic's 28px patch
-//! grid, so the dollars are calibrated for Anthropic; other providers count
-//! image tokens on a different (tile) model — flagged in `note`, never hidden.
+//! optional dollar figure. Image-token COUNTS are provider-correct when page
+//! dims are supplied: Anthropic 28px patches, OpenAI 512px high-detail tiles
+//! (85 + 170/tile), Gemini 768px tiles (258/tile, ~approximate — their crop
+//! rule has undocumented edges; the API usage field is authoritative).
 
 /** Rust f64::round(): half away from zero (matches stats.ts / main.ts). */
 function rnd(x: number): number {
@@ -28,8 +29,8 @@ export interface Rate {
   cacheReadMult: number;
   /** image(visual)-token price ÷ input-token price (1.0 on Anthropic). */
   imageMult: number;
-  /** image-token COUNT uses Anthropic's 28px patch grid? false ⇒ dollars are approximate. */
-  anthropicGrid: boolean;
+  /** how this family COUNTS image tokens: 28px patches, 512px tiles, or 768px tiles. */
+  family: "anthropic" | "openai" | "gemini";
 }
 
 /** List prices as of this month; the MULTIPLIERS are the stable facts, the $ are approximate. */
@@ -39,14 +40,14 @@ export const RATES_AS_OF = "2026-07";
 // load-bearing; absolute $/Mtok are approximate list prices, overridable.
 const TABLE: Record<string, Rate> = {
   // Anthropic — cache-read 0.1×, image tokens billed at the input rate (1×).
-  opus: { input: 15, output: 75, cacheReadMult: 0.1, imageMult: 1, anthropicGrid: true },
-  sonnet: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, anthropicGrid: true },
-  haiku: { input: 1, output: 5, cacheReadMult: 0.1, imageMult: 1, anthropicGrid: true },
-  // Non-Anthropic — image token COUNTING differs (tiles), so tanuki's patch-grid
-  // count is only an approximation; OpenAI's cache discount is 0.5×, not 0.1×.
-  gpt: { input: 1.25, output: 10, cacheReadMult: 0.5, imageMult: 1, anthropicGrid: false },
-  gemini: { input: 1.25, output: 10, cacheReadMult: 0.25, imageMult: 1, anthropicGrid: false },
-  default: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, anthropicGrid: true },
+  opus: { input: 15, output: 75, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
+  sonnet: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
+  haiku: { input: 1, output: 5, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
+  // Non-Anthropic — image tokens are COUNTED by that provider's tile rule when
+  // page dims are supplied; cache discounts differ (OpenAI 0.5×, Gemini 0.25×).
+  gpt: { input: 1.25, output: 10, cacheReadMult: 0.5, imageMult: 1, family: "openai" },
+  gemini: { input: 1.25, output: 10, cacheReadMult: 0.25, imageMult: 1, family: "gemini" },
+  default: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
 };
 
 /** TABLE merged with a `TANUKI_RATES` JSON override (per-key partial merge). */
@@ -86,6 +87,8 @@ export interface CostResult {
   model: string;
   cached: boolean;
   ratesAsOf: string;
+  /** the image-token COUNT the dollars use (provider tile rule when page dims were supplied). */
+  imageTokens: number;
   /** $ to send the content as text (cache-read priced when `cached`). */
   textUsd: number;
   /** $ to send it as image (visual) tokens. */
@@ -99,40 +102,91 @@ export interface CostResult {
 }
 
 /**
+ * Per-provider image-token count from real page dims. Constants confirmed
+ * against provider docs as of RATES_AS_OF; float ops in fixed order for
+ * engine parity (Rust mirrors exactly).
+ */
+export function providerImageTokens(
+  dims: Array<[number, number]>,
+  family: "openai" | "gemini",
+): number {
+  let tok = 0;
+  for (const [w0, h0] of dims) {
+    if (family === "openai") {
+      // high detail: fit 2048×2048 (downscale only), then shortest side to
+      // ≤768 (downscale only), then 85 + 170 per 512px tile.
+      let w = w0;
+      let h = h0;
+      const s1 = Math.min(1, 2048 / Math.max(w, h));
+      w *= s1;
+      h *= s1;
+      const s2 = Math.min(1, 768 / Math.min(w, h));
+      w = Math.ceil(w * s2);
+      h = Math.ceil(h * s2);
+      tok += 85 + 170 * (Math.ceil(w / 512) * Math.ceil(h / 512));
+    } else {
+      // gemini: ≤384px both dims flat 258, else 258 per 768px tile.
+      tok += w0 <= 384 && h0 <= 384 ? 258 : 258 * (Math.ceil(w0 / 768) * Math.ceil(h0 / 768));
+    }
+  }
+  return tok;
+}
+
+/**
  * Price text-vs-image for a given situation. Verdict rests only on stable
- * ratios (cache-read, image); dollars use labeled, overridable list prices.
+ * ratios (cache-read, image) and provider-correct counts; dollars use
+ * labeled, overridable list prices.
  */
 export function costVerdict(
   textTokens: number,
   imageTokens: number,
   s: CostSituation,
+  geom?: { dims: Array<[number, number]> },
 ): CostResult {
   const { key, rate } = resolveRate(s.model);
   const cached = s.cached === true;
+  const counted =
+    rate.family !== "anthropic" && geom !== undefined
+      ? providerImageTokens(geom.dims, rate.family)
+      : imageTokens;
   const inUsd = rate.input / 1e6; // $ per input token
   const textRate = inUsd * (cached ? rate.cacheReadMult : 1);
   const imgRate = inUsd * rate.imageMult;
   const textUsd = textTokens * textRate;
-  const imageUsd = imageTokens * imgRate;
+  const imageUsd = counted * imgRate;
   const breakeven = imgRate > 0 ? Math.floor((textTokens * textRate) / imgRate) : Infinity;
   const cheaper = imageUsd < textUsd ? "PIPELINE" : "TEXT";
   const savedPct = textUsd > 0 ? rnd((1 - imageUsd / textUsd) * 100) : 0;
-  let note: string | undefined;
-  if (!rate.anthropicGrid) {
-    note = `image-token counts use Anthropic's 28px patch grid; ${key} prices images on a different (tile) model — treat dollars as approximate`;
-  } else if (cached) {
-    note = `text priced at cache-read rate (${rate.cacheReadMult}× input); imaging already-cached content usually loses`;
+  const notes: string[] = [];
+  if (rate.family === "openai") {
+    notes.push(
+      geom !== undefined
+        ? "image tokens counted with OpenAI's high-detail tile rule (85 + 170 per 512px tile)"
+        : "no page dims supplied; image count falls back to Anthropic's 28px patch grid — approximate for openai",
+    );
+  } else if (rate.family === "gemini") {
+    notes.push(
+      geom !== undefined
+        ? "~approximate: Gemini's documented 768px-tile rule (258/tile); the API usage field is authoritative"
+        : "no page dims supplied; image count falls back to Anthropic's 28px patch grid — approximate for gemini",
+    );
+  }
+  if (cached) {
+    notes.push(
+      `text priced at cache-read rate (${rate.cacheReadMult}× input); imaging already-cached content usually loses`,
+    );
   }
   return {
     model: key,
     cached,
     ratesAsOf: RATES_AS_OF,
+    imageTokens: counted,
     textUsd: usd(textUsd),
     imageUsd: usd(imageUsd),
     cheaper,
     savedPct,
     breakevenImageTokens: breakeven,
-    note,
+    note: notes.length > 0 ? notes.join("; ") : undefined,
   };
 }
 

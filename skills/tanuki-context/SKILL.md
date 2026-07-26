@@ -1,6 +1,6 @@
 ---
 name: tanuki-context
-version: 0.5.0
+version: 0.6.0
 description: |
   Cut input-token cost by rendering bulky text (logs, command output, long
   docs) as dense PNG pages the model reads at a fraction of the price, or by
@@ -22,7 +22,8 @@ verbatim, and every drop is counted.
 
 1. **Estimate first, always.** `tanuki_estimate { text }` is instant and
    never renders pixels. Read two things from the answer:
-   - `recommend` - the cheapest reversible knob set (pack/codebook), priced.
+   - `recommend` - the cheapest reversible knob set (pack/codebook, and
+     `table` for whole-JSON input), priced.
    - `recommend.withDistill` - the log route (repeats collapsed with exact
      counts). Cheaper, and honest for logs; do not use it on source code.
 2. **Act on the verdict.**
@@ -39,13 +40,24 @@ verbatim, and every drop is counted.
      cached: true }`. `tanuki_estimate` adds a `cost` block in real dollars:
      a cache-read token costs ~0.1x a fresh one, so imaging cached content
      usually *loses* even with fewer tokens - `cost.cheaper` says "TEXT" and
-     you leave it alone. Pass `model` alone to price a one-shot decision.
+     you leave it alone. Pass `model` alone to price a one-shot decision;
+     image tokens are counted with that provider's own rule (OpenAI 512px
+     tiles, Gemini 768px tiles - Gemini flagged approximate), so the verdict
+     is not an Anthropic-only guess.
 3. **For noisy logs**, add `distill: true` (and `query: "regex"` for a
    slice). Error/warn/fail lines survive verbatim; repeats become one
    exemplar plus an exact xN count.
-4. **Shell commands with chatty output**: run them as
+4. **For whole-JSON input** (arrays of objects, NDJSON like
+   `journalctl -o json`), pass `table: true` - keys are stated once in a
+   `·cols·` header and rows become tab-separated JSON cells. Value-lossless,
+   and uniform rows then collapse harder under distill. `recommend` probes
+   this on its own, so trusting it is enough.
+5. **Shell commands with chatty output**: run them as
    `tanuki-context run -- <cmd>` instead of reading the firehose. Exit code
    passes through; the full capture is stashed and fetchable.
+6. **End of session**: `tanuki_stats` totals the savings log and reports
+   `outputSharePct` - the share of the bill that is the model's own output,
+   which no input-side tool (including this one) can cut.
 
 ## Reading the pages
 
