@@ -81,6 +81,7 @@ tanuki-context render <file> [level] [outdir] [--no-pack] [--font tiny] [--codeb
 tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 tanuki-context stash <file>             # park text, print the map + id
 tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+tanuki-context run [--query re] -- <command> [args...]   # rtk-style wrapper: distilled output inline, full capture stashed
 ```
 
 ## Implicit mode (proxy)
