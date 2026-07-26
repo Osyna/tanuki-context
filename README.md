@@ -27,16 +27,24 @@ nothing disappears silently. The atlas also carries pxpipe's v0.11 glyph
 surgery: Spleen `K` repainted diagonal-legged (was Hamming-1 from `H`, the
 atlas's worst confusable; K→H read-back confusions fell 42→1 upstream).
 
-## Measured (vs the node reference, same machine)
+## Measured
 
-| metric | node | tanuki (rust) |
-|---|---:|---:|
-| distill 126 MB log | 4.20 s | **2.44 s** |
-| MCP first response | 152 ms | **0.4 ms** (spawn → initialize reply, median of 5) |
-| server RSS | 177 MB | **3.4 MB** (+2.6 MB only while rendering) |
-| deployable | node + node_modules | **one 5.7 MB static binary** (~2.4 MB of it is rustls for the proxy) |
-| render parity | — | pages + patch-tokens **exact** vs pxpipe (`reference/parity.mjs`) and vs the TS `main` branch (estimate/render JSON byte-identical, 12/12 knob combos) |
-| distill parity | — | **identical counts** on all fixtures incl. a 126 MB log |
+2026-07-26, Ryzen 7 9700X, Linux. Spawn time is the median of 5 cold starts
+to the first MCP response. The node reference is the original node MCP that
+wraps pxpipe's library; the TS engine is the npm package on `main`.
+
+| metric | rust | TS engine (node / bun) | node reference |
+|---|---:|---:|---:|
+| spawn to first response | **0.4 ms** | 35 / 27 ms | 158 ms |
+| idle server RSS | **3.8 MB** | 87 / 50 MB | 177 MB |
+| distill a 12 MB log | **0.28 s** | 0.42 / 0.31 s | - |
+| ships as | one 5.7 MB static binary (~2.4 MB of that is rustls, for the proxy) | 0.98 MB tarball + node | node_modules tree |
+
+Parity, asserted on every change: estimate and render JSON byte-identical to
+the TS engine across all 12 knob combos, PNG pages pixel-identical, distill
+counts identical, full MCP session including error paths
+(`reference/parity-ts.mjs` on `main`). Pages and patch tokens also match
+real pxpipe output on the default path (`reference/parity.mjs`).
 
 ## Tools (MCP, stdio)
 
@@ -57,8 +65,8 @@ font=normal, codebook=false` = byte-identical pages to pxpipe). Tokens are
 |---|---|---:|---:|---:|
 | `pack` (default on) | single-cell tabs, `⇥N` indent runs, width-trimmed pages — byte-exact | −15% | −0% | −0% |
 | `+ codebook` | repeated tokens/path prefixes → 1-cell sigils + a `·legend·` line — reversible | −20% | −0% | −38% |
-| `font:"tiny"` | atlas box-filtered into a 4×6 cell — experimental, 99.7% read-back accuracy | −40% | −36% | −40% |
-| **all three** | stacked | **−50%** | **−36%** | **−62%** |
+| `font:"tiny"` | atlas box-filtered into a 4×6 cell — experimental, 99.7% read-back accuracy | −40% | −39% | −40% |
+| **all three** | stacked | **−50%** | **−39%** | **−62%** |
 
 ## CLI
 
