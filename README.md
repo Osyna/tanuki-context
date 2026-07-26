@@ -185,3 +185,17 @@ Any MCP client takes the same stdio entry:
 - **pi**: pi has no MCP layer — install the npm package as a pi extension and point it at this binary: `pi install npm:tanuki-context`, then launch pi with `TANUKI_BIN=~/.cargo/bin/tanuki-context`. The extension is a thin stdio client, so the Rust engine serves the tools; numbers are parity-locked either way.
 
 The npm/TS engine (`npx -y tanuki-context`) drops into the same JSON entries.
+
+## Credits
+
+- [pxpipe](https://github.com/teamchong/pxpipe) is the origin of the idea
+  and the engine: an image is billed by its pixels, not by how much text is
+  inside it. This binary began as a Rust rewrite of their MCP; the page
+  geometry and glyphs come from pxpipe's own generated atlas, and the
+  default render path is byte-identical to their production renderer.
+  Their [benchmarks](https://github.com/teamchong/pxpipe#benchmark-results-and-receipts)
+  carry the read-back evidence.
+- The bitmap fonts inside the atlas are
+  [Spleen](https://github.com/fcambus/spleen) 5x8 by Frederic Cambus and
+  [GNU Unifont](https://unifoundry.com/unifont/) (BMP plus `unifont_upper`
+  for the astral planes).
