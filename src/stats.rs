@@ -19,7 +19,7 @@ pub fn px_stats() -> Value {
         return json!({ "available": false, "note": format!("no {} yet", path.display()) });
     };
     let (mut requests, mut compressed, mut orig_chars, mut images) = (0u64, 0u64, 0u64, 0u64);
-    let (mut baseline, mut actual) = (0u64, 0u64);
+    let (mut baseline, mut actual, mut output) = (0u64, 0u64, 0u64);
     for l in content.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(e) = serde_json::from_str::<Value>(l) else {
             continue;
@@ -34,6 +34,7 @@ pub fn px_stats() -> Value {
         actual += e["input_tokens"].as_u64().unwrap_or(0)
             + e["cache_read_tokens"].as_u64().unwrap_or(0)
             + e["cache_create_tokens"].as_u64().unwrap_or(0);
+        output += e["output_tokens"].as_u64().unwrap_or(0);
     }
     let saved = if baseline > 0 && actual > 0 {
         Some(((1.0 - actual as f64 / baseline as f64) * 1000.0).round() / 10.0)
@@ -44,6 +45,13 @@ pub fn px_stats() -> Value {
         "available": true, "requests": requests, "compressedRequests": compressed,
         "imagedChars": orig_chars, "imagesEmitted": images,
         "baselineTokens": baseline, "actualInputTokens": actual,
+        "outputTokens": output,
+        // the honest boundary: no input-side tool can cut this share of the bill
+        "outputSharePct": if output > 0 {
+            json!(((output as f64 / (actual + output) as f64) * 1000.0).round() / 10.0)
+        } else {
+            Value::Null
+        },
         "estInputSavedPct": saved,
     })
 }

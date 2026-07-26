@@ -22,6 +22,7 @@ mod render;
 mod sha256;
 mod stash;
 mod stats;
+mod table;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -37,26 +38,37 @@ struct PipelineOut {
     protected_lines: usize,
     level: u8,
     cb_entries: usize,
+    table: Option<(usize, usize)>, // (rows, cols) when the table codec applied
 }
 
-/// Stages 0 + 0.5 + 1: optional distill, optional codebook, then ladder level.
+/// Stages 0 + 0.5 + 1: optional columnar table, optional distill, optional
+/// codebook, then ladder level.
 fn stage01(
     text: &str,
     level: u8,
     use_distill: bool,
     query: Option<&str>,
     use_codebook: bool,
+    use_table: bool,
 ) -> PipelineOut {
-    let (mut working, stage0) = if use_distill || query.is_some() {
-        let d = distill::distill_log(text, query, 2);
-        (d.distilled, Some(d.stats))
-    } else {
-        (text.to_string(), None)
-    };
+    let mut working = std::borrow::Cow::Borrowed(text);
+    let mut table = None;
+    if use_table {
+        if let Some(t) = table::table_encode(&working) {
+            table = Some((t.rows, t.cols));
+            working = std::borrow::Cow::Owned(t.text);
+        }
+    }
+    let mut stage0 = None;
+    if use_distill || query.is_some() {
+        let d = distill::distill_log(&working, query, 2);
+        working = std::borrow::Cow::Owned(d.distilled);
+        stage0 = Some(d.stats);
+    }
     let mut cb_entries = 0;
     if use_codebook {
         let cb = codebook::apply(&working);
-        working = cb.text;
+        working = std::borrow::Cow::Owned(cb.text);
         cb_entries = cb.entries;
     }
     let c = ladder::compress_text(&working, level);
@@ -66,6 +78,7 @@ fn stage01(
         protected_lines: c.protected_lines,
         level: c.level,
         cb_entries,
+        table,
     }
 }
 
@@ -92,6 +105,7 @@ struct PipeArgs<'a> {
     pack: bool,
     font: &'a str,
     codebook: bool,
+    table: bool,
 }
 
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
@@ -104,15 +118,20 @@ fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
         pack: args["pack"].as_bool().unwrap_or(true),
         font: args["font"].as_str().unwrap_or("normal"),
         codebook: args["codebook"].as_bool().unwrap_or(false),
+        table: args["table"].as_bool().unwrap_or(false),
     }
 }
 
-/// Reversible-only headline walk at level 0, computed from the ORIGINAL text
-/// and independent of the requested knobs. Candidates in fixed order: plain,
-/// codebook; the first strict minimum of image tokens wins, so ties keep the
-/// earlier (fewer-knob) combo. Distill is priced separately under
-/// `withDistill` because it is lossy.
-fn recommend(text: &str) -> Value {
+/// Ladder walk, server-side: price the knob combos in one pass so the model
+/// does not spend tool rounds probing. The headline fields walk only the
+/// REVERSIBLE knobs (pack is byte-exact, codebook is legend-decodable, table
+/// is value-lossless columnar for whole-JSON input); distill is
+/// lossy-but-counted and built for logs, so its walk is reported separately
+/// as `withDistill` - never labeled safe, because on source code collapsing
+/// similar-looking lines is not safe. Strictly-less keeps the earliest
+/// (fewest-knob) combo on ties. ponytail: ~7 extra estimates + 1 distill per
+/// call; gate behind a flag if huge-input latency ever matters.
+fn recommend_for(text: &str) -> Value {
     use std::borrow::Cow;
     fn walk(base: &str) -> (bool, render::Estimated, Cow<'_, str>) {
         let mut best: Option<(bool, render::Estimated, Cow<str>)> = None;
@@ -129,14 +148,25 @@ fn recommend(text: &str) -> Value {
         }
         best.unwrap()
     }
-    let (cb, est, winner) = walk(text);
-    let tiny = render::estimate_text(&winner, true, true, render::Font::Tiny);
-    let distilled = distill::distill_log(text, None, 2).distilled;
+    let tbl = table::table_encode(text);
+    let (mut cb, mut est, mut winner) = walk(text);
+    let mut table = false;
+    if let Some(t) = &tbl {
+        let (wcb, west, wwin) = walk(&t.text);
+        if west.tokens < est.tokens {
+            (cb, est, winner) = (wcb, west, wwin);
+            table = true;
+        }
+    }
+    let dis_base = if table { tbl.as_ref().unwrap().text.as_str() } else { text };
+    let distilled = distill::distill_log(dis_base, None, 2).distilled;
     let (dcb, dest, _) = walk(&distilled);
+    let tiny = render::estimate_text(&winner, true, true, render::Font::Tiny);
     json!({
         "codebook": cb,
         "imageTokens": est.tokens,
         "pages": est.pages,
+        "table": table,
         "tinyImageTokens": tiny.tokens,
         "withDistill": { "codebook": dcb, "imageTokens": dest.tokens },
     })
@@ -144,7 +174,7 @@ fn recommend(text: &str) -> Value {
 
 fn tool_estimate(args: &Value) -> Value {
     let a = pipe_args(args);
-    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
     let img_tok = est.tokens;
@@ -165,29 +195,36 @@ fn tool_estimate(args: &Value) -> Value {
         "rawTextTokens": raw_tok,
         "totalSavedPct": pct(raw_tok, img_tok),
         "protectedLines": p.protected_lines,
-        "recommend": recommend(a.text),
+        "recommend": recommend_for(a.text),
         "pack": a.pack,
         "font": if font == render::Font::Tiny { "tiny" } else { "normal" },
         "codebook": if a.codebook { json!(p.cb_entries) } else { json!(false) },
+        "table": match p.table {
+            Some((rows, cols)) => json!({ "rows": rows, "cols": cols }),
+            None => json!(false),
+        },
         "verdict": if img_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
     });
     // Situation-aware real cost: only when a model or cache state is supplied,
     // so the default result (and the parity harness) stay byte-identical.
     if model.is_some() || cached {
-        out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached);
+        out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached, Some(&est.dims));
     }
     out
 }
 
 fn tool_render(args: &Value) -> Value {
     let a = pipe_args(args);
-    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook);
+    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
     let img_tok = r.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     let mut summary = String::new();
+    if let Some((rows, cols)) = p.table {
+        summary.push_str(&format!("table: {rows} rows x {cols} cols, keys stated once\n"));
+    }
     if let Some(s0) = &p.stage0 {
         summary.push_str(&format!(
             "distill: {} -> {} lines (-{}% chars, {} runs, {} exact + {} template suppressed, {} error/warn kept)\n",
@@ -235,7 +272,21 @@ fn tool_render(args: &Value) -> Value {
 
 fn tool_distill(args: &Value) -> Value {
     let text = args["text"].as_str().unwrap_or("");
-    let d = distill::distill_log(text, args["query"].as_str(), 2);
+    let mut working = std::borrow::Cow::Borrowed(text);
+    let mut table = None;
+    if args["table"].as_bool().unwrap_or(false) {
+        if let Some(t) = table::table_encode(text) {
+            table = Some((t.rows, t.cols));
+            working = std::borrow::Cow::Owned(t.text);
+        }
+    }
+    let mut d = distill::distill_log(&working, args["query"].as_str(), 2);
+    if let Some((rows, cols)) = table {
+        d.stats
+            .as_object_mut()
+            .unwrap()
+            .insert("table".to_string(), json!({ "rows": rows, "cols": cols }));
+    }
     json!([
         { "type": "text", "text": serde_json::to_string_pretty(&d.stats).unwrap() },
         { "type": "text", "text": d.distilled },
@@ -306,18 +357,18 @@ fn tools_list() -> Value {
     json!({ "tools": [
         {
             "name": "tanuki_render",
-            "description": "Token-cut pipeline: optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" } }, "required": ["text"] }
+            "description": "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_estimate",
-            "description": "Estimate tokens for the pipeline (distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, level 0) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4) and/or cached:true to add a 'cost' field that prices the decision in real dollars: a cached text token costs ~0.1x a fresh one on Anthropic, so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
+            "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
-            "description": "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. Deterministic, order-preserving.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "query": { "type": "string" } }, "required": ["text"] }
+            "description": "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. table:true first columnar-encodes whole-JSON input (keys stated once) so identical rows collapse harder. Deterministic, order-preserving.",
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "query": { "type": "string" }, "table": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_compress",
@@ -326,7 +377,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_stats",
-            "description": "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates).",
+            "description": "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates), and the output-token share of the bill — the part no input-side tool can cut.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -420,14 +471,21 @@ fn main() {
         Some("distill") => {
             let file = args
                 .get(2)
-                .expect("usage: tanuki-context distill <file> [query]");
+                .expect("usage: tanuki-context distill <file> [query] [--table]");
             let text = std::fs::read_to_string(file).expect("read file");
-            let d = distill::distill_log(&text, args.get(3).map(String::as_str), 2);
+            let mut working = text;
+            if args.iter().any(|a| a == "--table") {
+                if let Some(t) = table::table_encode(&working) {
+                    working = t.text;
+                }
+            }
+            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
+            let d = distill::distill_log(&working, pos.first().map(|s| s.as_str()), 2);
             println!("{}", serde_json::to_string(&d.stats).unwrap());
         }
         Some("estimate") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context estimate <file> [level] [--distill] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
+                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -450,6 +508,7 @@ fn main() {
                 "pack": !flag("--no-pack"),
                 "font": font,
                 "codebook": flag("--codebook"),
+                "table": flag("--table"),
                 "cached": flag("--cached"),
             });
             if let Some(m) = model { req["model"] = json!(m); }
@@ -458,7 +517,7 @@ fn main() {
         }
         Some("render") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--no-pack] [--font tiny] [--codebook]",
+                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -473,7 +532,14 @@ fn main() {
                     .map(String::as_str)
                     .unwrap_or("normal"),
             );
-            let p = stage01(&text, level, args.iter().any(|a| a == "--distill"), None, use_cb);
+            let p = stage01(
+                &text,
+                level,
+                args.iter().any(|a| a == "--distill"),
+                None,
+                use_cb,
+                args.iter().any(|a| a == "--table"),
+            );
             let r = render::render_text(&p.compressed, true, pack, font);
             let tok = r.tokens;
             println!(
@@ -510,7 +576,7 @@ fn main() {
                         result = d.stats;
                     }
                     _ => {
-                        let p = stage01(&text, level, use_distill, None, false);
+                        let p = stage01(&text, level, use_distill, None, false, false);
                         let r = render::render_text(&p.compressed, true, false, render::Font::Normal);
                         result = json!({
                             "pages": r.pages.len(),
@@ -584,7 +650,7 @@ fn main() {
             }
         }
         Some("proxy") => {
-            // tanuki-context proxy [--port N] [--upstream URL] [--level N] [--distill]
+            // tanuki-context proxy [--port N] [--upstream URL] [--level N] [--distill] [--table]
             //   [--codebook] [--font tiny] [--min-chars N] [--ratio X] [--min-save N] [--max-pages N]
             let num = |flag: &str, dflt: f64| -> f64 {
                 args.iter()
@@ -607,6 +673,7 @@ fn main() {
                     .unwrap_or(d.upstream),
                 level: num("--level", d.level as f64) as u8,
                 distill: flag("--distill"),
+                table: flag("--table"),
                 codebook: flag("--codebook"),
                 font: render::Font::parse(sval("--font").map(String::as_str).unwrap_or("normal")),
                 min_chars: num("--min-chars", d.min_chars as f64) as usize,
@@ -706,7 +773,7 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["codebook", "imageTokens", "pages", "tinyImageTokens", "withDistill"]
+            ["codebook", "imageTokens", "pages", "table", "tinyImageTokens", "withDistill"]
         );
         // distill collapses the heartbeat lines, so the lossy route is cheaper
         assert!(
@@ -805,5 +872,59 @@ mod tests {
             assert!(text.starts_with("stashed "), "{text}");
             assert!(!text.ends_with('\n'));
         })
+    }
+
+    fn table_corpus() -> String {
+        (0..200)
+            .map(|i| {
+                serde_json::to_string(&json!({
+                    "ts": format!("2026-07-26T03:{:02}:00Z", i % 60),
+                    "level": if i % 7 == 0 { "error" } else { "info" },
+                    "unit": format!("worker-{}.service", i % 4),
+                    "message": format!("copied segment_{:05}.parquet ok", i % 9),
+                    "pid": 1000 + (i % 32),
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn estimate_table_knob_reports_rows_cols_and_recommend_probes_table() {
+        let ndjson = table_corpus();
+        let plain = tool_estimate(&json!({ "text": ndjson, "level": 0 }));
+        let tabled = tool_estimate(&json!({ "text": ndjson, "level": 0, "table": true }));
+        assert_eq!(tabled["table"], json!({ "rows": 200, "cols": 5 }));
+        assert_eq!(plain["table"], json!(false));
+        assert!(
+            tabled["imageTokens"].as_u64().unwrap() <= plain["imageTokens"].as_u64().unwrap()
+        );
+        // recommend probes table on its own - no knob required
+        assert_eq!(plain["recommend"]["table"], json!(true));
+    }
+
+    #[test]
+    fn table_and_distill_compose_identical_rows_collapse_harder() {
+        let dup: String = (0..300)
+            .map(|i| {
+                serde_json::to_string(&json!({
+                    "ts": format!("2026-07-26T03:00:{:02}Z", i % 3),
+                    "level": "info",
+                    "message": "heartbeat ok",
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tabled_only = tool_estimate(&json!({ "text": dup, "level": 0, "table": true }));
+        let tabled_distilled =
+            tool_estimate(&json!({ "text": dup, "level": 0, "distill": true, "table": true }));
+        // composition claim: identical rows collapse harder AFTER tabling, so
+        // the stack strictly beats table alone.
+        assert!(
+            tabled_distilled["imageTokens"].as_u64().unwrap()
+                < tabled_only["imageTokens"].as_u64().unwrap()
+        );
     }
 }
