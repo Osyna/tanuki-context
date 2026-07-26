@@ -73,7 +73,7 @@ fn coarse_key(masked: &str) -> String {
     parts.join(" ")
 }
 
-fn truncate_chars(s: &str, n: usize) -> &str {
+pub(crate) fn truncate_chars(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
         None => s,
