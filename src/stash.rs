@@ -6,6 +6,13 @@
 use crate::distill;
 use crate::sha256;
 use std::path::PathBuf;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+
+/// ponytail: below this length a distance-1 neighborhood is mostly noise, so
+/// short values get an exact-or-absent answer only (mirror of the TS engine).
+const MIN_FUZZY_LEN: usize = 4;
+const VERIFY_CAND_CAP: usize = 8;
 
 pub fn stash_dir() -> PathBuf {
     match std::env::var_os("TANUKI_STASH") {
@@ -87,6 +94,73 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
     }
     let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
     (a <= b).then_some((a, b))
+}
+
+/// Disk-grounded exact check for a value read off a rendered page. No model:
+/// the stashed original bytes are compared directly, so a plausible-wrong-
+/// character misread becomes `exact`, a unique `corrected`, an `ambiguous`
+/// shortlist, or an explicit `absent`. Byte-identical with the TS engine
+/// (substitution distance 1 only; same scan order and code-point math).
+pub fn verify_value(id: &str, value: &str) -> Result<Value, String> {
+    if value.is_empty() {
+        return Err("verify needs a non-empty value".to_string());
+    }
+    let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
+        return Err(format!("unknown stash id: {id}"));
+    };
+
+    if let Some(byte_idx) = text.find(value) {
+        let line = 1 + text[..byte_idx].bytes().filter(|&b| b == b'\n').count();
+        return Ok(json!({ "status": "exact", "line": line, "found": value, "candidates": [] }));
+    }
+
+    let val: Vec<char> = value.chars().collect();
+    let n = val.len();
+    if n < MIN_FUZZY_LEN {
+        return Ok(json!({ "status": "absent", "line": null, "found": null, "candidates": [] }));
+    }
+
+    let cps: Vec<char> = text.chars().collect();
+    let mut line_at = vec![0usize; cps.len()];
+    let mut ln = 1usize;
+    for (i, &c) in cps.iter().enumerate() {
+        line_at[i] = ln;
+        if c == '\n' {
+            ln += 1;
+        }
+    }
+
+    // Substitution distance 1 only (mirror of the TS engine): the dominant
+    // dense-glyph misread keeps the length and cannot match a fragment of a
+    // longer token the way an indel window would.
+    let mut found: BTreeMap<String, usize> = BTreeMap::new();
+    if n <= cps.len() {
+        for off in 0..=(cps.len() - n) {
+            let mut d = 0;
+            for i in 0..n {
+                if val[i] != cps[off + i] {
+                    d += 1;
+                    if d > 1 {
+                        break;
+                    }
+                }
+            }
+            if d == 1 {
+                let s: String = cps[off..off + n].iter().collect();
+                found.entry(s).or_insert(line_at[off]);
+            }
+        }
+    }
+
+    if found.is_empty() {
+        return Ok(json!({ "status": "absent", "line": null, "found": null, "candidates": [] }));
+    }
+    if found.len() == 1 {
+        let (s, line) = found.iter().next().unwrap();
+        return Ok(json!({ "status": "corrected", "line": line, "found": s, "candidates": [] }));
+    }
+    let candidates: Vec<&String> = found.keys().take(VERIFY_CAND_CAP).collect();
+    Ok(json!({ "status": "ambiguous", "line": null, "found": null, "candidates": candidates }))
 }
 
 /// Serialize env-dependent tests (TANUKI_STASH is process-global) and give
@@ -200,6 +274,38 @@ mod tests {
                 fetch_slice("cafebabe0000", Some("a"), None).unwrap_err(),
                 "unknown stash id: cafebabe0000"
             );
+        })
+    }
+
+    #[test]
+    fn verify_exact_corrected_ambiguous_absent() {
+        with_test_dir("verify", || {
+            let text = "alpha beta\nid 3451bd1b-13c4-4558-aa67-a62bc042905e end\ngamma cafe1234 and cafe1235 delta\n";
+            let (id, _) = stash_text(text).unwrap();
+
+            let exact = verify_value(&id, "3451bd1b-13c4-4558-aa67-a62bc042905e").unwrap();
+            assert_eq!(exact["status"], "exact");
+            assert_eq!(exact["line"], 2);
+            assert_eq!(exact["found"], "3451bd1b-13c4-4558-aa67-a62bc042905e");
+
+            // one-character misread (last e->f) resolves to the unique on-disk value
+            let corr = verify_value(&id, "3451bd1b-13c4-4558-aa67-a62bc042905f").unwrap();
+            assert_eq!(corr["status"], "corrected");
+            assert_eq!(corr["found"], "3451bd1b-13c4-4558-aa67-a62bc042905e");
+            assert_eq!(corr["line"], 2);
+
+            // two distance-1 neighbours -> ambiguous shortlist, sorted
+            let amb = verify_value(&id, "cafe1230").unwrap();
+            assert_eq!(amb["status"], "ambiguous");
+            assert_eq!(amb["candidates"], json!(["cafe1234", "cafe1235"]));
+
+            assert_eq!(verify_value(&id, "ffffffff-0000-0000-0000-000000000000").unwrap()["status"], "absent");
+            // short value: exact-or-absent only, no fuzzing
+            assert_eq!(verify_value(&id, "cafe1234").unwrap()["status"], "exact");
+            assert_eq!(verify_value(&id, "xyz").unwrap()["status"], "absent");
+
+            assert_eq!(verify_value(&id, "").unwrap_err(), "verify needs a non-empty value");
+            assert_eq!(verify_value("deadbeefcafe", "whatever").unwrap_err(), "unknown stash id: deadbeefcafe");
         })
     }
 }
