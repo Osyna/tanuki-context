@@ -45,6 +45,8 @@ const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 
 function corpus(seed) {
   const r = lcg(seed);
   const units = ["api-gateway", "worker", "scheduler", "ingest", "cache", "relay"];
+  const comps = ["frame-allocator", "wal-compactor", "shard-router", "quota-reaper", "vclock-merger", "bloom-indexer", "lease-broker", "chunk-scrubber"];
+  const reasons = ["disk write failed errno=ENOSPC", "deadlock acquiring lease table", "checksum mismatch on replay", "heap arena corruption detected", "fd table exhausted"];
   const lines = [];
   for (let i = 0; i < 120; i++) {
     const ts = `2026-07-27T09:${String(10 + ((i / 6) | 0)).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
@@ -55,21 +57,25 @@ function corpus(seed) {
       lines.push(`${ts} ${u} INFO poll ok latency=${1 + ((r() * 40) | 0)}ms conn=${(r() * 9) | 0}`);
     }
   }
-  // the one root cause: a seed-unique component token in a real-shaped stack line.
-  const token = `frame-allocator#${hex(r, 6)}`;
+  // the one root cause: a seed-varying READABLE component name (this tests
+  // comprehension, not needle transcription - the random hex id stays on the
+  // line for realism, but the scored answer is the legible component word).
+  const comp = comps[(r() * comps.length) | 0];
+  const reason = reasons[(r() * reasons.length) | 0];
+  const token = comp;
   const at = 8 + ((r() * 100) | 0);
   const line = 100 + ((r() * 900) | 0);
   lines.splice(
     at,
     0,
-    `2026-07-27T09:30:00Z relay FATAL panic: disk write failed errno=ENOSPC component=${token} at lib/relay/frame.ts:${line}`,
+    `2026-07-27T09:30:00Z relay FATAL panic: ${reason} component=${comp}#${hex(r, 6)} at lib/relay/${comp}.rs:${line}`,
   );
   return { text: lines.join("\n") + "\n", token };
 }
 
 const QUESTION =
-  "This is a service log. Exactly one line is a FATAL panic that is the root cause. " +
-  "What is the root cause? Name the failing component/line/token verbatim. Answer with the token only.";
+  "This service log has exactly one FATAL panic line - the root cause. Reply with ONLY " +
+  "the component name in its `component=` field (the word after `component=`, drop any #id).";
 
 // ---- generate fixtures + render both arms (one render, two representations) --
 mkdirSync(OUT, { recursive: true });
@@ -116,11 +122,13 @@ async function ask(content) {
   const res = await fetch(API, {
     method: "POST",
     headers: HEADERS,
-    body: JSON.stringify({ model: MODEL, max_tokens: 256, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 4000, messages: [{ role: "user", content }] }),
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  return (data.content || []).map((b) => b.text || "").join("").trim();
+  const blocks = data.content || [];
+  const txt = blocks.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  return txt || blocks.map((b) => b.thinking || "").join("").trim(); // thinking fallback if truncated
 }
 
 const askText = (c) => ask([{ type: "text", text: `${c.textArm}\n\n${QUESTION}` }]);

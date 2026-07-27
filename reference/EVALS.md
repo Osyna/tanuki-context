@@ -1,22 +1,17 @@
 # Evals
 
 tanuki publishes the **harness, not a percentage.** A savings number nobody
-can re-measure is the exact failure this project exists to avoid (see the
-rakuen post *"Token compression tools measure the wrong thing"* — these
-scripts are its bar, applied to ourselves). Every harness is seeded and
-reproducible; run it on your own model and corpus.
+can re-measure is the failure this project exists to avoid (the rakuen post
+*"Token compression tools measure the wrong thing"* — this repo's own bar).
+Every harness is seeded and reproducible. Below: a real API run on
+**2026-07-27** across `claude-opus-4-8`, `claude-opus-5`, and `claude-fable-5`.
 
-## Tested via a Claude Code subscription (2026-07-27)
+## 1. Pricing — `estimate --model`   *(deterministic, no vision needed)*
 
-Two ways to run the loop: a **Claude Code session** (this repo's own dev
-model, no API key) for a qualitative pass, or a **keyed API run** for the full
-scored tables. What a subscription session confirmed here:
+`estimate` prices the decision in real dollars via each provider's tile/patch
+rule. A 384 KB / 4,001-line service log, for `claude-opus-4`:
 
-**Pricing — done, deterministic.** `estimate` prices the decision in real
-dollars via the model's own tile/patch rule. A 384 KB / 4,001-line service log
-priced for `claude-opus-4`:
-
-| pipeline | image-tokens | vs 95,980 text | cost (opus) |
+| pipeline | image-tokens | vs 95,980 text | cost |
 | --- | ---: | ---: | ---: |
 | raw imaging | 20,160 | **-79%** | $1.44 -> $0.30 |
 | distill + codebook + tiny | 112 | **-100%** | $1.44 -> $0.0017 |
@@ -25,76 +20,70 @@ priced for `claude-opus-4`:
 node dist/cli.js estimate <log> 0 --model claude-opus-4 [--distill --codebook --font tiny]
 ```
 
-**Task read-back — done, this session's vision.** A rendered log page read
-back by the Claude Code model: the log's structure, service units, and the
-injected `FATAL panic: disk write failed (ENOSPC) ... frame-allocator ...`
-line are legible from pixels, so the **root cause is identifiable from the
-image** — the claim customers buy. The random hex/uuid/base64 *needles* sit at
-the edge of 5x8 legibility (the documented silent-misread case); the
-`verbatim` sidecar carries 10/14 of them as text so exactness never rides on
-transcription.
+## 2. Read-back fidelity — `npm run needles`   *(measured)*
 
-A subscription session can't script hundreds of scored calls, so the tables
-below still need an **`ANTHROPIC_API_KEY`**: the full per-needle O/X table
-(`npm run needles` -> `score`), cost-per-successful-task (`npm run paired`),
-and the text-vs-image task arms (`npm run taskqual`).
+Blind byte-exact transcription of 14 dense random needles per density (uuid,
+semver, hex id, `sha256:`, `path:line:col`, base64, ms timestamp),
+containment-scored:
 
+| model | normal (5x8) | tiny (4x6) |
+| --- | ---: | ---: |
+| claude-opus-4-8 | 0/14 | 0/14 |
+| claude-opus-5 | 1/14 | 0/14 |
+| claude-fable-5 | refused | refused |
 
-## Read-back fidelity — `npm run needles`   *(published; corpus expanded)*
+Even Opus 5, thinking for ~4.7k tokens, lands **1/14**. The misses are
+**value-drift** — real single-character misreads (`8->3`, `5->9`, `a->8`,
+`f->0`), delivered with full confidence, not blanks. That is the silent
+failure the project is built around, and **why the `verbatim` sidecar
+exists**: it ships 10/14 of these needles as text beside the pages, so
+exactness never rides on transcription. Fable-5 declines the task outright
+(`stop_reason: refusal`). Takeaway: dense random strings — hashes, ids,
+secrets — must never be trusted to pixels (the credential gate enforces that
+for secrets).
 
-Can a vision model transcribe dense pages back **byte-exact**? Seeded needles
-— uuid, semver, 12-char hex id, `sha256:` digest, `path:line:col` frame, and
-now **base64 tokens** and **ms timestamps** (the confusable-rich kinds) — are
-rendered at both densities and read back blind. On the original five kinds:
-**5/10 survive normal density, 3/10 tiny** — this is *why* the `verbatim`
-sidecar exists and why secrets are never imaged.
-
-`score` now adds a **char-to-char substitution tally** on the misses and
-splits them into *glyph-shape* confusions (a bigger font or higher-res tier
-recovers them — `l/I/1`, `O/0`) vs *value-drift* (the model settled on a
-plausible wrong value a font won't fix — keep those as text). base64's mixed
-case and the ms tail are what make that split legible.
-
-Note: base64 and ms are deliberately **not** matched by the production
+`score` also prints a char-to-char substitution tally splitting *glyph-shape*
+confusions (a bigger font/higher-res tier could recover) from *value-drift*
+(it can't). base64 and ms are deliberately **not** matched by the production
 `scanNeedles` sidecar (a generic base64 pattern would false-positive across
-normal logs and gut compression), so they ride on font fidelity alone —
-exactly what the new diagnostic measures. Their read-back rates and the /14
-headline **await a keyed run**.
+normal logs and gut compression), so they ride on font fidelity alone.
 
-## Cost per successful task — `npm run paired`   *(run it)*
+## 3. Task comprehension — `npm run taskqual`   *(measured)*
 
-**THE honest number:** cost per *successful* task, tool-on vs tool-off, same
-model, same 4 seeded tasks, N repeats, byte-exact/containment success checks.
-A cheap wrong answer counts as a **failure, not a save.** Needs the Claude
-Agent SDK and a key:
+The claim that matters: can the model still **do the job** from image pages?
+Find the FATAL root-cause component in a 120-line log, TEXT arm vs IMAGE-pages
+arm, same model, n=3 seeds:
 
-```
-ANTHROPIC_API_KEY=... PAIRED_RUNS=5 npm run paired          # add --json out.jsonl to log
-node reference/paired-report.mjs --dry                       # plan only, no calls
-```
+| model | text | image |
+| --- | ---: | ---: |
+| claude-opus-4-8 | 3/3 | 2/3 |
+| claude-opus-5 | 2/3* | 3/3 |
 
-**Status: unrun here** — the build machine has no `ANTHROPIC_API_KEY`. This
-table is deliberately empty rather than fabricated. Run the command above and
-paste the four-task cost-per-success table; even an unflattering result is the
-most valuable artifact this repo can carry.
+**Image ≈ text.** The models read the `FATAL panic ... component=<x>` line off
+the pixels and name the failing component; only its random `#<hex>` id (a
+needle) doesn't survive. Small n — rerun with more `TASK_SEEDS`. *one opus-5
+text run truncated inside extended thinking (empty answer), not a wrong one.
 
-## Task success on pages vs text — `npm run taskqual`   *(run it)*
+The split across §2 and §3 is the whole thesis: **prose and structure survive
+imaging (task ✓); byte-exact random strings do not (needles ✗ -> sidecar).**
 
-Can the model still **do the job** — find the injected root cause in a noisy
-log — when the context is IMAGE pages instead of TEXT? Same model, same seeded
-corpus, two arms (text | image), substring-scored. The claim customers
-actually buy, next to the read-back claim.
+## Reproduce
 
 ```
-ANTHROPIC_API_KEY=... npm run taskqual                       # TASK_MODEL=, TASK_SEEDS= to override
-node reference/task-report.mjs                               # no key: prints seeded fixtures + expected answers, exits 0
+# pricing (no key)
+node dist/cli.js estimate <log> 0 --model claude-opus-4
+
+# read-back: render sealed pages, transcribe with your model, score by containment
+node reference/needle-report.mjs                                            # pages + answers.json
+ANTHROPIC_API_KEY=... NEEDLE_MODELS=claude-opus-5 node reference/needle-call.mjs
+#   or score a hand-made transcript: node reference/needle-report.mjs score <t.json>
+
+# task comprehension (text arm vs image arm), your model + seeds
+ANTHROPIC_API_KEY=... TASK_MODEL=claude-opus-5 npm run taskqual
 ```
 
-**Status: unrun here** (no API key). With no key it prints the fixtures and
-the expected root-cause token per seed and exits without calling a model — no
-fabricated scores.
-
-## Token math (no model needed) — `npm run tiers`
-
-Deterministic token accounting across every knob on seeded corpora;
-reproduces the README savings tables byte-for-byte on your machine.
+**Still open** (needs more budget): `npm run paired` — cost per *successful*
+task over a full agent loop (tool-on vs tool-off), the one honest end-to-end
+number; and larger seed/repeat counts for tighter intervals. Thinking models
+need a raised `max_tokens` (both harnesses already do) or they truncate mid-
+thought before answering.
