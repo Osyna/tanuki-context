@@ -6,3 +6,4 @@ reference/**/*.html
 tools/data/
 .bench-journal.log
 /logo.png
+reference/needles/
