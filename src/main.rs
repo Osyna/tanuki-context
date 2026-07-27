@@ -187,6 +187,8 @@ fn tool_estimate(args: &Value) -> Value {
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     let model = args["model"].as_str();
     let cached = args["cached"].as_bool().unwrap_or(false);
+    let creds = needles::scan_credentials(a.text);
+    let has_creds = !creds.is_empty();
     let mut out = json!({
         "engine": "pxpipe",
         "level": format!("{} {}", p.level, name),
@@ -212,7 +214,8 @@ fn tool_estimate(args: &Value) -> Value {
             Some(s) => json!({ "more": s.more, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
             None => json!(false),
         },
-        "verdict": if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
+        "verdict": if has_creds { "TEXT cheaper (credentials)" } else if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
+        "credentials": if has_creds { json!(creds) } else { json!(false) },
     });
     // Situation-aware real cost: only when a model or cache state is supplied,
     // so the default result (and the parity harness) stay byte-identical.
@@ -224,6 +227,10 @@ fn tool_estimate(args: &Value) -> Value {
 
 fn tool_render(args: &Value) -> Value {
     let a = pipe_args(args);
+    let creds = needles::scan_credentials(a.text);
+    if !creds.is_empty() {
+        return json!([{ "type": "text", "text": format!("[tanuki-context: refused to render — {} credential-shaped secret(s) detected ({}); kept as text so a secret is never silently misread from pixels]", creds.len(), creds.join(", ")) }]);
+    }
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
@@ -352,7 +359,7 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
     let raw_tok = text_tokens(chars);
-    if !stash_pages_win(r.tokens, r.pages.len(), raw_tok) {
+    if !stash_pages_win(r.tokens, r.pages.len(), raw_tok) || !needles::scan_credentials(&slice).is_empty() {
         return Ok(json!([{ "type": "text", "text": slice }]));
     }
     let marker = format!(
@@ -411,11 +418,10 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" } }, "required": ["id"] }
         }
     ] });
-    // TANUKI_TOOL_BRIEF=1 serves the registry's one-line briefs instead of the
-    // full contracts (~4x smaller furniture on every request). Off by default:
-    // the full text is load-bearing for models that have not read the README,
-    // and the default wire output stays parity-locked with the TS engine.
-    if std::env::var("TANUKI_TOOL_BRIEF").map_or(false, |x| x == "1") {
+    // Brief one-line descriptions by default (~4x smaller furniture the model
+    // pays for on every request); TANUKI_TOOL_VERBOSE=1 restores the full
+    // contracts. The slim default surface is applied below too.
+    if std::env::var("TANUKI_TOOL_VERBOSE").as_deref() != Ok("1") {
         let briefs: [(&str, &str); 7] = [
             ("tanuki_render", "Render text through the pipeline (optional distill/level/codebook) into dense PNG pages. Call after tanuki_estimate says PIPELINE cheaper."),
             ("tanuki_estimate", "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Pass model and/or cached:true for a real-dollar 'cost' verdict (cached content usually should not be imaged). Instant; call this first."),
@@ -431,6 +437,14 @@ fn tools_list() -> Value {
                     t["description"] = json!(b);
                 }
             }
+        }
+    }
+    // Slim default surface: advertise only the 3 workflow tools unless
+    // TANUKI_ALL_TOOLS=1. The other four stay callable by name.
+    if std::env::var("TANUKI_ALL_TOOLS").as_deref() != Ok("1") {
+        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash"];
+        if let Some(tools) = v["tools"].as_array_mut() {
+            tools.retain(|t| keep.contains(&t["name"].as_str().unwrap_or("")));
         }
     }
     v
@@ -570,6 +584,11 @@ fn main() {
                 "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
+            let creds = needles::scan_credentials(&text);
+            if !creds.is_empty() {
+                println!("{}", json!({ "refused": true, "credentials": creds }));
+                return;
+            }
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
             let level: u8 = pos.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let flag = |n: &str| args.iter().any(|a| a == n);
@@ -689,7 +708,7 @@ fn main() {
             });
             let r = render::render_text(&slice, true, true, render::Font::Normal);
             let raw_tok = text_tokens(slice.chars().count());
-            if stash_pages_win(r.tokens, r.pages.len(), raw_tok) {
+            if stash_pages_win(r.tokens, r.pages.len(), raw_tok) && needles::scan_credentials(&slice).is_empty() {
                 println!(
                     "{}",
                     json!({ "mode": "pages", "pages": r.pages.len(),
@@ -722,6 +741,11 @@ fn main() {
             };
             let flag = |n: &str| args.iter().any(|a| a == n);
             let d = proxy::ProxyCfg::default();
+            let env_recency = std::env::var("TANUKI_RECENCY")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(d.recency_window as f64);
             proxy::run(proxy::ProxyCfg {
                 port: num("--port", d.port as f64) as u16,
                 upstream: sval("--upstream")
@@ -737,6 +761,7 @@ fn main() {
                 ratio: num("--ratio", d.ratio),
                 min_save: num("--min-save", d.min_save as f64) as i64,
                 max_pages: num("--max-pages", d.max_pages as f64) as usize,
+                recency_window: num("--recency", env_recency) as usize,
             });
         }
         Some("run") => {
