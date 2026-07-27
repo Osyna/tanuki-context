@@ -8,6 +8,7 @@
 //!      tanuki-context render <file> [level] [outdir]
 //!      tanuki-context stash <file>
 //!      tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+//!      tanuki-context verify <id> <value>
 //!      tanuki-context run [--query re] -- <command> [args...]
 //!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
 
@@ -377,6 +378,13 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     Ok(json!(content))
 }
 
+fn tool_verify(args: &Value) -> Result<Value, String> {
+    let id = args["id"].as_str().unwrap_or("");
+    let value = args["value"].as_str().unwrap_or("");
+    let r = stash::verify_value(id, value)?;
+    Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&r).unwrap() }]))
+}
+
 fn level_schema() -> Value {
     json!({ "type": "integer", "minimum": 0, "maximum": 4 })
 }
@@ -418,13 +426,18 @@ fn tools_list() -> Value {
             "name": "tanuki_fetch",
             "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" } }, "required": ["id"] }
+        },
+        {
+            "name": "tanuki_verify",
+            "description": "Disk-grounded exact check for a value you read off a rendered page (an id/hash/version/path). No model: it compares your candidate against the stashed original bytes and returns status 'exact' (found verbatim, with line), 'corrected' (a unique string within edit distance 1 exists - you misread one character, use `found`), 'ambiguous' (several near-matches in `candidates` - disambiguate with tanuki_fetch), or 'absent' (no match - do not invent one). Turns the silent single-character misread (README Table D) into an exact match or an explicit flag. Call before acting on any value transcribed from pixels.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "value": { "type": "string" } }, "required": ["id", "value"] }
         }
     ] });
     // Brief one-line descriptions by default (~4x smaller furniture the model
     // pays for on every request); TANUKI_TOOL_VERBOSE=1 restores the full
     // contracts. The slim default surface is applied below too.
     if std::env::var("TANUKI_TOOL_VERBOSE").as_deref() != Ok("1") {
-        let briefs: [(&str, &str); 7] = [
+        let briefs: [(&str, &str); 8] = [
             ("tanuki_render", "Render text through the pipeline (optional distill/level/codebook) into dense PNG pages. Call after tanuki_estimate says PIPELINE cheaper."),
             ("tanuki_estimate", "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Pass model and/or cached:true for a real-dollar 'cost' verdict (cached content usually should not be imaged). Instant; call this first."),
             ("tanuki_distill", "Stage 0 alone: collapse repeated log lines/blocks and template near-dupes; error/warn lines kept verbatim. Output stays greppable text."),
@@ -432,6 +445,7 @@ fn tools_list() -> Value {
             ("tanuki_stats", "Session savings summary from the events log (honest denominator: input + cache reads + cache creates)."),
             ("tanuki_stash", "Park bulky text outside the context window; returns a compact map (distill stats, top repeats, id). Retrieval pattern, tanuki pricing on the way back."),
             ("tanuki_fetch", "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically."),
+            ("tanuki_verify", "Disk-grounded check of a value read off a page vs the stashed original: exact/corrected/ambiguous/absent + line. No model. Use before trusting a transcribed id/hash/version."),
         ];
         if let Some(tools) = v["tools"].as_array_mut() {
             for t in tools {
@@ -441,10 +455,10 @@ fn tools_list() -> Value {
             }
         }
     }
-    // Slim default surface: advertise only the 3 workflow tools unless
+    // Slim default surface: advertise only the 4 workflow tools unless
     // TANUKI_ALL_TOOLS=1. The other four stay callable by name.
     if std::env::var("TANUKI_ALL_TOOLS").as_deref() != Ok("1") {
-        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash"];
+        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_verify"];
         if let Some(tools) = v["tools"].as_array_mut() {
             tools.retain(|t| keep.contains(&t["name"].as_str().unwrap_or("")));
         }
@@ -473,6 +487,7 @@ fn tools_call(params: &Value) -> Result<Value, String> {
         }
         "tanuki_stash" => tool_stash(args)?,
         "tanuki_fetch" => tool_fetch(args)?,
+        "tanuki_verify" => tool_verify(args)?,
         other => return Err(format!("unknown tool: {other}")),
     };
     Ok(json!({ "content": content }))
@@ -727,6 +742,17 @@ fn main() {
                 println!("{slice}");
             }
         }
+        Some("verify") => {
+            let id = args.get(2).expect("usage: tanuki-context verify <id> <value>");
+            let value = args.get(3).expect("usage: tanuki-context verify <id> <value>");
+            match stash::verify_value(id, value) {
+                Ok(v) => println!("{}", serde_json::to_string(&v).unwrap()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("proxy") => {
             // tanuki-context proxy [--port N] [--upstream URL] [--level N] [--distill] [--table]
             //   [--codebook] [--font tiny] [--min-chars N] [--ratio X] [--min-save N] [--max-pages N]
@@ -820,7 +846,7 @@ fn main() {
         }
         Some("serve") | None => serve(),
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run] ...");
+            eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|verify|run] ...");
             std::process::exit(1);
         }
     }
