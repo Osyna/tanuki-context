@@ -147,11 +147,13 @@ Leave it alone when:
 
 - your model cannot read images. Hard requirement. Everything here assumes
   a vision-capable reader (any current Claude model qualifies).
-- the exact bytes must survive a round trip: secrets, hashes, code the
-  model is about to edit. Rendering is exact, but model read-back of dense
-  random strings is not, and it fails silently - you get a plausible wrong
+- the exact bytes must survive a round trip: secrets, or code the model is
+  about to edit. Rendering is exact, but model read-back of dense random
+  strings is not, and it fails silently - you get a plausible wrong
   character, not an error. Our needle harness measures it (table below):
-  5/10 grep-targets survive normal density, 3/10 tiny. Keep those in text.
+  5/10 grep-targets survive normal density, 3/10 tiny. The `verbatim`
+  sidecar (default on) pulls uuids/hashes/ids/ips/versions out as text
+  automatically; secrets and edit-targets should still never be imaged.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.
@@ -245,7 +247,7 @@ All modes run the same engine and log their savings to the same file, which
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
 | `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
 | `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big  | after a stash, when you actually need it |
-| `tanuki_stats`    | totals from the session's savings log, plus the output share | end-of-session accounting                |
+| `tanuki_stats`    | totals from the session's savings log: optimistic + cache-aware bounds, output share, own furniture cost | end-of-session accounting                |
 
 ### Stash: the retrieval pattern, absorbed
 
@@ -392,10 +394,11 @@ Nothing disappears silently.
 | pixel pricing | pages billed by 28-px patch grid, not content | the core ~4x gap text never gets |
 | distill | dedupe with exact counts, errors verbatim | noisy logs are mostly repetition |
 | exact-recall guard | levels 2-4 can't touch code/ids/paths | loss stays confined to prose |
-| pack | single-cell tabs, `⇥N` indent runs, width-trimmed pages | -5% on code, byte-exact |
+| pack | single-cell tabs, `⇥N` indent runs, width-trimmed pages | -4% on code, byte-exact |
 | codebook | repeated tokens/paths become 1-cell sigils + a `·legend·` line | -38% on path-heavy logs, reversible |
 | `table` | whole-JSON input becomes a `·cols·` header + tab-joined JSON cells | keys stated once: -33% on journald NDJSON before imaging even starts |
 | tiny font | glyphs box-filtered to 4x6 cells | -36 to -40% more, opt-in (lossy read-back) |
+| `verbatim` | uuids/hashes/hex ids/ips/versions ship as a text sidecar next to the pages | grep-targets stay byte-exact; the verdict prices the sidecar honestly |
 | `recommend` | the estimate call walks all safe knob combos server-side | saves ~590 tokens of tool-call probing |
 | provider-real cost | `estimate {model}` counts image tokens by that provider's tile rule and prices its cache ratio | verdicts stop being Anthropic-only guesses |
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
@@ -404,11 +407,13 @@ Nothing disappears silently.
 | `run` wrapper | wrap any command; distilled output inline, full capture stashed | -70% of chars on chatty commands, before tokenization |
 | progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
 | output share | the proxy logs `output_tokens`; `tanuki_stats` reports the share | names the part of the bill no input-side tool can cut |
+| cache-aware ledger | replays priced at cache-read rates, first flips charged the write premium | the savings estimate stops pretending every avoided token was full-price |
+| self-furniture line | `tanuki_stats` counts tanuki's own tool schemas | ~1.2k tokens of overhead, reported instead of hidden; `TANUKI_TOOL_BRIEF=1` halves it |
 
 ## Benchmarks
 
-Two benchmark suites ship in `reference/`. Both print every number in this
-section, and both are built so you can check us.
+Three benchmark suites ship in `reference/`. They print every number in
+this section, and they are built so you can check us.
 
 The tier suite is reproducible to the byte. Its three synthetic corpora are
 seeded (same bytes on every machine), its two repo corpora ship in this
@@ -429,6 +434,26 @@ you can re-check any single number by hand:
 npx tanuki-context estimate <file> <level> [--distill] [--table] [--no-pack] [--codebook] [--font tiny]
 ```
 
+### The number we refuse to print
+
+Every table below is input tokens on corpora — honest about its own domain,
+and still the wrong final metric. The number that decides whether a tool
+like this earns its place is **cost per successful task, measured in paired
+runs**: tool on, tool off, same model, same corpus, same success check,
+several times over. That needs your API key and your model, so we ship the
+harness instead of a percentage:
+
+```
+node reference/paired-report.mjs --dry      # the plan, no API calls
+ANTHROPIC_API_KEY=... node reference/paired-report.mjs
+```
+
+Four seeded log tasks, two arms (corpus inlined vs stashed + tanuki tools),
+byte-exact success checks — a plausible-wrong-character answer counts as a
+failure, not a saving. Any savings number you see in this README that is
+not from a paired run is counterfactual accounting, and it says so where it
+appears.
+
 One definition first. The "pxpipe" column below is tanuki running with
 every extension off (`--no-pack`, no codebook, normal font). That mode
 renders byte-identical output to pxpipe itself; the 161-check parity suite
@@ -445,8 +470,8 @@ reword prose; distill drops repeats but keeps every error line.
 | service log (synthetic, seeded) | 37,111 | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | **12,902** (-65%) | n/a |
 | journalctl JSON (synthetic, seeded) | 32,534 | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | **8,771** (-73%) | 23,032 (-29%) |
 | npm install log (synthetic, seeded) | 40,514 | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | **2,967** (-93%) | n/a |
-| TypeScript source (src/main.ts) | 6,524 | 6,524 (0%) | 6,519 (0%) | 6,504 (0%) | 6,485 (-1%) | **5,384** (-17%) | n/a |
-| design doc (DESIGN.md) | 7,449 | 7,449 (0%) | 7,447 (0%) | 7,283 (-2%) | **7,075** (-5%) | 7,477 (0%) | n/a |
+| TypeScript source (src/main.ts) | 6,974 | 6,974 (0%) | 6,969 (0%) | 6,954 (0%) | 6,935 (-1%) | **5,773** (-17%) | n/a |
+| design doc (DESIGN.md) | 8,161 | 8,161 (0%) | 8,159 (0%) | 7,993 (-2%) | **7,785** (-5%) | 8,189 (0%) | n/a |
 
 Read the zeros, they are the point. The ladder refuses to touch machine
 text: the exact-recall guard protects every log line and every line of
@@ -467,8 +492,8 @@ reversible; the distill route and tiny font are the opt-in trades.
 | service log (synthetic, seeded) | 37,111 | 7,840 (-79%) | 7,840 (-79%) | 6,328 (-83%) | n/a | **6,328** (-83%) pack+codebook | 2,240 (-94%) | 3,808 (-90%) |
 | journalctl JSON (synthetic, seeded) | 32,534 | 6,832 (-79%) | 6,832 (-79%) | 6,664 (-80%) | 3,920 (-88%) | **3,920** (-88%) pack+codebook+table | 1,120 (-97%) | 2,352 (-93%) |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 (-79%) | 8,512 (-79%) | 7,336 (-82%) | n/a | **7,336** (-82%) pack+codebook | 560 (-99%) | 4,368 (-89%) |
-| TypeScript source (src/main.ts) | 6,524 | 1,400 (-79%) | 1,288 (-80%) | 1,232 (-81%) | n/a | **1,232** (-81%) pack+codebook | 1,064 (-84%) | 728 (-89%) |
-| design doc (DESIGN.md) | 7,449 | 1,624 (-78%) | 1,624 (-78%) | 1,568 (-79%) | n/a | **1,568** (-79%) pack+codebook | 1,624 (-78%) | 952 (-87%) |
+| TypeScript source (src/main.ts) | 6,974 | 1,456 (-79%) | 1,400 (-80%) | 1,344 (-81%) | n/a | **1,344** (-81%) pack+codebook | 1,120 (-84%) | 784 (-89%) |
+| design doc (DESIGN.md) | 8,161 | 1,736 (-79%) | 1,736 (-79%) | 1,736 (-79%) | n/a | **1,736** (-79%) pack | 1,736 (-79%) | 1,064 (-87%) |
 
 Imaging alone is worth about -79% on everything, and that number is the
 same for pxpipe and tanuki because it is the same engine. The knobs are
@@ -490,14 +515,16 @@ route competes too. Margin is the winner vs the pxpipe baseline.
 | service log (synthetic, seeded) | 37,111 | 7,840 | 6,328 pack+codebook | 2,240 | **tanuki distill route** | -71% |
 | journalctl JSON (synthetic, seeded) | 23,032 | 6,832 | 3,920 pack+codebook+table | 1,120 | **tanuki distill route** | -84% |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 | 7,336 pack+codebook | 560 | **tanuki distill route** | -93% |
-| TypeScript source (src/main.ts) | 6,524 | 1,400 | 1,232 pack+codebook | not eligible | **tanuki pack+codebook** | -12% |
-| design doc (DESIGN.md) | 7,449 | 1,624 | 1,568 pack+codebook | not eligible | **tanuki pack+codebook** | -3% |
+| TypeScript source (src/main.ts) | 6,974 | 1,456 | 1,344 pack+codebook | not eligible | **tanuki pack+codebook** | -8% |
+| design doc (DESIGN.md) | 8,161 | 1,736 | 1,736 pack | not eligible | **tie: pxpipe** | 0% |
 
 The pattern is consistent. On logs, distill first and then image; tanuki
 beats its own baseline by 71-93%. On code and docs, where distill is not
-allowed to compete, the reversible knobs still win but the margin is small
-(-3% on prose, -12% on code). If someone tells you a tool beats pxpipe by
-huge margins on prose, ask what they lost on the way.
+allowed to compete, the margins are honest and small: -8% on code, and on
+this very design doc the knobs currently win nothing at all - the prose
+outgrew its codebook repetition, so pxpipe and tanuki tie at 0%. If someone
+tells you a tool beats pxpipe by huge margins on prose, ask what they lost
+on the way.
 
 ### The knobs in isolation
 
@@ -507,10 +534,10 @@ the same content):
 
 | knob                  | code | prose |  log |
 | --------------------- | ---: | ----: | ---: |
-| `pack` (default on)   |  -8% |    0% |   0% |
-| `pack` + `codebook`   | -12% |   -3% | -38% |
-| `font: "tiny"` alone  | -40% |  -41% | -40% |
-| all three stacked     | **-48%** | **-41%** | **-62%** |
+| `pack` (default on)   |  -4% |    0% |   0% |
+| `pack` + `codebook`   |  -8% |    0% | -38% |
+| `font: "tiny"` alone  | -38% |  -39% | -40% |
+| all three stacked     | **-46%** | **-39%** | **-62%** |
 
 Corpora: `src/main.ts` (code), `DESIGN.md` (prose), a path-heavy synthetic
 log. Knobs need something to bite on: codebook needs repetition, pack needs
@@ -535,11 +562,17 @@ Read against a production Claude model, 2026-07-27; regenerate the seeded
 pages with `node reference/needle-report.mjs` and score any model you like
 with its `score` subcommand. Every miss in this run was a single
 confusable character (`a279` read as `a379`, `1.15.8` as `1.15.6`).
-Short structured strings survive; long random hex does not. This is why
-the rules above say keep secrets, hashes, and ids-you-will-retype in
-text, and why `recommend` prices `tiny` but never turns it on for you.
-When you need one exact string out of an imaged log, fetch that slice as
-text (`tanuki_fetch` with a line range) instead of trusting pixels.
+Short structured strings survive; long random hex does not. The fix is
+the `verbatim` sidecar (default on): the same needle kinds are scanned
+out of the exact text the pages carry and shipped as a `·verbatim·` text
+block next to the images - `L<line> <value>`, deduped, capped at 32.
+Coverage on this corpus is 20/20 by construction (the harness checks it
+on every run), the estimate verdict prices the extra text honestly, and
+`--no-verbatim` / `verbatim:false` turns it off. Two rules survive the
+fix: secrets should never be imaged at all, and `recommend` prices
+`tiny` but never turns it on for you. For one exact string out of an
+already-stashed log, `tanuki_fetch` with a line range stays the
+text-only route.
 
 ### Real corpora, same story
 
@@ -725,8 +758,19 @@ request (agents re-read files constantly), the second byte-identical copy
 becomes a one-line pointer to the pages above. Exact repeats only.
 
 Responses stream through untouched. Savings land in
-`~/.pxpipe/events.jsonl`, with the baseline named: what was billed plus
-what the imaged blocks would have cost as text.
+`~/.pxpipe/events.jsonl` with the baseline named — what was billed plus
+what the imaged blocks would have cost as text — and a second,
+cache-aware figure beside it: once the session shows cache traffic,
+replayed blocks are priced at the provider's cache-read rate (~0.1× on
+Anthropic) and the FIRST text→pages flip of a block is charged the
+cache-write premium (~1.25×), so it books as negative before it pays
+back. `tanuki_stats` reports both bounds (`estInputSavedPct`,
+`estInputSavedPctCacheAware`) plus `toolFurnitureTokens`, the cost of
+tanuki's own tool schemas — counted against ourselves, because they ride
+every request too. `TANUKI_TOOL_BRIEF=1` swaps the MCP descriptions for
+one-line briefs (−46% furniture) once your model knows the workflow. The
+honest number sits between the two bounds, and only
+`reference/paired-report.mjs` pins it.
 
 Knobs: `--port N` `--upstream URL` `--level 0-4` `--distill` `--table`
 `--codebook` `--font tiny` `--min-chars N` `--ratio X` `--min-save N`

@@ -15,6 +15,7 @@ import { costVerdict } from "./cost.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
+import { scanNeedles } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
@@ -98,6 +99,7 @@ interface PipeArgs {
   font: string;
   codebook: boolean;
   table: boolean;
+  verbatim: boolean;
 }
 
 function pipeArgs(args: unknown): PipeArgs {
@@ -111,6 +113,7 @@ function pipeArgs(args: unknown): PipeArgs {
     font: asStr(jget(args, "font")) ?? "normal",
     codebook: asBool(jget(args, "codebook")) ?? false,
     table: asBool(jget(args, "table")) ?? false,
+    verbatim: asBool(jget(args, "verbatim")) ?? true,
   };
 }
 
@@ -161,6 +164,8 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
+  const side = a.verbatim ? scanNeedles(p.compressed) : null;
+  const sideTok = side === null ? 0 : side.tokens;
   const imgTok = est.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
@@ -179,13 +184,14 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     pages: est.pages,
     imageTokens: imgTok,
     rawTextTokens: rawTok,
-    totalSavedPct: pct(rawTok, imgTok),
+    totalSavedPct: pct(rawTok, imgTok + sideTok),
     protectedLines: p.protectedLines,
     pack: a.pack,
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
-    verdict: imgTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
+    verbatim: side === null ? false : { more: side.more, needles: side.needles.length + side.more, tokens: side.tokens },
+    verdict: imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     recommend: recommendFor(a.text),
   };
   // Situation-aware real cost: only when a model or cache state is supplied, so
@@ -210,6 +216,7 @@ export function toolRender(args: unknown): unknown[] {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
+  const side = a.verbatim ? scanNeedles(p.compressed) : null;
   const imgTok = r.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
@@ -248,10 +255,16 @@ export function toolRender(args: unknown): unknown[] {
   if (a.reflow) {
     summary += " · ↵ = newline · engine: pxpipe";
   }
+  if (side !== null && side.needles.length > 0) {
+    summary += ` · verbatim: ${side.needles.length + side.more} exact strings ride below as text`;
+  }
   const content: unknown[] = [{ type: "text", text: summary }];
   content.push(...imageBlocks(r.pages.slice(0, MAX_INLINE_PAGES)));
   if (r.pages.length > MAX_INLINE_PAGES) {
     content.push({ type: "text", text: `(+${r.pages.length - MAX_INLINE_PAGES} more page(s))` });
+  }
+  if (side !== null && side.text !== "") {
+    content.push({ type: "text", text: side.text });
   }
   return content;
 }
@@ -342,6 +355,11 @@ export function toolFetch(args: unknown): unknown[] {
 /// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
 /// of it (the pi/SDK projections carry them).
 function toolsList(): Record<string, unknown> {
+  // TANUKI_TOOL_BRIEF=1 serves the registry's one-line briefs instead of the
+  // full contracts (~4x smaller furniture on every request). Off by default:
+  // the full text is load-bearing for models that have not read the README,
+  // and the default wire output stays parity-locked with the Rust engine.
+  const brief = process.env.TANUKI_TOOL_BRIEF === "1";
   return {
     tools: TOOLS.map((t) => {
       const properties: Record<string, unknown> = {};
@@ -356,7 +374,7 @@ function toolsList(): Record<string, unknown> {
       }
       const inputSchema: Record<string, unknown> = { type: "object", properties };
       if (required.length > 0) inputSchema.required = required;
-      return { name: t.name, description: t.description, inputSchema };
+      return { name: t.name, description: brief ? t.brief : t.description, inputSchema };
     }),
   };
 }
@@ -380,9 +398,15 @@ function toolsCall(
     case "tanuki_compress":
       content = toolCompress(args);
       break;
-    case "tanuki_stats":
-      content = [{ type: "text", text: jstring(pxStats(), true) }];
+    case "tanuki_stats": {
+      // Self-cost, counted against ourselves: the tool schemas every request
+      // carries (they ride the prompt cache after the first write, but they
+      // are never free). No other tool in this category reports its own furniture.
+      const s = pxStats() as Record<string, unknown>;
+      s.toolFurnitureTokens = textTokens(charCount(jstring(toolsList(), false)));
+      content = [{ type: "text", text: jstring(s, true) }];
       break;
+    }
     case "tanuki_stash":
       content = toolStash(args);
       break;
@@ -547,7 +571,7 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
+          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook] [--model <id>] [--cached]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
@@ -562,6 +586,7 @@ export function main(): void {
         font,
         codebook: argv.includes("--codebook"),
         table: argv.includes("--table"),
+        verbatim: !argv.includes("--no-verbatim"),
         model,
         cached: argv.includes("--cached"),
       });
@@ -572,7 +597,7 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]",
+          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook]",
         );
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
@@ -582,6 +607,7 @@ export function main(): void {
       const font = parseFont(flagVal(argv, "--font") ?? "normal");
       const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
+      const side = argv.includes("--no-verbatim") ? null : scanNeedles(p.compressed);
       const tok = r.tokens;
       process.stdout.write(
         jstring(
@@ -590,6 +616,7 @@ export function main(): void {
             imageTokens: tok,
             dropped: r.dropped,
             rawTextTokens: textTokens(charCount(text)),
+            verbatimTokens: side === null ? 0 : side.tokens,
           },
           false,
         ) + "\n",
@@ -597,6 +624,9 @@ export function main(): void {
       const dir = pos[1];
       if (dir !== undefined) {
         writePages(dir, r.pages);
+        if (side !== null && side.text !== "") {
+          writeFileSync(`${dir}/verbatim.txt`, side.text + "\n");
+        }
       }
       break;
     }

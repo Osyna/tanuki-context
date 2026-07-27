@@ -24,6 +24,9 @@ export interface Rate {
   output: number;
   /** cache-read price ÷ input price — the load-bearing ratio when text is cached. */
   cacheReadMult: number;
+  /** cache-WRITE price ÷ input price (Anthropic/OpenAI ~1.25×). The flip cost:
+   *  replacing cached text with fresh pages writes those pages at this premium. */
+  cacheWriteMult: number;
   /** image(visual)-token price ÷ input-token price (1.0 on Anthropic). */
   imageMult: number;
   /** how this family COUNTS image tokens: 28px patches, 512px tiles, or 768px tiles. */
@@ -36,15 +39,16 @@ export const RATES_AS_OF = "2026-07";
 // Substring-keyed families. Multipliers (cache-read, image) are well-known and
 // load-bearing; absolute $/Mtok are approximate list prices, overridable.
 const TABLE: Record<string, Rate> = {
-  // Anthropic — cache-read 0.1×, image tokens billed at the input rate (1×).
-  opus: { input: 15, output: 75, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
-  sonnet: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
-  haiku: { input: 1, output: 5, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
+  // Anthropic — cache-read 0.1×, cache-write 1.25×, image tokens at the input rate (1×).
+  opus: { input: 15, output: 75, cacheReadMult: 0.1, cacheWriteMult: 1.25, imageMult: 1, family: "anthropic" },
+  sonnet: { input: 3, output: 15, cacheReadMult: 0.1, cacheWriteMult: 1.25, imageMult: 1, family: "anthropic" },
+  haiku: { input: 1, output: 5, cacheReadMult: 0.1, cacheWriteMult: 1.25, imageMult: 1, family: "anthropic" },
   // Non-Anthropic — image tokens are COUNTED by that provider's tile rule when
-  // page dims are supplied; cache discounts differ (OpenAI 0.5×, Gemini 0.25×).
-  gpt: { input: 1.25, output: 10, cacheReadMult: 0.5, imageMult: 1, family: "openai" },
-  gemini: { input: 1.25, output: 10, cacheReadMult: 0.25, imageMult: 1, family: "gemini" },
-  default: { input: 3, output: 15, cacheReadMult: 0.1, imageMult: 1, family: "anthropic" },
+  // page dims are supplied; cache discounts differ (OpenAI reads 0.1×, writes 1.25×;
+  // Gemini implicit caching reads 0.25×, no per-token write premium — storage-fee model).
+  gpt: { input: 1.25, output: 10, cacheReadMult: 0.1, cacheWriteMult: 1.25, imageMult: 1, family: "openai" },
+  gemini: { input: 1.25, output: 10, cacheReadMult: 0.25, cacheWriteMult: 1, imageMult: 1, family: "gemini" },
+  default: { input: 3, output: 15, cacheReadMult: 0.1, cacheWriteMult: 1.25, imageMult: 1, family: "anthropic" },
 };
 
 /** TABLE merged with a `TANUKI_RATES` JSON override (per-key partial merge). */
@@ -148,7 +152,10 @@ export function costVerdict(
       : imageTokens;
   const inUsd = rate.input / 1e6; // $ per input token
   const textRate = inUsd * (cached ? rate.cacheReadMult : 1);
-  const imgRate = inUsd * rate.imageMult;
+  // The flip cost, priced: when the text is already cached, fresh pages are a
+  // cache WRITE (~1.25×), not plain input — the suffix-invalidation premium
+  // the blog math demands. Uncached, both sides are fresh input: no premium.
+  const imgRate = inUsd * rate.imageMult * (cached ? rate.cacheWriteMult : 1);
   const textUsd = textTokens * textRate;
   const imageUsd = counted * imgRate;
   const breakeven = imgRate > 0 ? Math.floor((textTokens * textRate) / imgRate) : Infinity;
@@ -170,7 +177,7 @@ export function costVerdict(
   }
   if (cached) {
     notes.push(
-      `text priced at cache-read rate (${rate.cacheReadMult}× input); imaging already-cached content usually loses`,
+      `text priced at cache-read rate (${rate.cacheReadMult}× input), fresh pages at the cache-write rate (${rate.cacheWriteMult}× input); imaging already-cached content usually loses`,
     );
   }
   return {
@@ -193,11 +200,12 @@ export function demo(): void {
   const a = costVerdict(1000, 400, { model: "claude-opus-4", cached: false });
   console.assert(a.cheaper === "PIPELINE", "uncached: 400 img < 1000 text should image");
   console.assert(a.breakevenImageTokens === 1000, `uncached breakeven ${a.breakevenImageTokens}`);
-  // Same content already cached: text is 10× cheaper, so imaging now LOSES.
+  // Same content already cached: text reads at 0.1×, pages would be a fresh
+  // 1.25× cache write, so imaging now LOSES hard.
   const b = costVerdict(1000, 400, { model: "claude-opus-4", cached: true });
   console.assert(b.cheaper === "TEXT", "cached: text at 0.1× beats 400 image tokens");
-  console.assert(b.breakevenImageTokens === 100, `cached breakeven ${b.breakevenImageTokens}`);
-  // Deep cut still wins even when cached: 50 img < 100 breakeven.
+  console.assert(b.breakevenImageTokens === 80, `cached breakeven ${b.breakevenImageTokens}`);
+  // Deep cut still wins even when cached: 50 img < 80 breakeven.
   const c = costVerdict(1000, 50, { model: "opus", cached: true });
   console.assert(c.cheaper === "PIPELINE", "cached but 20× cut still images");
   // Non-Anthropic carries the approximate-dollars note.
@@ -206,7 +214,7 @@ export function demo(): void {
   // Env override applies and never throws on garbage.
   process.env.TANUKI_RATES = '{"opus":{"cacheReadMult":0.5}}';
   const o = costVerdict(1000, 400, { model: "opus", cached: true });
-  console.assert(o.breakevenImageTokens === 500, `override breakeven ${o.breakevenImageTokens}`);
+  console.assert(o.breakevenImageTokens === 400, `override breakeven ${o.breakevenImageTokens}`);
   delete process.env.TANUKI_RATES;
   console.log("cost.ts demo ok");
 }

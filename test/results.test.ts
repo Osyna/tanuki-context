@@ -15,6 +15,8 @@ import {
   renderText,
 } from "../src/render.ts";
 import { apply as codebookApply } from "../src/codebook.ts";
+import { NEEDLE_CAP, scanNeedles } from "../src/needles.ts";
+import { toolEstimate, toolRender } from "../src/main.ts";
 
 // ------------------------------------------------------------------ corpora
 
@@ -456,5 +458,84 @@ describe("dist/cli.js MCP session", () => {
     expect(img?.data).toBeDefined();
     const png = Buffer.from(img?.data ?? "", "base64");
     expect(png.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true);
+  });
+});
+
+// ------------------------------------------------- verbatim: needle sidecar
+// Fidelity fix for the needle read-back failure (README Table D): exact
+// strings ship as text next to the pages instead of being trusted to pixels.
+describe("verbatim: exact strings ride as text, never pixels", () => {
+  const NOISY = [
+    "2026-07-27T09:30:00Z relay ERROR request failed session=3451bd1b-13c4-4558-aa67-a62bc042905e",
+    "2026-07-27T09:30:07Z relay INFO upgraded runtime to 1.15.8-rc.3",
+    "2026-07-27T09:30:14Z relay ERROR upstream 502 request-id=b83839621bf0 peer=10.2.30.4:8443",
+    "2026-07-27T09:30:21Z relay INFO image digest sha256:26e7f9e3971a538a verified at 0xdeadbeef01",
+    "    at handler (lib/relay/frame.ts:927:35)",
+    "2026-07-27T09:30:28Z relay INFO poll ok latency=14ms conn=3",
+  ].join("\n");
+
+  test("every needle kind is found byte-exact from the source", async () => {
+    const s = scanNeedles(NOISY);
+    const values = s.needles.map((n) => n.value);
+    for (const v of [
+      "3451bd1b-13c4-4558-aa67-a62bc042905e",
+      "1.15.8-rc.3",
+      "b83839621bf0",
+      "10.2.30.4:8443",
+      "sha256:26e7f9e3971a538a",
+      "0xdeadbeef01",
+      "lib/relay/frame.ts:927:35",
+    ]) {
+      expect(values).toContain(v);
+    }
+    // round-trip property: everything in the sidecar exists byte-exact in the source
+    for (const n of s.needles) {
+      expect(NOISY.includes(n.value)).toBe(true);
+      expect(NOISY.split("\n")[n.line - 1]).toContain(n.value);
+    }
+    expect(s.tokens).toBeGreaterThan(0);
+    expect(s.text.startsWith("·verbatim·")).toBe(true);
+  });
+
+  test("timestamps and plain prose are not needles", async () => {
+    const s = scanNeedles("2026-07-27T09:30:00Z worker INFO poll ok latency=14ms conn=3\nplain words only here");
+    expect(s.needles.length).toBe(0);
+    expect(s.text).toBe("");
+    expect(s.tokens).toBe(0);
+  });
+
+  test("dedupe keeps first occurrence, cap reports the rest", async () => {
+    const dup = "sha256:26e7f9e3971a538a\nsha256:26e7f9e3971a538a";
+    expect(scanNeedles(dup).needles.length).toBe(1);
+    const many = Array.from({ length: NEEDLE_CAP + 8 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`).join("\n");
+    const s = scanNeedles(many);
+    expect(s.needles.length).toBe(NEEDLE_CAP);
+    expect(s.more).toBe(8);
+    expect(s.text).toContain("+8 more");
+  });
+
+  test("estimate prices the sidecar and the verdict accounts for it", async () => {
+    const e = toolEstimate({ text: NOISY, level: 0 }) as {
+      verbatim: { needles: number; tokens: number } | false;
+      imageTokens: number;
+      rawTextTokens: number;
+      verdict: string;
+    };
+    expect(e.verbatim).not.toBe(false);
+    const v = e.verbatim as { needles: number; tokens: number };
+    expect(v.needles).toBeGreaterThanOrEqual(7);
+    expect(v.tokens).toBeGreaterThan(0);
+    expect(e.verdict).toBe(e.imageTokens + v.tokens < e.rawTextTokens ? "PIPELINE cheaper" : "TEXT cheaper");
+    const off = toolEstimate({ text: NOISY, level: 0, verbatim: false }) as { verbatim: unknown };
+    expect(off.verbatim).toBe(false);
+  });
+
+  test("render ships the sidecar as a text block next to the pages", async () => {
+    const content = toolRender({ text: NOISY, level: 0 }) as Array<{ type: string; text?: string }>;
+    const side = content.find((c) => c.type === "text" && (c.text ?? "").startsWith("·verbatim·"));
+    expect(side).toBeDefined();
+    expect(side?.text).toContain("3451bd1b-13c4-4558-aa67-a62bc042905e");
+    const off = toolRender({ text: NOISY, level: 0, verbatim: false }) as Array<{ type: string; text?: string }>;
+    expect(off.some((c) => (c.text ?? "").startsWith("·verbatim·"))).toBe(false);
   });
 });

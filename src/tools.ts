@@ -48,6 +48,7 @@ const PIPE: Knob[] = [
   { key: "font", type: "string", values: ["normal", "tiny"], hint: "tiny = 4x6 cells, ~40% fewer tokens, transcription-gated" },
   { key: "codebook", type: "boolean", hint: "repeated tokens/paths -> sigils + legend" },
   { key: "table", type: "boolean", hint: "columnar-encode whole-JSON input (keys stated once, value-lossless)" },
+  { key: "verbatim", type: "boolean", hint: "exact strings (uuids/hashes/hex ids/ips/versions) ride as text next to the pages, never trusted to pixels (default true)" },
 ];
 
 const MODEL: Knob = {

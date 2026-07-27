@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { PROXY_DEFAULTS, startProxy, transformRequestBody, type ProxyCfg } from "../src/proxy.ts";
+import { PROXY_DEFAULTS, newSession, startProxy, transformRequestBody, type ProxyCfg } from "../src/proxy.ts";
 
 const CFG: ProxyCfg = { ...PROXY_DEFAULTS, port: 0, upstream: "http://127.0.0.1:1" };
 
@@ -207,5 +207,46 @@ describe("wire behaviour", () => {
   test("unrelated routes pass through byte-identical", async () => {
     await fetch(`http://127.0.0.1:${proxyPort}/v1/models`, { method: "GET" });
     expect(lastUpstreamUrl).toBe("/v1/models");
+  });
+});
+
+// ------------------------------------------------ cache-aware savings ledger
+// The rakuen critique, answered in numbers: the optimistic counterfactual
+// stays (comparable to every other tool), and a second figure prices replays
+// at the cache-read rate and charges the first text->pages flip the
+// cache-write premium. Bytes on the wire NEVER depend on the session.
+describe("cache-aware ledger", () => {
+  const body = JSON.stringify({
+    model: "claude-opus-4",
+    messages: [msg("user", BIG), msg("user", "latest")],
+  });
+
+  test("no cache traffic seen: both figures agree", () => {
+    const s = newSession();
+    const r = transformRequestBody(body, CFG, s);
+    expect(r).not.toBeNull();
+    expect(r?.savedTokensCacheAware).toBe(r?.savedTokens);
+    expect(s.seenBlocks.size).toBe(1);
+  });
+
+  test("first flip of a cached block is charged, replays are discounted", () => {
+    const s = newSession();
+    s.cachingSeen = true;
+    const first = transformRequestBody(body, CFG, s);
+    // avoided a 0.1x cache read, paid a 1.25x cache write: net negative
+    expect(first!.savedTokensCacheAware).toBeLessThan(0);
+    const replay = transformRequestBody(body, CFG, s);
+    // both sides ride cache reads now: small positive, ~saved x 0.1
+    expect(replay!.savedTokensCacheAware).toBeGreaterThan(0);
+    expect(replay!.savedTokensCacheAware).toBeLessThan(replay!.savedTokens);
+  });
+
+  test("session never changes the emitted bytes", () => {
+    const cold = transformRequestBody(body, CFG);
+    const s = newSession();
+    s.cachingSeen = true;
+    transformRequestBody(body, CFG, s);
+    const warm = transformRequestBody(body, CFG, s);
+    expect(warm!.body).toBe(cold!.body);
   });
 });
