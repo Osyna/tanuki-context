@@ -84,3 +84,36 @@ pub fn scan_needles(text: &str) -> Sidecar {
     let tokens = ((out.chars().count() as f64) / 4.0).round() as u64;
     Sidecar { needles: kept, more, text: out, tokens }
 }
+
+/// Credential refuse-to-render gate - byte-parity with `src/needles.ts`
+/// `scanCredentials`. A block carrying a credential-shaped secret is never
+/// imaged (a secret must not be silently misread from pixels); it stays text.
+/// High-confidence formats only, so a false positive just keeps a block as
+/// text. `(?-u)` matches JS `\b`/`\d` semantics.
+static CREDENTIALS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    [
+        ("aws-key", r"(?-u)\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b"),
+        ("gcp-key", r"(?-u)\bAIza[0-9A-Za-z_-]{35}\b"),
+        ("github-token", r"(?-u)\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b"),
+        ("github-pat", r"(?-u)\bgithub_pat_[0-9A-Za-z_]{82}\b"),
+        ("slack-token", r"(?-u)\bxox[baprs]-[0-9A-Za-z-]{10,}"),
+        ("stripe-key", r"(?-u)\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b"),
+        ("api-key", r"(?-u)\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b"),
+        ("private-key", r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+        ("jwt", r"(?-u)\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    ]
+    .iter()
+    .map(|(k, p)| (*k, Regex::new(p).unwrap()))
+    .collect()
+});
+
+/// Distinct credential kinds found in `text`, sorted. Empty = safe to image.
+pub fn scan_credentials(text: &str) -> Vec<String> {
+    let mut kinds: Vec<String> = CREDENTIALS
+        .iter()
+        .filter(|(_, pat)| pat.is_match(text))
+        .map(|(k, _)| (*k).to_string())
+        .collect();
+    kinds.sort();
+    kinds
+}

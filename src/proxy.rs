@@ -20,7 +20,7 @@
 
 use crate::render::{self, Font};
 use crate::stats;
-use crate::{codebook, distill, ladder, table};
+use crate::{codebook, distill, ladder, needles, table};
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -40,6 +40,7 @@ pub struct ProxyCfg {
     pub ratio: f64,       // image tokens must be <= ratio * text tokens
     pub min_save: i64,    // and save at least this many tokens
     pub max_pages: usize, // give up on absurdly large single blocks
+    pub recency_window: usize, // trailing messages always kept as text (default 1)
 }
 
 impl Default for ProxyCfg {
@@ -56,6 +57,7 @@ impl Default for ProxyCfg {
             ratio: 0.75,
             min_save: 300,
             max_pages: 20,
+            recency_window: 1,
         }
     }
 }
@@ -73,6 +75,9 @@ struct ImagedBlock {
 
 /// Stage 0/0.5/1 + imaging for one text block, or None when text stays cheaper.
 fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
+    if !needles::scan_credentials(text).is_empty() {
+        return None; // rule 6: never image secrets
+    }
     let orig_chars = text.chars().count();
     if orig_chars < cfg.min_chars {
         return None;
@@ -274,9 +279,11 @@ pub fn transform_request_body(
         Some(done.blocks)
     };
 
-    // rule 3: the latest message is never imaged.
+    // rule 3: keep the latest recency_window message(s) as text (VIST slow-fast:
+    // recent turns reasoned over precisely, distant bulk imaged). Default 1.
+    let keep = cfg.recency_window.max(1);
     let messages = body["messages"].as_array_mut()?;
-    for m in messages.iter_mut().take(msg_count.saturating_sub(1)) {
+    for m in messages.iter_mut().take(msg_count.saturating_sub(keep)) {
         // Anthropic accepts image blocks only in user-role content.
         if m["role"].as_str() != Some("user") {
             continue;
@@ -582,18 +589,20 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
     };
     let port = bound_port(&server);
     let knobs = format!(
-        "level={} distill={} codebook={} font={} minChars={} ratio={} minSave={}",
+        "level={} distill={} codebook={} font={} recency={} minChars={} ratio={} minSave={}",
         cfg.level,
         cfg.distill,
         cfg.codebook,
         if cfg.font == Font::Tiny { "tiny" } else { "normal" },
+        cfg.recency_window,
         cfg.min_chars,
         cfg.ratio,
         cfg.min_save,
     );
     eprint!(
-        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} latest message never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
+        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
         cfg.upstream,
+        cfg.recency_window.max(1),
     );
     server
 }
