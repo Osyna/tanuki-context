@@ -429,7 +429,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_verify",
-            "description": "Disk-grounded exact check for a value you read off a rendered page (an id/hash/version/path). No model: it compares your candidate against the stashed original bytes and returns status 'exact' (found verbatim, with line), 'corrected' (a unique string within edit distance 1 exists - you misread one character, use `found`), 'ambiguous' (several near-matches in `candidates` - disambiguate with tanuki_fetch), or 'absent' (no match - do not invent one). Turns the silent single-character misread (README Table D) into an exact match or an explicit flag. Call before acting on any value transcribed from pixels.",
+            "description": "Disk-grounded exact check for a value you read off a rendered page (an id/hash/version/path). No model: it compares your candidate against the stashed original bytes and returns status 'exact' (found verbatim, with line), 'corrected' (a unique near-miss exists - one substituted or transposed character; use `found`), 'ambiguous' (several near-matches in `candidates` - disambiguate with tanuki_fetch), or 'absent' (no match - do not invent one). Turns the silent misread (README Table D) into an exact match or an explicit flag. Call before acting on any value transcribed from pixels.",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "value": { "type": "string" } }, "required": ["id", "value"] }
         }
     ] });
