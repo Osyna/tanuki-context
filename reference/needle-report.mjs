@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Needle report: fidelity, not cost. Hide exact strings a person actually
 // greps a log for (UUIDs, versions, request ids, hash prefixes, stack
-// frames) inside seeded log noise, render pages at each font density, ask a
-// vision model for the needles back VERBATIM, score exact match.
+// frames, base64 tokens, ms timestamps) inside seeded log noise, render
+// pages at each font density, ask a vision model for the needles back
+// VERBATIM, score exact match plus a char-to-char substitution tally.
 //
 //   node reference/needle-report.mjs            # writes pages + prompt
 //   node reference/needle-report.mjs score <transcript.json>
@@ -14,8 +15,10 @@
 //
 //   { "normal": ["<string it read>", ...], "tiny": [...] }
 //
-// Scoring is exact-match only. A plausible wrong character is a miss - that
-// silent failure mode is the whole point of the test.
+// Pass/fail is exact-match: a plausible wrong character is a miss, that
+// silent failure is the whole point. On the misses we also tally char-to-
+// char substitutions and split glyph-shape confusions (a bigger font helps)
+// from value-drift (the model settled on a plausible value; a font won't).
 import { writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -34,19 +37,28 @@ function lcg(seed) {
 }
 const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 16) | 0]).join("");
 
-/** 10 needles per density, 5 kinds x 2. Values differ per density so a
- *  reader cannot carry answers from one page to the next. */
+/** 14 needles per density, 7 kinds x 2. Values differ per density so a
+ *  reader cannot carry answers from one page to the next. base64 (mixed
+ *  case, +/) and ms timestamps are the confusable-rich kinds that separate
+ *  a too-small font from a model inventing a plausible value. */
 function makeNeedles(r) {
   const uuid = () => `${hex(r, 8)}-${hex(r, 4)}-4${hex(r, 3)}-a${hex(r, 3)}-${hex(r, 12)}`;
   const semver = () => `${1 + ((r() * 20) | 0)}.${(r() * 30) | 0}.${(r() * 30) | 0}-rc.${1 + ((r() * 9) | 0)}`;
   const files = ["src/api/route.ts", "src/ingest/batch.ts", "lib/relay/frame.ts", "src/cache/lru.ts"];
   const frame = () => `${files[(r() * files.length) | 0]}:${100 + ((r() * 900) | 0)}:${1 + ((r() * 80) | 0)}`;
+  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const b64 = (n) => Array.from({ length: n }, () => B64[(r() * 64) | 0]).join("");
+  const ms = () =>
+    `${String((r() * 24) | 0).padStart(2, "0")}:${String((r() * 60) | 0).padStart(2, "0")}:` +
+    `${String((r() * 60) | 0).padStart(2, "0")}.${String((r() * 1000) | 0).padStart(3, "0")}Z`;
   return [
     { kind: "uuid", value: uuid() }, { kind: "uuid", value: uuid() },
     { kind: "semver", value: semver() }, { kind: "semver", value: semver() },
     { kind: "hex12 id", value: hex(r, 12) }, { kind: "hex12 id", value: hex(r, 12) },
     { kind: "sha256:16", value: `sha256:${hex(r, 16)}` }, { kind: "sha256:16", value: `sha256:${hex(r, 16)}` },
     { kind: "frame", value: frame() }, { kind: "frame", value: frame() },
+    { kind: "base64", value: b64(22) }, { kind: "base64", value: b64(22) },
+    { kind: "ms", value: ms() }, { kind: "ms", value: ms() },
   ];
 }
 
@@ -71,6 +83,10 @@ function corpus(r, needles) {
     (n) => `ERROR digest mismatch, expected ${n}`,
     (n) => `    at handler (${n})`,
     (n) => `    at flush (${n})`,
+    (n) => `INFO issued session token=${n}`,
+    (n) => `DEBUG auth: bearer ${n} accepted`,
+    (n) => `WARN slow span start=${n} over budget`,
+    (n) => `INFO checkpoint written at ${n}`,
   ];
   const r2 = lcg(101);
   needles.forEach((n, i) => {
@@ -107,7 +123,7 @@ function gen() {
   writeFileSync(path.join(OUT, "answers.json"), JSON.stringify(answers, null, 2));
   writeFileSync(path.join(OUT, "prompt.txt"),
     "This image is a rendered log. Transcribe VERBATIM every value of these kinds you can read:\n" +
-    "UUIDs, semver versions (x.y.z-rc.n), 12-char hex ids, sha256:<hex> digests, file paths with :line:col.\n" +
+    "UUIDs, semver versions (x.y.z-rc.n), 12-char hex ids, sha256:<hex> digests, file paths with :line:col, base64 tokens (mixed case, may include + or /), and HH:MM:SS.mmm timestamps.\n" +
     "Return them as a JSON array of strings, nothing else.\n");
   console.log(`prompt -> ${path.join(OUT, "prompt.txt")}`);
   console.log(`ground truth sealed in answers.json - do not open before transcribing.`);
@@ -116,21 +132,84 @@ function gen() {
 function score(transcriptPath) {
   const answers = JSON.parse(readFileSync(path.join(OUT, "answers.json"), "utf8"));
   const got = JSON.parse(readFileSync(transcriptPath, "utf8"));
-  const kinds = ["uuid", "semver", "hex12 id", "sha256:16", "frame"];
+  const kinds = ["uuid", "semver", "hex12 id", "sha256:16", "frame", "base64", "ms"];
+  // small-font / OCR confusable classes; base64 mixes case on purpose, so
+  // case-similar letters count as glyph confusions too.
+  const CONFUSABLE = ["0OoQD", "1lI|i7", "2Zz", "5Ss", "6bG", "8B", "9gq", "cC", "kK", "pP", "uU", "vV", "wW", "xX"];
+  const cc = new Map();
+  CONFUSABLE.forEach((g, i) => { for (const c of g) if (!cc.has(c)) cc.set(c, i); });
+  const conf = (a, b) => a !== b && cc.has(a) && cc.get(a) === cc.get(b);
+  const lev = (a, b) => {
+    const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      let prev = row[0];
+      row[0] = i;
+      for (let j = 1; j <= b.length; j++) {
+        const tmp = row[j];
+        row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+        prev = tmp;
+      }
+    }
+    return row[b.length];
+  };
   const rows = [["density", ...kinds, "total"]];
+  const subs = new Map(); // "e->g" -> count, across every near-miss
+  const tally = { glyph: 0, drift: 0, gone: 0 };
   for (const d of DENSITIES) {
-    const set = new Set(got[d.name] ?? []);
+    const list = got[d.name] ?? [];
+    const set = new Set(list);
     const by = {};
     let hit = 0;
     for (const n of answers[d.name]) {
       const ok = set.has(n.value);
       by[n.kind] = (by[n.kind] ?? "") + (ok ? "O" : "X");
       hit += ok;
+      if (ok) continue;
+      // the model's closest attempt at this needle, if any is close enough
+      let best = null;
+      let bd = Infinity;
+      for (const c of list) {
+        const dd = lev(n.value, c);
+        if (dd < bd) {
+          bd = dd;
+          best = c;
+        }
+      }
+      if (best === null || bd > Math.max(2, Math.ceil(n.value.length * 0.34))) {
+        tally.gone++;
+        continue;
+      }
+      if (best.length === n.value.length) {
+        let allConf = true;
+        for (let i = 0; i < best.length; i++) {
+          const e = n.value[i];
+          const g = best[i];
+          if (e === g) continue;
+          subs.set(`${e}->${g}`, (subs.get(`${e}->${g}`) ?? 0) + 1);
+          if (!conf(e, g)) allConf = false;
+        }
+        tally[allConf ? "glyph" : "drift"]++;
+      } else {
+        tally.drift++; // a dropped/added char: segmentation, not a clean sub
+      }
     }
-    rows.push([d.name, ...kinds.map((k) => `${[...by[k]].filter((c) => c === "O").length}/2`), `${hit}/10`]);
+    rows.push([d.name, ...kinds.map((k) => `${[...(by[k] ?? "")].filter((c) => c === "O").length}/2`), `${hit}/${answers[d.name].length}`]);
   }
   console.log(rows.map((r) => `| ${r.join(" | ")} |`).join("\n"));
   console.log("\nO = byte-exact, X = anything else (including one plausible wrong character).");
+  const misses = tally.glyph + tally.drift + tally.gone;
+  if (misses === 0) {
+    console.log("\nno misses to diagnose.");
+    return;
+  }
+  console.log(`\nmisses ${misses}: ${tally.glyph} glyph-shape · ${tally.drift} value-drift · ${tally.gone} no-attempt`);
+  const top = [...subs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  if (top.length) console.log("top substitutions (expected -> read): " + top.map(([k, v]) => `${k}×${v}`).join("  "));
+  console.log(
+    tally.glyph >= tally.drift
+      ? "verdict: mostly glyph-shape — a bigger font (drop --font tiny, or a higher-res tier) should recover these."
+      : "verdict: mostly value-drift — the model is inventing plausible values a bigger font won't fix; keep these as text.",
+  );
 }
 
 if (process.argv[2] === "score") score(process.argv[3]);

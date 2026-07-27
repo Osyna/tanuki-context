@@ -135,3 +135,18 @@ export const TOOLS: readonly ToolMeta[] = [
     ],
   },
 ];
+
+/// The MCP tools/list advertises a slim default surface - the three tools that
+/// cover the documented workflow. The other four stay callable by name but out
+/// of tools/list unless TANUKI_ALL_TOOLS=1, because every advertised schema is
+/// context the model pays for on every request.
+export const DEFAULT_TOOL_NAMES: readonly string[] = [
+  "tanuki_render",
+  "tanuki_estimate",
+  "tanuki_stash",
+];
+
+export function visibleTools(): readonly ToolMeta[] {
+  if (process.env.TANUKI_ALL_TOOLS === "1") return TOOLS;
+  return TOOLS.filter((t) => DEFAULT_TOOL_NAMES.includes(t.name));
+}

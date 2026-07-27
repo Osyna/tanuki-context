@@ -82,3 +82,34 @@ export function scanNeedles(text: string): Sidecar {
   if (more > 0) out += `\n… +${more} more (needle-dense; keep the source as text)`;
   return { needles: kept, more, text: out, tokens: textTokens(charCount(out)) };
 }
+
+/// Credential refuse-to-render gate. Rendering a secret to pixels risks a
+/// silent single-character misread (the Table-D failure mode) on the one
+/// string you must never corrupt, and buries it where no monitor can read it.
+/// So a block carrying a credential-shaped secret is never imaged - it stays
+/// text. High-confidence, well-structured formats only: a false positive just
+/// keeps a block as text (safe, costs some compression), so we bias to recall
+/// on known secret shapes and skip noisy generic `token=...` matches that
+/// would gut ordinary log compression.
+const CREDENTIALS: readonly (readonly [string, RegExp])[] = [
+  ["aws-key", /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b/g],
+  ["gcp-key", /\bAIza[0-9A-Za-z_-]{35}\b/g],
+  ["github-token", /\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b/g],
+  ["github-pat", /\bgithub_pat_[0-9A-Za-z_]{82}\b/g],
+  ["slack-token", /\bxox[baprs]-[0-9A-Za-z-]{10,}/g],
+  ["stripe-key", /\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b/g],
+  ["api-key", /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b/g],
+  ["private-key", /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g],
+  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g],
+];
+
+/// Distinct credential kinds found in `text`, sorted. Empty = safe to image.
+/// Never returns the secret substring - only the kind label, for the marker.
+export function scanCredentials(text: string): string[] {
+  const kinds = new Set<string>();
+  for (const [kind, pat] of CREDENTIALS) {
+    pat.lastIndex = 0;
+    if (pat.test(text)) kinds.add(kind);
+  }
+  return [...kinds].sort();
+}

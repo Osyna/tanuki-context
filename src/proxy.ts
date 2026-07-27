@@ -6,11 +6,15 @@
 //!      replaced IN PLACE by a short overt marker + PNG page blocks, in the
 //!      same user-role message (Anthropic allows image blocks in user content
 //!      and inside tool_result content).
-//!   3. The latest message is never imaged (the model may need to quote it).
+//!   3. The latest `recencyWindow` message(s) are kept as text (default 1):
+//!      recent turns are reasoned over precisely, distant bulk is imaged.
 //!   4. Blocks carrying cache_control are never touched (rewriting would
 //!      defeat the cache they exist for).
 //!   5. Imaging only happens when `estimate` says it wins by a clear margin;
 //!      everything else passes through byte-for-byte.
+//!   6. A block carrying a credential-shaped secret (API keys, private-key
+//!      blocks, tokens) is never imaged: a secret must not be silently
+//!      misread from pixels, so it stays text (needles.ts `scanCredentials`).
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -23,7 +27,7 @@ import { tableEncode } from "./table.ts";
 import { URL } from "node:url";
 import { distillLog } from "./distill.ts";
 import { apply as codebookApply } from "./codebook.ts";
-import { scanNeedles } from "./needles.ts";
+import { scanNeedles, scanCredentials } from "./needles.ts";
 import { resolveRate } from "./cost.ts";
 import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
@@ -43,6 +47,7 @@ export interface ProxyCfg {
   ratio: number; // image tokens must be <= ratio * text tokens
   minSave: number; // and save at least this many tokens
   maxPages: number; // give up on absurdly large single blocks
+  recencyWindow: number; // trailing messages always kept as text (default 1)
 }
 
 export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
@@ -55,6 +60,7 @@ export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   ratio: 0.75,
   minSave: 300,
   maxPages: 20,
+  recencyWindow: 1,
 };
 
 interface ImagedBlock {
@@ -70,6 +76,7 @@ interface ImagedBlock {
 
 /// Stage 0/0.5/1 + imaging for one text block, or null when text stays cheaper.
 function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
+  if (scanCredentials(text).length > 0) return null; // rule 6: never image secrets
   const origChars = charCount(text);
   if (origChars < cfg.minChars) return null;
   let working = text;
@@ -250,8 +257,10 @@ export function transformRequestBody(
     return done;
   };
 
-  // rule 3: the latest message is never imaged.
-  for (let i = 0; i < body.messages.length - 1; i++) {
+  // rule 3: keep the latest recencyWindow message(s) as text (VIST slow-fast:
+  // recent turns reasoned over precisely, distant bulk imaged). Default 1.
+  const keep = Math.max(1, cfg.recencyWindow);
+  for (let i = 0; i < body.messages.length - keep; i++) {
     const m = body.messages[i];
     // Anthropic accepts image blocks only in user-role content.
     if (!isObj(m) || m.role !== "user") continue;
@@ -437,11 +446,11 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     const port = addr !== null && typeof addr === "object" ? addr.port : cfg.port;
     const knobs =
       `level=${cfg.level} distill=${cfg.distill} codebook=${cfg.codebook} font=${cfg.font} ` +
-      `minChars=${cfg.minChars} ratio=${cfg.ratio} minSave=${cfg.minSave}`;
+      `recency=${cfg.recencyWindow} minChars=${cfg.minChars} ratio=${cfg.ratio} minSave=${cfg.minSave}`;
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · in-place blocks only · latest message never imaged · cache_control skipped · identical blocks imaged once\n` +
+        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });

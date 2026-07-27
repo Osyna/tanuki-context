@@ -3,13 +3,14 @@
 What this project is, why each piece exists, and the logic behind it.
 Companion to [README.md](README.md) (usage) — this is the *why*.
 
-> **Branch note** — these notes were written for the Rust implementation and
-> ported forward. `main` is the TypeScript npm package (`src/*.ts`); the
-> [`rust` branch](../../tree/rust) carries the same pipeline (`src/*.rs`) and
-> is kept at semantic parity — same patch-grid token model, same escapes,
-> same atlas, same proxy — verified byte/pixel-exact by
-> `reference/parity-ts.mjs`. Only the npm packaging and the Claude Agent SDK
-> glue are TS-only. Every design decision below applies to both.
+> **Branch note** - `main` is the maintained engine: the TypeScript npm
+> package (`src/*.ts`). The [`rust` branch](../../tree/rust) is a **frozen
+> reference implementation** (`src/*.rs`) - same patch-grid token model,
+> escapes, atlas, and proxy, held byte/pixel-exact by `reference/parity-ts.mjs`
+> through v0.8.x. Parity is no longer a release gate: features added after the
+> freeze (recency-tiered proxy imaging, the credential refuse-to-render gate,
+> brief-by-default tool descriptions, the slim default tools/list) are TS-only.
+> The design notes below describe the shared core both engines still implement.
 
 ## 1. Origin
 

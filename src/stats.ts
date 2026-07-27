@@ -79,16 +79,18 @@ export function pxStats(): object {
     compressedRequests: compressed,
     imagedChars: origChars,
     imagesEmitted: images,
-    baselineTokens: baseline,
     actualInputTokens: actual,
-    // optimistic counterfactual: avoided text at the full input rate
-    estInputSavedPct: saved,
-    // cache-aware counterfactual: replays at the cache-read rate, first
-    // flips charged the cache-write premium. Negative = imaging cost money.
-    baselineCacheAwareTokens: baselineCa,
+    // headline: the honest bound - replays priced at the provider's cache-read
+    // rate, first text->pages flips charged the cache-write premium. Negative
+    // means imaging cost money. This is the number to trust.
     estInputSavedPctCacheAware: savedCa,
+    baselineCacheAwareTokens: baselineCa,
+    // optimistic counterfactual, kept for comparison: every avoided token at
+    // the full input rate (what every tool in this category reports).
+    estInputSavedPct: saved,
+    baselineTokens: baseline,
     outputTokens: output,
-    // the honest boundary: no input-side tool can cut this share of the bill
+    // the boundary no input-side tool can cross: the output share of the bill.
     outputSharePct:
       output > 0 ? new Float(rnd((output / (actual + output)) * 1000.0) / 10.0) : null,
   };
