@@ -1,5 +1,13 @@
 # tanuki-context
 
+> **⚠️ Frozen reference.** This `rust` branch is a byte/pixel-exact port held
+> at parity through v0.8.x. The maintained engine is now the TypeScript npm
+> package on [`main`](https://github.com/Osyna/tanuki-context/tree/main);
+> features added after the freeze — recency-tiered proxy imaging, the
+> credential refuse-to-render gate, brief-by-default tool descriptions, the
+> slim default `tools/list` — are TS-only. Use this branch as a reference
+> implementation, not for new work.
+
 Token-cutting context pipeline as a single-binary MCP server. All Rust.
 Usage below; the architecture and reasoning live in [DESIGN.md](DESIGN.md).
 
