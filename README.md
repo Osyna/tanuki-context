@@ -149,8 +149,9 @@ Leave it alone when:
   a vision-capable reader (any current Claude model qualifies).
 - the exact bytes must survive a round trip: secrets, hashes, code the
   model is about to edit. Rendering is exact, but model read-back of dense
-  random strings is not guaranteed (pxpipe measured 13/15 on 12-char hex).
-  Keep those in text.
+  random strings is not, and it fails silently - you get a plausible wrong
+  character, not an error. Our needle harness measures it (table below):
+  5/10 grep-targets survive normal density, 3/10 tiny. Keep those in text.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.
@@ -514,6 +515,31 @@ the same content):
 Corpora: `src/main.ts` (code), `DESIGN.md` (prose), a path-heavy synthetic
 log. Knobs need something to bite on: codebook needs repetition, pack needs
 indentation.
+
+### Table D. Fidelity: the needle read-back test
+
+Savings tables measure cost; this one measures the failure mode. Ten
+needles a person actually greps a log for (UUIDs, semvers, 12-char hex
+ids, `sha256:` prefixes, `file:line:col` frames) are seeded into log
+noise, rendered at each font density, and a vision model is asked to
+return them verbatim. Scoring is byte-exact: one plausible wrong
+character is a miss, and that silent near-miss is the failure mode the
+test exists to expose.
+
+| density      | uuid | semver | hex12 id | sha256:16 | frame | total |
+| ------------ | ---: | -----: | -------: | --------: | ----: | ----: |
+| normal (5x8) |  0/2 |    1/2 |      1/2 |       1/2 |   2/2 | **5/10** |
+| tiny (4x6)   |  0/2 |    2/2 |      0/2 |       0/2 |   1/2 | **3/10** |
+
+Read against a production Claude model, 2026-07-27; regenerate the seeded
+pages with `node reference/needle-report.mjs` and score any model you like
+with its `score` subcommand. Every miss in this run was a single
+confusable character (`a279` read as `a379`, `1.15.8` as `1.15.6`).
+Short structured strings survive; long random hex does not. This is why
+the rules above say keep secrets, hashes, and ids-you-will-retype in
+text, and why `recommend` prices `tiny` but never turns it on for you.
+When you need one exact string out of an imaged log, fetch that slice as
+text (`tanuki_fetch` with a line range) instead of trusting pixels.
 
 ### Real corpora, same story
 
