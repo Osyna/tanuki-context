@@ -100,7 +100,7 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 /// the stashed original bytes are compared directly, so a plausible-wrong-
 /// character misread becomes `exact`, a unique `corrected`, an `ambiguous`
 /// shortlist, or an explicit `absent`. Byte-identical with the TS engine
-/// (substitution distance 1 only; same scan order and code-point math).
+/// (substitution or adjacent-transposition distance 1; same scan and math).
 pub fn verify_value(id: &str, value: &str) -> Result<Value, String> {
     if value.is_empty() {
         return Err("verify needs a non-empty value".to_string());
@@ -130,22 +130,31 @@ pub fn verify_value(id: &str, value: &str) -> Result<Value, String> {
         }
     }
 
-    // Substitution distance 1 only (mirror of the TS engine): the dominant
-    // dense-glyph misread keeps the length and cannot match a fragment of a
-    // longer token the way an indel window would.
+    // Distance-1 neighbourhood, same length only (mirror of the TS engine): one
+    // substitution (the dominant dense-glyph misread) or one adjacent
+    // transposition (a digit swap like f0->0f). Both preserve length, so a
+    // window cannot match a fragment of a longer token the way an indel would.
     let mut found: BTreeMap<String, usize> = BTreeMap::new();
     if n <= cps.len() {
         for off in 0..=(cps.len() - n) {
-            let mut d = 0;
+            let mut diffs = 0usize;
+            let mut a = 0usize;
+            let mut b = 0usize;
             for i in 0..n {
                 if val[i] != cps[off + i] {
-                    d += 1;
-                    if d > 1 {
+                    diffs += 1;
+                    if diffs == 1 {
+                        a = i;
+                    } else if diffs == 2 {
+                        b = i;
+                    } else {
                         break;
                     }
                 }
             }
-            if d == 1 {
+            let is_match = diffs == 1
+                || (diffs == 2 && b == a + 1 && val[a] == cps[off + b] && val[b] == cps[off + a]);
+            if is_match {
                 let s: String = cps[off..off + n].iter().collect();
                 found.entry(s).or_insert(line_at[off]);
             }
@@ -293,6 +302,11 @@ mod tests {
             assert_eq!(corr["status"], "corrected");
             assert_eq!(corr["found"], "3451bd1b-13c4-4558-aa67-a62bc042905e");
             assert_eq!(corr["line"], 2);
+
+            // adjacent transposition (last two chars 5e -> e5) resolves too
+            let trans = verify_value(&id, "3451bd1b-13c4-4558-aa67-a62bc04290e5").unwrap();
+            assert_eq!(trans["status"], "corrected");
+            assert_eq!(trans["found"], "3451bd1b-13c4-4558-aa67-a62bc042905e");
 
             // two distance-1 neighbours -> ambiguous shortlist, sorted
             let amb = verify_value(&id, "cafe1230").unwrap();
