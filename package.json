@@ -25,6 +25,7 @@
   "scripts": {
     "build": "bun build src/cli.ts --target=node --minify --outfile=dist/cli.js && bun build src/agent.ts --target=node --minify --external @anthropic-ai/claude-agent-sdk --external zod --outfile=dist/agent.js && bun build src/pi.ts --target=node --minify --external typebox --outfile=dist/pi.js && cp types/agent.d.ts dist/agent.d.ts",
     "prepublishOnly": "bun run build",
+    "parity": "bun reference/parity-ts.mjs",
     "test": "bun test",
     "tiers": "node reference/tiers-report.mjs",
     "needles": "node reference/needle-report.mjs",

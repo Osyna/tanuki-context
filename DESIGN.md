@@ -3,14 +3,15 @@
 What this project is, why each piece exists, and the logic behind it.
 Companion to [README.md](README.md) (usage) — this is the *why*.
 
-> **Branch note** - `main` is the maintained engine: the TypeScript npm
-> package (`src/*.ts`). The [`rust` branch](../../tree/rust) is a **frozen
-> reference implementation** (`src/*.rs`) - same patch-grid token model,
-> escapes, atlas, and proxy, held byte/pixel-exact by `reference/parity-ts.mjs`
-> through v0.8.x. Parity is no longer a release gate: features added after the
-> freeze (recency-tiered proxy imaging, the credential refuse-to-render gate,
-> brief-by-default tool descriptions, the slim default tools/list) are TS-only.
-> The design notes below describe the shared core both engines still implement.
+> **Branch note** - two engines at parity. `main` is the TypeScript npm
+> package (`src/*.ts`); the [`rust` branch](../../tree/rust) carries the same
+> pipeline (`src/*.rs`) as a single static binary. They are held byte/pixel-
+> exact by `reference/parity-ts.mjs` (distill stats, every estimate knob combo,
+> render JSON + pixel-exact PNGs, a full MCP session) - recency-tiered proxy
+> imaging, the credential refuse-to-render gate, brief-by-default tool
+> descriptions, and the slim default tools/list all live in both. Only the npm
+> packaging and the Claude Agent SDK glue are TS-only. Every design decision
+> below applies to both.
 
 ## 1. Origin
 
@@ -151,10 +152,10 @@ tier's 1568-px/1568-token limits, so the pre-billing downscale never fires).
 The atlas carries upstream's **glyph surgery**: Spleen 5×8 `K` repainted
 diagonal-legged (was Hamming-1 from `H`, the atlas's worst confusable; now
 Hamming-8 — upstream's paired A/B cut K→H confusions 42→1). And missing
-glyphs escape as `[U+HEX]` per upstream #96. The frozen `rust` branch keeps
-the px/750 model, so the parity harness compares everything EXCEPT
-token-derived fields (`imageTokens`, `totalSavedPct`, `verdict`), which are
-normalized out; geometry, chars, pages, and pixels still match byte-exact.
+glyphs escape as `[U+HEX]` per upstream #96. Both engines keep the px/750
+model, so the parity harness compares every field byte-exact - token-derived
+(`imageTokens`, `totalSavedPct`, `verdict`), geometry, chars, pages, and
+pixels all match.
 
 ### Stage 2 extensions (tanuki-only, parity-safe)
 

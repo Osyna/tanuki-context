@@ -14,13 +14,11 @@
 </div>
 
 > **This is the full manual** — the short version is the
-> [README](../README.md). `main` (this npm package) is the maintained engine;
-> the [`rust` branch](../../../tree/rust) is a **frozen reference** held
-> byte/pixel-exact through v0.8.x. Parity is no longer a release gate, and
-> features added since (recency-tiered proxy imaging, the credential
-> refuse-to-render gate, brief-by-default tool descriptions, the slim default
-> `tools/list`) are TS-only. Where the text below says "parity on every
-> release" or "same numbers," read it as true through the freeze.
+> [README](../README.md). Two engines at parity: `main` (this npm package)
+> and the [`rust` branch](../../../tree/rust) single static binary, held
+> byte/pixel-exact by `reference/parity-ts.mjs`. Recency-tiered proxy imaging,
+> the credential refuse-to-render gate, brief-by-default tool descriptions,
+> and the slim default `tools/list` all live in both engines.
 
 AI models charge for every token they read. tanuki-context turns the bulky
 parts of a conversation (logs, command output, long documents) into compact
@@ -133,10 +131,9 @@ cargo gives you a static binary, no node at all:
 cargo install --git https://github.com/Osyna/tanuki-context --branch rust
 ```
 
-One 5.7 MB binary, same seven tools. A 161-check parity harness held the two
-engines byte-identical JSON and pixel-identical PNGs through v0.8.x (see the
-branch note above); the `rust` branch is now a frozen reference, not a
-co-maintained engine. It spawns in 0.4 ms and idles at 3.8 MB RSS, which
+One 5.7 MB binary, same tools. A 161-check parity harness holds the two
+engines byte-identical JSON and pixel-identical PNGs on every release, the
+same features in both. It spawns in 0.4 ms and idles at 3.8 MB RSS, which
 matters when every session forks its own server. Point any client config at
 `"command": "tanuki-context"` instead of the npx line and nothing else
 changes.
