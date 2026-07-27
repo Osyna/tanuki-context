@@ -16,6 +16,7 @@ mod codebook;
 mod cost;
 mod distill;
 mod ladder;
+mod needles;
 mod png;
 mod proxy;
 mod render;
@@ -106,6 +107,7 @@ struct PipeArgs<'a> {
     font: &'a str,
     codebook: bool,
     table: bool,
+    verbatim: bool,
 }
 
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
@@ -119,6 +121,7 @@ fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
         font: args["font"].as_str().unwrap_or("normal"),
         codebook: args["codebook"].as_bool().unwrap_or(false),
         table: args["table"].as_bool().unwrap_or(false),
+        verbatim: args["verbatim"].as_bool().unwrap_or(true),
     }
 }
 
@@ -177,6 +180,8 @@ fn tool_estimate(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
+    let side = if a.verbatim { Some(needles::scan_needles(&p.compressed)) } else { None };
+    let side_tok = side.as_ref().map_or(0, |s| s.tokens);
     let img_tok = est.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -193,7 +198,7 @@ fn tool_estimate(args: &Value) -> Value {
         "pages": est.pages,
         "imageTokens": img_tok,
         "rawTextTokens": raw_tok,
-        "totalSavedPct": pct(raw_tok, img_tok),
+        "totalSavedPct": pct(raw_tok, img_tok + side_tok),
         "protectedLines": p.protected_lines,
         "recommend": recommend_for(a.text),
         "pack": a.pack,
@@ -203,7 +208,11 @@ fn tool_estimate(args: &Value) -> Value {
             Some((rows, cols)) => json!({ "rows": rows, "cols": cols }),
             None => json!(false),
         },
-        "verdict": if img_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
+        "verbatim": match &side {
+            Some(s) => json!({ "more": s.more, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
+            None => json!(false),
+        },
+        "verdict": if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
     });
     // Situation-aware real cost: only when a model or cache state is supplied,
     // so the default result (and the parity harness) stay byte-identical.
@@ -218,6 +227,7 @@ fn tool_render(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
+    let side = if a.verbatim { Some(needles::scan_needles(&p.compressed)) } else { None };
     let img_tok = r.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -257,6 +267,11 @@ fn tool_render(args: &Value) -> Value {
     if a.reflow {
         summary.push_str(" · ↵ = newline · engine: pxpipe");
     }
+    if let Some(s) = &side {
+        if !s.needles.is_empty() {
+            summary.push_str(&format!(" · verbatim: {} exact strings ride below as text", s.needles.len() + s.more));
+        }
+    }
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut content = vec![json!({ "type": "text", "text": summary })];
     for page in r.pages.iter().take(MAX_INLINE_PAGES) {
@@ -266,6 +281,11 @@ fn tool_render(args: &Value) -> Value {
     }
     if r.pages.len() > MAX_INLINE_PAGES {
         content.push(json!({ "type": "text", "text": format!("(+{} more page(s))", r.pages.len() - MAX_INLINE_PAGES) }));
+    }
+    if let Some(s) = &side {
+        if !s.text.is_empty() {
+            content.push(json!({ "type": "text", "text": s.text }));
+        }
     }
     json!(content)
 }
@@ -354,16 +374,16 @@ fn level_schema() -> Value {
 
 fn tools_list() -> Value {
     let text_prop = json!({ "type": "string" });
-    json!({ "tools": [
+    let mut v = json!({ "tools": [
         {
             "name": "tanuki_render",
             "description": "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_estimate",
             "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
@@ -390,7 +410,30 @@ fn tools_list() -> Value {
             "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" } }, "required": ["id"] }
         }
-    ] })
+    ] });
+    // TANUKI_TOOL_BRIEF=1 serves the registry's one-line briefs instead of the
+    // full contracts (~4x smaller furniture on every request). Off by default:
+    // the full text is load-bearing for models that have not read the README,
+    // and the default wire output stays parity-locked with the TS engine.
+    if std::env::var("TANUKI_TOOL_BRIEF").map_or(false, |x| x == "1") {
+        let briefs: [(&str, &str); 7] = [
+            ("tanuki_render", "Render text through the pipeline (optional distill/level/codebook) into dense PNG pages. Call after tanuki_estimate says PIPELINE cheaper."),
+            ("tanuki_estimate", "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Pass model and/or cached:true for a real-dollar 'cost' verdict (cached content usually should not be imaged). Instant; call this first."),
+            ("tanuki_distill", "Stage 0 alone: collapse repeated log lines/blocks and template near-dupes; error/warn lines kept verbatim. Output stays greppable text."),
+            ("tanuki_compress", "Stage 1 alone: graded text compression, levels 0-4, code/paths/hashes protected from level 2 up."),
+            ("tanuki_stats", "Session savings summary from the events log (honest denominator: input + cache reads + cache creates)."),
+            ("tanuki_stash", "Park bulky text outside the context window; returns a compact map (distill stats, top repeats, id). Retrieval pattern, tanuki pricing on the way back."),
+            ("tanuki_fetch", "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically."),
+        ];
+        if let Some(tools) = v["tools"].as_array_mut() {
+            for t in tools {
+                if let Some((_, b)) = briefs.iter().find(|(n, _)| Some(*n) == t["name"].as_str()) {
+                    t["description"] = json!(b);
+                }
+            }
+        }
+    }
+    v
 }
 
 fn tools_call(params: &Value) -> Result<Value, String> {
@@ -404,7 +447,13 @@ fn tools_call(params: &Value) -> Result<Value, String> {
         "tanuki_distill" => tool_distill(args),
         "tanuki_compress" => tool_compress(args),
         "tanuki_stats" => {
-            json!([{ "type": "text", "text": serde_json::to_string_pretty(&stats::px_stats()).unwrap() }])
+            // Self-cost, counted against ourselves: the tool schemas every request
+            // carries (they ride the prompt cache after the first write, but they
+            // are never free). No other tool in this category reports its own furniture.
+            let mut s = stats::px_stats();
+            let furniture = serde_json::to_string(&tools_list()).unwrap().chars().count();
+            s["toolFurnitureTokens"] = json!(((furniture as f64) / 4.0).round() as u64);
+            json!([{ "type": "text", "text": serde_json::to_string_pretty(&s).unwrap() }])
         }
         "tanuki_stash" => tool_stash(args)?,
         "tanuki_fetch" => tool_fetch(args)?,
@@ -485,7 +534,7 @@ fn main() {
         }
         Some("estimate") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--font tiny] [--codebook] [--model <id>] [--cached]",
+                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook] [--model <id>] [--cached]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -509,6 +558,7 @@ fn main() {
                 "font": font,
                 "codebook": flag("--codebook"),
                 "table": flag("--table"),
+                "verbatim": !flag("--no-verbatim"),
                 "cached": flag("--cached"),
             });
             if let Some(m) = model { req["model"] = json!(m); }
@@ -517,7 +567,7 @@ fn main() {
         }
         Some("render") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]",
+                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
@@ -541,16 +591,23 @@ fn main() {
                 args.iter().any(|a| a == "--table"),
             );
             let r = render::render_text(&p.compressed, true, pack, font);
+            let side = if flag("--no-verbatim") { None } else { Some(needles::scan_needles(&p.compressed)) };
             let tok = r.tokens;
             println!(
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
-                        "rawTextTokens": text_tokens(text.chars().count()) })
+                        "rawTextTokens": text_tokens(text.chars().count()),
+                        "verbatimTokens": side.as_ref().map_or(0, |s| s.tokens) })
             );
             if let Some(dir) = pos.get(1).map(|s| s.as_str()) {
                 std::fs::create_dir_all(dir).expect("mkdir");
                 for (i, page) in r.pages.iter().enumerate() {
                     std::fs::write(format!("{dir}/page{i}.png"), &page.png).expect("write png");
+                }
+                if let Some(s) = &side {
+                    if !s.text.is_empty() {
+                        std::fs::write(format!("{dir}/verbatim.txt"), format!("{}\n", s.text)).expect("write verbatim");
+                    }
                 }
             }
         }
