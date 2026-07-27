@@ -212,6 +212,7 @@ const req = [
   { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: vText } } },
   { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "3451bd1b-13c4-4558-aa67-a62bc042905f" } } },
   { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "cafe1234" } } },
+  { jsonrpc: "2.0", id: 14, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "3451bd1b-13c4-4558-aa67-a62bc04290e5" } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

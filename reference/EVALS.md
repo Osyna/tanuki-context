@@ -100,7 +100,7 @@ first-class signal, not tribal knowledge.
 
 The deterministic backstop is `tanuki_verify`: give it a stash id and a value
 you read off a page, and it checks the original bytes on disk — `exact` (with
-line), `corrected` (a unique single-character neighbour — the character you
+line), `corrected` (a unique near-miss — one substituted or transposed character you
 misread), `ambiguous`, or `absent`. No model, so the silent miss above becomes
 a flagged one; the read-back rate is a recall floor, not a corruption risk,
 once a quote is verified.
