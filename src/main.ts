@@ -15,15 +15,15 @@ import { costVerdict } from "./cost.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
-import { scanNeedles } from "./needles.ts";
+import { scanNeedles, scanCredentials } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
 import { fetchSlice, stashText } from "./stash.ts";
 import { pxStats } from "./stats.ts";
-import { TOOLS } from "./tools.ts";
+import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.8.0";
+export const VERSION = "0.9.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -173,6 +173,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const [name, loss] = LEVELS[p.level];
   const model = asStr(jget(args, "model"));
   const cached = asBool(jget(args, "cached")) ?? false;
+  const creds = scanCredentials(a.text);
   const out: Record<string, unknown> = {
     engine: "pxpipe",
     level: `${p.level} ${name}`,
@@ -191,7 +192,8 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
     verbatim: side === null ? false : { more: side.more, needles: side.needles.length + side.more, tokens: side.tokens },
-    verdict: imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
+    verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
+    credentials: creds.length > 0 ? creds : false,
     recommend: recommendFor(a.text),
   };
   // Situation-aware real cost: only when a model or cache state is supplied, so
@@ -213,6 +215,10 @@ function imageBlocks(pages: Page[]): unknown[] {
 
 export function toolRender(args: unknown): unknown[] {
   const a = pipeArgs(args);
+  const creds = scanCredentials(a.text);
+  if (creds.length > 0) {
+    return [{ type: "text", text: `[tanuki-context: refused to render — ${creds.length} credential-shaped secret(s) detected (${creds.join(", ")}); kept as text so a secret is never silently misread from pixels]` }];
+  }
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
@@ -335,7 +341,7 @@ function fetchRendered(id: string, query: string | null, lines: string | null): 
   const slice = fetchSlice(id, query, lines);
   const rawTok = textTokens(charCount(slice));
   const r = renderText(slice, true, true, "normal");
-  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
+  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6 && scanCredentials(slice).length === 0;
   return { slice, rawTok, r, wins };
 }
 
@@ -355,13 +361,12 @@ export function toolFetch(args: unknown): unknown[] {
 /// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
 /// of it (the pi/SDK projections carry them).
 function toolsList(): Record<string, unknown> {
-  // TANUKI_TOOL_BRIEF=1 serves the registry's one-line briefs instead of the
-  // full contracts (~4x smaller furniture on every request). Off by default:
-  // the full text is load-bearing for models that have not read the README,
-  // and the default wire output stays parity-locked with the Rust engine.
-  const brief = process.env.TANUKI_TOOL_BRIEF === "1";
+  // Brief one-line descriptions by default (~4x smaller furniture the model
+  // pays for on every request); TANUKI_TOOL_VERBOSE=1 restores the full
+  // contracts. The slim default surface (visibleTools) is applied here too.
+  const verbose = process.env.TANUKI_TOOL_VERBOSE === "1";
   return {
-    tools: TOOLS.map((t) => {
+    tools: visibleTools().map((t) => {
       const properties: Record<string, unknown> = {};
       const required: string[] = [];
       for (const p of t.params) {
@@ -374,7 +379,7 @@ function toolsList(): Record<string, unknown> {
       }
       const inputSchema: Record<string, unknown> = { type: "object", properties };
       if (required.length > 0) inputSchema.required = required;
-      return { name: t.name, description: brief ? t.brief : t.description, inputSchema };
+      return { name: t.name, description: verbose ? t.description : t.brief, inputSchema };
     }),
   };
 }
@@ -605,6 +610,11 @@ export function main(): void {
       const pack = !argv.includes("--no-pack");
       const useCb = argv.includes("--codebook");
       const font = parseFont(flagVal(argv, "--font") ?? "normal");
+      const creds = scanCredentials(text);
+      if (creds.length > 0) {
+        process.stdout.write(jstring({ refused: true, credentials: creds }, false) + "\n");
+        break;
+      }
       const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
       const side = argv.includes("--no-verbatim") ? null : scanNeedles(p.compressed);
@@ -696,6 +706,12 @@ export function main(): void {
         ratio: num("--ratio", PROXY_DEFAULTS.ratio),
         minSave: num("--min-save", PROXY_DEFAULTS.minSave),
         maxPages: num("--max-pages", PROXY_DEFAULTS.maxPages),
+        recencyWindow: num(
+          "--recency",
+          Number.isFinite(Number(process.env.TANUKI_RECENCY))
+            ? Number(process.env.TANUKI_RECENCY)
+            : PROXY_DEFAULTS.recencyWindow,
+        ),
       });
       break;
     }

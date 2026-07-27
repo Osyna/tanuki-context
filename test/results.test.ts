@@ -15,8 +15,9 @@ import {
   renderText,
 } from "../src/render.ts";
 import { apply as codebookApply } from "../src/codebook.ts";
-import { NEEDLE_CAP, scanNeedles } from "../src/needles.ts";
+import { NEEDLE_CAP, scanCredentials, scanNeedles } from "../src/needles.ts";
 import { toolEstimate, toolRender } from "../src/main.ts";
+import { DEFAULT_TOOL_NAMES, TOOLS, visibleTools } from "../src/tools.ts";
 
 // ------------------------------------------------------------------ corpora
 
@@ -434,15 +435,7 @@ describe("dist/cli.js MCP session", () => {
 
     expect(r.get(1)?.result?.serverInfo?.name).toBe("tanuki-context");
     const tools = (r.get(2)?.result?.tools ?? []).map((t) => t.name);
-    expect(tools).toEqual([
-      "tanuki_render",
-      "tanuki_estimate",
-      "tanuki_distill",
-      "tanuki_compress",
-      "tanuki_stats",
-      "tanuki_stash",
-      "tanuki_fetch",
-    ]);
+    expect(tools).toEqual(["tanuki_render", "tanuki_estimate", "tanuki_stash"]);
 
     // estimate JSON from our own server; fields asserted below
     const stacked = JSON.parse(r.get(3)?.result?.content?.[0]?.text ?? "{}") as EstimateOut;
@@ -537,5 +530,47 @@ describe("verbatim: exact strings ride as text, never pixels", () => {
     expect(side?.text).toContain("3451bd1b-13c4-4558-aa67-a62bc042905e");
     const off = toolRender({ text: NOISY, level: 0, verbatim: false }) as Array<{ type: string; text?: string }>;
     expect(off.some((c) => (c.text ?? "").startsWith("·verbatim·"))).toBe(false);
+  });
+});
+
+// ------------------------------------------- credential refuse-to-render gate
+describe("credential gate: secrets are never rendered to pixels", () => {
+  const SECRET = "deploy log line one\nAWS_KEY=AKIAIOSFODNN7EXAMPLE ok\nmore ordinary log output here\n";
+  const CLEAN = "2026-07-27 INFO copied /srv/data/batch/segment_3.parquet ok\n".repeat(40);
+
+  test("scanCredentials finds known secret shapes, ignores clean logs", () => {
+    expect(scanCredentials(SECRET)).toContain("aws-key");
+    expect(scanCredentials("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")).toContain("private-key");
+    expect(scanCredentials("token ghp_" + "a".repeat(36))).toContain("github-token");
+    expect(scanCredentials(CLEAN)).toEqual([]);
+  });
+
+  test("toolRender refuses a block with a credential, returns no image", () => {
+    const out = toolRender({ text: SECRET, level: 0 }) as Array<{ type: string; text?: string }>;
+    expect(out.some((c) => c.type === "image")).toBe(false);
+    expect(out[0].text).toContain("refused to render");
+    expect(out[0].text).toContain("aws-key");
+  });
+
+  test("toolEstimate flags credentials and refuses the verdict", () => {
+    const e = toolEstimate({ text: SECRET, level: 0 }) as { verdict: string; credentials: unknown };
+    expect(e.verdict).toBe("TEXT cheaper (credentials)");
+    expect(e.credentials).toContain("aws-key");
+  });
+});
+
+// ------------------------------------------- slim default tools/list surface
+describe("visibleTools: slim default surface, all tools behind a flag", () => {
+  test("default advertises the three workflow tools; all 7 stay callable", () => {
+    delete process.env.TANUKI_ALL_TOOLS;
+    expect(visibleTools().map((t) => t.name)).toEqual([...DEFAULT_TOOL_NAMES]);
+    expect(visibleTools().length).toBe(3);
+    expect(TOOLS.length).toBe(7);
+  });
+
+  test("TANUKI_ALL_TOOLS=1 restores the full surface", () => {
+    process.env.TANUKI_ALL_TOOLS = "1";
+    expect(visibleTools().length).toBe(7);
+    delete process.env.TANUKI_ALL_TOOLS;
   });
 });
