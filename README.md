@@ -1,11 +1,23 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/logo.png" alt="the tanuki-context logo: a pixel-art tanuki in a straw hat" width="180" />
+
 # tanuki-context
 
-[![npm](https://img.shields.io/npm/v/tanuki-context)](https://www.npmjs.com/package/tanuki-context)
-Zero dependencies. 0.98 MB install. Runs anywhere Node >= 18 runs. MIT.
+**Pay pixels, not tokens. Bulky text enters the model as dense PNG pages, at a fraction of the price.**
+
+[![npm](https://img.shields.io/npm/v/tanuki-context?style=for-the-badge&logo=npm&logoColor=white&color=cb3837)](https://www.npmjs.com/package/tanuki-context)
+[![zero dependencies](https://img.shields.io/badge/dependencies-zero-3DA639?style=for-the-badge)](https://www.npmjs.com/package/tanuki-context?activeTab=dependencies)
+[![install size](https://img.shields.io/badge/install-0.98_MB-e0b04f?style=for-the-badge)](https://www.npmjs.com/package/tanuki-context)
+[![license](https://img.shields.io/badge/license-MIT-8ab4f8?style=for-the-badge)](LICENSE)
+
+</div>
 
 AI models charge for every token they read. tanuki-context turns the bulky
 parts of a conversation (logs, command output, long documents) into compact
-PNG pages that the same model reads for a fraction of the price.
+PNG pages that the same model reads for a fraction of the price. It runs
+anywhere Node >= 18 runs, or as a 5.7 MB static Rust binary, with zero
+dependencies either way.
 
 This sounds like a trick. It is just how the pricing works. Text costs about
 1 token per 4 characters. An image costs a fixed amount set by its size in
@@ -15,6 +27,14 @@ of about 7,000. [pxpipe](https://github.com/teamchong/pxpipe) discovered how
 far that gap stretches on real traffic and built a proxy on it.
 tanuki-context is the same imaging engine, packaged so the model itself
 decides when to use it, plus a relay mode for clients you can't change.
+
+## A quick demo
+
+![terminal demo: estimate prices a 145 KB log at 37,111 raw tokens, render draws it as 2 PNG pages, 2,240 tokens, a 94% cut](https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/demo.gif)
+
+Real commands, real output. The corpus is the seeded service log from the
+benchmark suite, so `node reference/tiers-report.mjs` reproduces every
+number in the recording on your machine, byte for byte.
 
 This is a real page, straight out of the pipeline: 200 KB of system log,
 cleaned up and drawn. A vision model reads it directly:
@@ -557,19 +577,80 @@ about what the model needs to see, and several of them compose.
 | tanuki, stash + fetch | a 305-token map now, slices on demand | 305 + 112..4,704 per slice | knows the log's shape immediately; opens only the slices it needs, imaged when big, text when small |
 | [context-mode](https://www.npmjs.com/package/context-mode) (sandbox pass over the file) | one analysis result | ~270 per question (-99.5%) | only the answer it asked for; the file never enters context at all |
 
-Reading that fairly:
+### Why context-mode wins some of these rows
 
-- context-mode wins whenever a narrow question suffices. If the model never
-  needs to see the log, ~270 tokens per query is unbeatable. Its blind
-  spots are awareness (the store tells the model nothing until it guesses
-  the right question) and big answers (a large slice comes back at full
-  text price). `tanuki_stash` and `tanuki_fetch` are that pattern with both
-  spots covered: a 305-token map up front, and slices that arrive as pages
-  whenever pages win. For the "show me every failure line" job measured
-  above: 305 + 4,704 = 5,009 tokens vs 22,111 for the same lines as text.
-- pxpipe and tanuki share the engine, so the gap between -77% and -90% here
-  is not the imaging. It is distill (pxpipe does not de-noise logs) plus
-  the sidecar text its export flow pastes alongside. On prose, where
+The table needs one explanation, because the -99.5% row is real and it is
+not tanuki's. [context-mode](https://www.npmjs.com/package/context-mode)
+never shows the model your file. It runs the question as a program (grep,
+jq, a script) in a sandbox next to the file, and only the printed result
+enters the conversation. Ask "how many connection resets, and from which
+peer?" and the model pays about 270 tokens for the answer instead of
+51,200 for the log. The document itself costs zero context, every time.
+
+That is the whole trick, and it is a good one. Token cost follows what
+enters context, and an answer is almost always smaller than the document
+it came from. When the question is narrow and you can name it in advance,
+nothing that shows the model the content can compete. Pages included.
+
+It stops winning when one of three things is true:
+
+- You can't name the question yet. A retrieval store is blind: it tells
+  the model nothing about what is inside. The model guesses a query, reads
+  the result, guesses again. Each miss is a round trip and a tool call,
+  and debugging usually starts with "something is weird here", not with a
+  grep pattern you already know.
+- The answer is big. Results come back as text at full text price. The
+  measured "show me every failure line" query returned 22,111 tokens. The
+  file never entered context, but half of it came out anyway, at 4
+  characters per token.
+- The model needs the whole picture. Cross-line reasoning (what happened
+  around each error, which units failed together, what changed after the
+  restart) has no single query. At that point someone has to read the log,
+  and the only question left is the price per read: 51,200 as text, 5,264
+  as pages.
+
+The break-even is plain arithmetic. Pages for this log cost 5,264 tokens
+once, and every follow-up question about them is answered from context
+(append-stable pages ride the prompt cache on later turns, so re-sending
+them bills at cache rates). Retrieval costs about 270 per question, every
+question. Under roughly 19 narrow questions, retrieval is cheaper. Past
+that, or the moment one answer comes back big, seeing it wins.
+
+`tanuki_stash` and `tanuki_fetch` exist because both regimes are real.
+Stash is a retrieval store with a 305-token map up front, so queries are
+aimed instead of blind. Fetches above the gate come back as pages, so big
+answers cost page price: 4,704 instead of 22,111 for the failure-line
+query. It is context-mode's pattern with its two structural costs paid
+down.
+
+Choose by the job, not the tool. Counts, sums, and joins over huge files
+are programs: use context-mode, or a stash you never fetch from. Reading,
+debugging, and "explain this" need eyes on the content: use pages. The two
+compose in one session.
+
+### Capability matrix
+
+| capability | tanuki | pxpipe | context-mode | rtk |
+| --- | :---: | :---: | :---: | :---: |
+| model reads the whole content | ✓ pages | ✓ pages | — answers only | ✓ trimmed text |
+| error lines guaranteed verbatim | ✓ | ✓ | only if queried, at text price | ✓ |
+| narrow question without paying for the file | ✓ stash + fetch | — | ✓ its home game | — |
+| shape map before spending anything | ✓ 305-token map | — | — | — |
+| big slices below text price | ✓ imaged fetches | — | — | — |
+| cuts command output before tokenization | ✓ `run` wrapper | — | ✓ sandbox exec | ✓ 100+ parsers |
+| verdict in real dollars (cache state, provider) | ✓ `cost` | — | — | — |
+| works without a vision model | — | — | ✓ | ✓ |
+| deterministic, no model in the loop | ✓ | ✓ | ✓ | ✓ |
+
+The last two rows matter. Everything in this table is deterministic
+machinery, and tanuki is the only column that requires a vision-capable
+model. If your model cannot read images, the other three are your options.
+
+### The other rows, briefly
+
+- pxpipe and tanuki share the engine, so the gap between -77% and -90%
+  here is not the imaging. It is distill (pxpipe does not de-noise logs)
+  plus the sidecar text its export flow pastes alongside. On prose, where
   distill does nothing, the two land in the same place. pxpipe's factsheet
   is a fidelity feature tanuki lacks: guaranteed-verbatim strings next to
   the pages.

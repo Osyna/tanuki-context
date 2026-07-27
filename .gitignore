@@ -5,3 +5,4 @@ reference/**/*.html
 *.bak
 tools/data/
 .bench-journal.log
+/logo.png

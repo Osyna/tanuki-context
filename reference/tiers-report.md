@@ -37,4 +37,4 @@ Two verdicts per corpus, because the eligible tiers differ by content. When the 
 | design doc (DESIGN.md) | 7,449 | 1,624 | 1,568 pack+codebook | not eligible | **tanuki pack+codebook** | -3% |
 
 Corpora: service log (synthetic, seeded) (145 KB); journalctl JSON (synthetic, seeded) (127 KB); npm install log (synthetic, seeded) (158 KB); TypeScript source (src/main.ts) (34 KB); design doc (DESIGN.md) (29 KB).
-Synthetic files were written to /tmp/tanuki-tiers-EBzZX9 so you can rerun any single cell by hand.
+Synthetic files were written to /tmp/tanuki-tiers-uuqVFY so you can rerun any single cell by hand.
