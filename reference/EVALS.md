@@ -67,6 +67,32 @@ text run truncated inside extended thinking (empty answer), not a wrong one.
 The split across §2 and §3 is the whole thesis: **prose and structure survive
 imaging (task ✓); byte-exact random strings do not (needles ✗ -> sidecar).**
 
+## 4. Lossy tiers: tokens vs task — `npm run tier`   *(measured)*
+
+Levels 2-4, `--distill`, `--codebook`, and `--font tiny` are **not** byte-
+lossless - they trade fidelity for tokens. Do they keep the *task* solvable?
+Same root-cause task, rendered at each tier, on `claude-opus-5` (n=2 seeds):
+
+| tier | image-tokens | vs raw text | task solved |
+| --- | ---: | ---: | ---: |
+| L0 normal (near-lossless) | 896 | -76% | 2/2 |
+| distill (errors kept verbatim) | 280 | -93% | 1/2 |
+| L4 caveman | 896 | -76% | 2/2 |
+| L0 tiny (4x6) | 560 | -85% | 0/2 |
+| distill tiny | 224 | -94% | 0/2 |
+| distill+codebook tiny | 224 | -94% | 1/2 |
+| L4 caveman tiny | 560 | -85% | 0/2 |
+
+The fidelity knob is **font, not ladder level**: normal-font tiers (L0,
+distill, even L4 caveman) keep the task solved while cutting **76-93%** of
+tokens - the FATAL line survives because distill keeps error/warn lines
+verbatim and the ladder protects symbol-dense lines. `--font tiny` (4x6) is
+where it breaks: the model near-reads the component, then mangles a char
+(`vclock-merger` -> `clock-merger`, `merge`). **The sell:** reach for the
+lossy ladder/distill freely when the model must *understand* the context, not
+transcribe it - biggest cut, task intact; reserve **tiny font** for bulk you
+won't need exact words back from. Small n - rerun with more `TIER_SEEDS`.
+
 ## Reproduce
 
 ```
@@ -80,6 +106,9 @@ ANTHROPIC_API_KEY=... NEEDLE_MODELS=claude-opus-5 node reference/needle-call.mjs
 
 # task comprehension (text arm vs image arm), your model + seeds
 ANTHROPIC_API_KEY=... TASK_MODEL=claude-opus-5 npm run taskqual
+
+# lossy tiers: deterministic token saving + task success per tier
+ANTHROPIC_API_KEY=... TIER_MODEL=claude-opus-5 npm run tier
 ```
 
 **Still open** (needs more budget): `npm run paired` — cost per *successful*
