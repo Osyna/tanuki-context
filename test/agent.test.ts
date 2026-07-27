@@ -47,6 +47,7 @@ describe("config helpers", () => {
       "mcp__tanuki__tanuki_stats",
       "mcp__tanuki__tanuki_stash",
       "mcp__tanuki__tanuki_fetch",
+      "mcp__tanuki__tanuki_verify",
     ]);
     expect(tanukiAllowedTools("ctx")[0]).toBe("mcp__ctx__tanuki_render");
   });
@@ -76,7 +77,7 @@ describe("in-process tool specs (real zod)", () => {
   const specs = tanukiSdkToolSpecs(Z);
   const byName = new Map(specs.map((s) => [s.name, s]));
 
-  test("all five tools present with schemas", () => {
+  test("all tools present with schemas", () => {
     expect(specs.map((s) => s.name)).toEqual([...TANUKI_TOOL_NAMES]);
     for (const s of specs) expect(s.description.length).toBeGreaterThan(20);
   });
@@ -129,7 +130,7 @@ describe("real Agent SDK", () => {
     // point node at the real file, not the npx fallback
     expect(cfg.command).toBe(process.execPath);
     expect(cfg.args[0]).toEndWith("dist/cli.js");
-    expect(dist.tanukiAllowedTools().length).toBe(7);
+    expect(dist.tanukiAllowedTools().length).toBe(8);
     const server = (await dist.tanukiSdkServer()) as { type: string };
     expect(server.type).toBe("sdk");
   });

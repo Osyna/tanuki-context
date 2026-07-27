@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 const DIR = mkdtempSync(`${tmpdir()}/tanuki-stash-test-`);
 process.env.TANUKI_STASH = DIR;
 
-const { stashText, fetchSlice } = await import("../src/stash.ts");
+const { stashText, fetchSlice, verifyValue } = await import("../src/stash.ts");
 const { toolFetch, toolStash } = await import("../src/main.ts");
 
 const LOG = Array.from(
@@ -101,5 +101,51 @@ describe("run wrapper (rtk-style)", () => {
     const out = r.stdout.toString();
     expect(out).toContain("stashed");
     expect(out).toMatch(/fetch [0-9a-f]{12}|tanuki_fetch \{"id"/);
+  });
+});
+
+describe("verify: disk-grounded exact check", () => {
+  const NEEDLES = "alpha beta\nid 3451bd1b-13c4-4558-aa67-a62bc042905e end\ngamma cafe1234 and cafe1235 delta\n";
+
+  test("exact match returns the line, no candidates", () => {
+    const { id } = stashText(NEEDLES);
+    const r = verifyValue(id, "3451bd1b-13c4-4558-aa67-a62bc042905e");
+    expect(r.status).toBe("exact");
+    expect(r.line).toBe(2);
+    expect(r.found).toBe("3451bd1b-13c4-4558-aa67-a62bc042905e");
+    expect(r.candidates).toEqual([]);
+  });
+
+  test("one-character misread is corrected to the unique on-disk value", () => {
+    const { id } = stashText(NEEDLES);
+    const r = verifyValue(id, "3451bd1b-13c4-4558-aa67-a62bc042905f"); // last char e->f
+    expect(r.status).toBe("corrected");
+    expect(r.found).toBe("3451bd1b-13c4-4558-aa67-a62bc042905e");
+    expect(r.line).toBe(2);
+  });
+
+  test("several distance-1 neighbours -> ambiguous shortlist, sorted", () => {
+    const { id } = stashText(NEEDLES);
+    const r = verifyValue(id, "cafe1230");
+    expect(r.status).toBe("ambiguous");
+    expect(r.candidates).toEqual(["cafe1234", "cafe1235"]);
+    expect(r.found).toBeNull();
+  });
+
+  test("no match -> absent, never a guess", () => {
+    const { id } = stashText(NEEDLES);
+    expect(verifyValue(id, "ffffffff-0000-0000-0000-000000000000").status).toBe("absent");
+  });
+
+  test("short values get exact-or-absent only (no fuzzy noise)", () => {
+    const { id } = stashText(NEEDLES);
+    expect(verifyValue(id, "cafe1234").status).toBe("exact");
+    expect(verifyValue(id, "xyz").status).toBe("absent");
+  });
+
+  test("empty value and unknown id throw the contract errors", () => {
+    const { id } = stashText(NEEDLES);
+    expect(() => verifyValue(id, "")).toThrow("non-empty");
+    expect(() => verifyValue("deadbeefcafe", "whatever")).toThrow("unknown stash id");
   });
 });

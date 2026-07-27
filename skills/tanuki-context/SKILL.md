@@ -33,6 +33,10 @@ verbatim, and every drop is counted.
    - You only need parts of it, now or later -> `tanuki_stash { text }`
      (returns a ~300-token map + id), then `tanuki_fetch { id, query }` or
      `{ id, lines: "a-b" }`. Big slices arrive as pages automatically.
+   - **Verify before you quote.** Any id/hash/version/path you read off a
+     page -> `tanuki_verify { id, value }` (disk-grounded, no model):
+     `exact` (with line), `corrected` (you misread one char - use it),
+     `ambiguous` (fetch to disambiguate), or `absent` (do not invent one).
    - `"TEXT cheaper"` -> just use the text. Small inputs are not worth an
      image even when the math technically favors one.
    - **Already cached?** If the text is already in the prompt cache (a file
@@ -80,4 +84,7 @@ lines collapsed here.
   to quote. Tiny is a 99.7%-read-back trade; levels 2-4 reword prose.
 - Do not use `withDistill` numbers on source code or docs you want intact -
   distill collapses similar-looking lines.
+- Do not state an id/hash/version transcribed from a page as fact. Quote it
+  from the `verbatim` sidecar, or confirm with `tanuki_verify`; if a value is
+  `absent`, say so - never emit a plausible-looking guess.
 - Do not probe knob combinations by hand; `recommend` already priced them.

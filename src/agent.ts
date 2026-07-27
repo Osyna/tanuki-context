@@ -18,7 +18,7 @@
 
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { toolCompress, toolDistill, toolEstimate, toolFetch, toolRender, toolStash, VERSION } from "./main.ts";
+import { toolCompress, toolDistill, toolEstimate, toolFetch, toolRender, toolStash, toolVerify, VERSION } from "./main.ts";
 import { jstring } from "./serde.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type Knob } from "./tools.ts";
@@ -30,7 +30,8 @@ export const TANUKI_TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 export const TANUKI_INSTRUCTIONS = `tanuki-context turns bulky text (logs, command output, docs) into dense PNG pages that cost a fraction of the text tokens.
 Workflow: call tanuki_estimate first (instant, exact, never renders pixels). Its "recommend" field prices the reversible route (including table for whole-JSON input); for logs, recommend.withDistill prices the distill route - do not probe combos by hand. If the verdict says "PIPELINE cheaper", call tanuki_render with the recommended knobs and use the returned pages instead of pasting the text. Pass model:"<your model>" and cached:true when the text is already in the prompt cache - the returned "cost" field prices it in real dollars with provider-correct image counting (Anthropic/OpenAI/Gemini), and cached content usually should NOT be imaged (a cache-read token is ~0.1x a fresh one).
 For logs, pass distill:true (repeats collapse, error/warn lines stay verbatim; add query:"regex" to slice). For whole-JSON input (arrays of objects, NDJSON), table:true states keys once - value-lossless, and identical rows then collapse harder under distill. For prose you will not quote verbatim, level 2-3 shrinks it further. codebook:true helps path-heavy logs. Never image content you must quote byte-exact at level 4 or font tiny.
-For huge references you will only consult occasionally: tanuki_stash parks the text outside context for a few hundred tokens of map; tanuki_fetch pulls slices later, auto-imaged when pages win.
+For huge references you will only consult occasionally: tanuki_stash parks the text outside context for a few hundred tokens of map; tanuki_fetch pulls slices later, auto-imaged when pages win; tanuki_verify checks a value you read off a page against the stashed original (exact/corrected/ambiguous/absent, no model).
+Never transcribe an id, hash, version, path or numeric constant from a rendered page as fact: quote it from the verbatim sidecar, or confirm it with tanuki_verify/tanuki_fetch. If a value is not recoverable, say so - never emit a plausible-looking guess.
 Pages decode as: \u21b5 = newline, \u2192 = tab, \u21e5N = N leading spaces, a trailing \u00b7legend\u00b7 line maps sigils back to full tokens.`;
 
 export interface StdioServerConfig {
@@ -141,6 +142,7 @@ export function tanukiSdkToolSpecs(z: ZodNamespace): SdkToolSpec[] {
     tanuki_stats: () => [{ type: "text", text: jstring(pxStats(), true) }],
     tanuki_stash: toolStash,
     tanuki_fetch: toolFetch,
+    tanuki_verify: toolVerify,
   };
   return TOOLS.map((t) => ({
     name: t.name,

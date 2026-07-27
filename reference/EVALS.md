@@ -98,6 +98,13 @@ the DeepSeek-OCR read-back curve ([arXiv:2510.18234](https://arxiv.org/abs/2510.
 with the 4x6 tiny font floored to `low` — so the tradeoff above ships as a
 first-class signal, not tribal knowledge.
 
+The deterministic backstop is `tanuki_verify`: give it a stash id and a value
+you read off a page, and it checks the original bytes on disk — `exact` (with
+line), `corrected` (a unique single-character neighbour — the character you
+misread), `ambiguous`, or `absent`. No model, so the silent miss above becomes
+a flagged one; the read-back rate is a recall floor, not a corruption risk,
+once a quote is verified.
+
 ## Reproduce
 
 ```

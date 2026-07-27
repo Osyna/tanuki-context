@@ -435,7 +435,7 @@ describe("dist/cli.js MCP session", () => {
 
     expect(r.get(1)?.result?.serverInfo?.name).toBe("tanuki-context");
     const tools = (r.get(2)?.result?.tools ?? []).map((t) => t.name);
-    expect(tools).toEqual(["tanuki_render", "tanuki_estimate", "tanuki_stash"]);
+    expect(tools).toEqual(["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_verify"]);
 
     // estimate JSON from our own server; fields asserted below
     const stacked = JSON.parse(r.get(3)?.result?.content?.[0]?.text ?? "{}") as EstimateOut;
@@ -561,16 +561,16 @@ describe("credential gate: secrets are never rendered to pixels", () => {
 
 // ------------------------------------------- slim default tools/list surface
 describe("visibleTools: slim default surface, all tools behind a flag", () => {
-  test("default advertises the three workflow tools; all 7 stay callable", () => {
+  test("default advertises the four workflow tools; all 8 stay callable", () => {
     delete process.env.TANUKI_ALL_TOOLS;
     expect(visibleTools().map((t) => t.name)).toEqual([...DEFAULT_TOOL_NAMES]);
-    expect(visibleTools().length).toBe(3);
-    expect(TOOLS.length).toBe(7);
+    expect(visibleTools().length).toBe(4);
+    expect(TOOLS.length).toBe(8);
   });
 
   test("TANUKI_ALL_TOOLS=1 restores the full surface", () => {
     process.env.TANUKI_ALL_TOOLS = "1";
-    expect(visibleTools().length).toBe(7);
+    expect(visibleTools().length).toBe(8);
     delete process.env.TANUKI_ALL_TOOLS;
   });
 });

@@ -4,7 +4,7 @@
 //!             -> ladder level 0-4 (stage 1) -> pxpipe imaging (stage 2)
 //!
 //! Default: MCP stdio server (newline-delimited JSON-RPC 2.0).
-//! CLI: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run]
+//! CLI: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|verify|run]
 //!      (usage strings live on each case below)
 
 import { spawnSync } from "node:child_process";
@@ -20,7 +20,7 @@ import { scanNeedles, scanCredentials } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
-import { fetchSlice, stashText } from "./stash.ts";
+import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
@@ -359,6 +359,12 @@ export function toolFetch(args: unknown): unknown[] {
   return [{ type: "text", text: marker }, ...imageBlocks(f.r.pages)];
 }
 
+export function toolVerify(args: unknown): unknown[] {
+  const id = asStr(jget(args, "id")) ?? "";
+  const value = asStr(jget(args, "value")) ?? "";
+  return [{ type: "text", text: jstring(verifyValue(id, value), true) }];
+}
+
 /// MCP tools/list, projected from the registry. The JSON schema layout is
 /// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
 /// of it (the pi/SDK projections carry them).
@@ -420,6 +426,13 @@ function toolsCall(
     case "tanuki_fetch":
       try {
         content = toolFetch(args);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      break;
+    case "tanuki_verify":
+      try {
+        content = toolVerify(args);
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
@@ -752,6 +765,16 @@ export function main(): void {
       }
       break;
     }
+    case "verify": {
+      const id = argv[2] ?? fatal("usage: tanuki-context verify <id> <value>");
+      const value = argv[3] ?? fatal("usage: tanuki-context verify <id> <value>");
+      try {
+        process.stdout.write(jstring(verifyValue(id, value), false) + "\n");
+      } catch (e) {
+        fatal(e instanceof Error ? e.message : String(e));
+      }
+      break;
+    }
     case "run": {
       // rtk-style wrapper: run the command, hand the agent distilled output
       // instead of the firehose, keep the full capture fetchable. Exit code
@@ -789,7 +812,7 @@ export function main(): void {
       break;
     default:
       process.stderr.write(
-        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run] ...\n`,
+        `unknown command: ${argv[1]}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|verify|run] ...\n`,
       );
       process.exit(1);
   }
