@@ -517,6 +517,26 @@ non-existent fields (all zeros), and the second showed 99.6% savings by
 ignoring 6.5M cache-read tokens. The honest figure was 76.5%. Every number
 this project reports now names its denominator.
 
+**The imaged bulk, priced.** The table above is qualitative; `estimate` also
+returns a quantitative `fidelity` band for the config you price. It maps the
+imaged compression ratio (text tokens ÷ vision tokens) onto DeepSeek-OCR's
+measured read-back curve ([arXiv:2510.18234](https://arxiv.org/abs/2510.18234):
+~98% under 8×, ~87% by 12×, ~60% by 20×) and floors the band at `low` for the
+4×6 tiny font, which sits past the glyph-legibility cliff regardless of ratio
+(our own `reference/tier-report.mjs` sweep reproduces the curve: L0 ≈4× solves
+the task, tiny fails even at ≈7×). Exact strings ride the `verbatim` sidecar as
+text and are unaffected — the band bounds comprehension of the *imaged* bulk, so
+the model reaches for a lossier tier knowingly. It is analytic; the calibrated
+per-model version is Upgrades 2–3 in
+[docs/research-roadmap-2026-07.md](docs/research-roadmap-2026-07.md).
+
+**Sigils stay confusable-free.** The codebook alphabet is pinned by a guard
+test (`test/fidelity.test.ts`, the OCR-B/UTS-39 methodology): every sigil must
+be less confusable with any content glyph — measured as L1 coverage distance on
+the real 5×8 atlas — than `0` and `O` already are with each other. The current
+set clears that bar by ~1.5×; the guard stops a future edit from silently
+introducing an `Ø`/`0`-class ambiguity into imaged pages.
+
 ## 6. What we'd change with more time
 
 - **High-res vision tier.** Claude 4.7+ models accept 2576-px / 4784-token

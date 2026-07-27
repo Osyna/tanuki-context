@@ -51,8 +51,9 @@ The last two rows are **lossy on purpose** — distill drops repeat lines
 (errors kept verbatim), tiny font shrinks glyphs. Measured, the ladder/distill
 tiers still let a model *do the task* (find the error) while cutting up to
 ~93%; tiny font is the one that trades word-level legibility — use it for bulk
-you won't need exact words back from. The token-vs-task curve:
-[reference/EVALS.md](reference/EVALS.md).
+you won't need exact words back from. `estimate` reports a `fidelity` band per
+config (mapped to DeepSeek-OCR's measured read-back curve), so you see the
+cliff before you hit it. The token-vs-task curve: [reference/EVALS.md](reference/EVALS.md).
 
 ## Try it in 30 seconds
 
