@@ -82,7 +82,8 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 - **[Research roadmap](docs/research-roadmap-2026-07.md)** — how tanuki maps onto DeepSeek-OCR, Glyph, and VIST.
 
 Rust: `cargo install --git https://github.com/Osyna/tanuki-context --branch rust`
-— a **frozen reference** engine (parity held through v0.8.x).
+— the same engine as one static binary, held byte/pixel-exact with the npm
+package by a parity harness.
 
 MIT. The bundled glyph atlas derives from the Spleen font, GNU Unifont, and
 pxpipe — see [NOTICE](NOTICE).
