@@ -6,6 +6,40 @@ rakuen post *"Token compression tools measure the wrong thing"* — these
 scripts are its bar, applied to ourselves). Every harness is seeded and
 reproducible; run it on your own model and corpus.
 
+## Tested via a Claude Code subscription (2026-07-27)
+
+Two ways to run the loop: a **Claude Code session** (this repo's own dev
+model, no API key) for a qualitative pass, or a **keyed API run** for the full
+scored tables. What a subscription session confirmed here:
+
+**Pricing — done, deterministic.** `estimate` prices the decision in real
+dollars via the model's own tile/patch rule. A 384 KB / 4,001-line service log
+priced for `claude-opus-4`:
+
+| pipeline | image-tokens | vs 95,980 text | cost (opus) |
+| --- | ---: | ---: | ---: |
+| raw imaging | 20,160 | **-79%** | $1.44 -> $0.30 |
+| distill + codebook + tiny | 112 | **-100%** | $1.44 -> $0.0017 |
+
+```
+node dist/cli.js estimate <log> 0 --model claude-opus-4 [--distill --codebook --font tiny]
+```
+
+**Task read-back — done, this session's vision.** A rendered log page read
+back by the Claude Code model: the log's structure, service units, and the
+injected `FATAL panic: disk write failed (ENOSPC) ... frame-allocator ...`
+line are legible from pixels, so the **root cause is identifiable from the
+image** — the claim customers buy. The random hex/uuid/base64 *needles* sit at
+the edge of 5x8 legibility (the documented silent-misread case); the
+`verbatim` sidecar carries 10/14 of them as text so exactness never rides on
+transcription.
+
+A subscription session can't script hundreds of scored calls, so the tables
+below still need an **`ANTHROPIC_API_KEY`**: the full per-needle O/X table
+(`npm run needles` -> `score`), cost-per-successful-task (`npm run paired`),
+and the text-vs-image task arms (`npm run taskqual`).
+
+
 ## Read-back fidelity — `npm run needles`   *(published; corpus expanded)*
 
 Can a vision model transcribe dense pages back **byte-exact**? Seeded needles
