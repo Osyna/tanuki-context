@@ -137,18 +137,30 @@ export function verifyValue(id: string, value: string): VerifyResult {
     if (cps[i] === "\n") ln++;
   }
 
-  // Substitution distance 1 only: the dominant dense-glyph misread (0/O, 5/S,
-  // 1/l) keeps the length, and a same-length window cannot match a fragment of
-  // a longer token the way an indel window would (ponytail: real insert/delete
-  // misreads would need token-boundary awareness; not worth it).
+  // Distance-1 neighbourhood, same length only: one substitution (the dominant
+  // dense-glyph misread 0/O, 5/S, 1/l) or one adjacent transposition (a digit
+  // swap like f0->0f, observed in real read-backs). Both preserve length, so a
+  // window cannot match a fragment of a longer token the way an indel would
+  // (ponytail: indels would need token-boundary awareness and are not
+  // fragment-safe; not worth it).
   const found = new Map<string, number>();
   if (n <= cps.length) {
     for (let off = 0; off + n <= cps.length; off++) {
-      let d = 0;
+      let diffs = 0;
+      let a = -1;
+      let b = -1;
       for (let i = 0; i < n; i++) {
-        if (val[i] !== cps[off + i] && ++d > 1) break;
+        if (val[i] !== cps[off + i]) {
+          diffs++;
+          if (diffs === 1) a = i;
+          else if (diffs === 2) b = i;
+          else break;
+        }
       }
-      if (d === 1) {
+      const match =
+        diffs === 1 ||
+        (diffs === 2 && b === a + 1 && val[a] === cps[off + b] && val[b] === cps[off + a]);
+      if (match) {
         const s = cps.slice(off, off + n).join("");
         if (!found.has(s)) found.set(s, lineAt[off]);
       }

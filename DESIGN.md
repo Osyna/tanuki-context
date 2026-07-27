@@ -250,7 +250,7 @@ Two further properties:
   silent-miss rate the pages themselves cannot fix; `tanuki_verify` is the
   recovery. Hand it a stash id and a value read off a page and it compares the
   original bytes on disk — `exact` (with line), `corrected` (a unique
-  substitution-distance-1 neighbour, the character you misread), `ambiguous`,
+  distance-1 neighbour — one substituted or transposed character), `ambiguous`,
   or `absent`. No model in the loop, so a plausible-wrong-character becomes a
   flagged one: the read-back number is a recall floor, not a corruption risk,
   once a quote is verified. Parity-locked with Rust (same scan order, same

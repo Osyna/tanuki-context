@@ -163,7 +163,7 @@ Leave it alone when:
   (default on) pulls uuids/hashes/ids/ips/versions out as text automatically;
   secrets and edit-targets should still never be imaged.
   Read one off a page anyway? `tanuki_verify` checks it against the stashed
-  original — exact, a corrected single-character misread, or absent — no model.
+  original — exact, a corrected near-miss (one substituted or swapped character), or absent — no model.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.

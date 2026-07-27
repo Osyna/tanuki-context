@@ -124,6 +124,14 @@ describe("verify: disk-grounded exact check", () => {
     expect(r.line).toBe(2);
   });
 
+  test("adjacent transposition (digit swap) is corrected", () => {
+    const { id } = stashText(NEEDLES);
+    const r = verifyValue(id, "3451bd1b-13c4-4558-aa67-a62bc04290e5"); // ...905e -> ...90e5
+    expect(r.status).toBe("corrected");
+    expect(r.found).toBe("3451bd1b-13c4-4558-aa67-a62bc042905e");
+    expect(r.line).toBe(2);
+  });
+
   test("several distance-1 neighbours -> ambiguous shortlist, sorted", () => {
     const { id } = stashText(NEEDLES);
     const r = verifyValue(id, "cafe1230");

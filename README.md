@@ -72,13 +72,13 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 ## When not to reach for it
 
 - **Your model can't read images.** Hard requirement (any current Claude qualifies).
-- **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**. Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships uuids/hashes/ids as text; edit-targets should stay text. Read a value off a page anyway? `tanuki_verify` checks it against the stashed original — exact, a corrected one-character misread, or absent — no model.
+- **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**. Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships uuids/hashes/ids as text; edit-targets should stay text. Read a value off a page anyway? `tanuki_verify` checks it against the stashed original — exact, a corrected near-miss, or absent — no model.
 - **The content is small, or your bill is output-dominated.** `tanuki_stats` reports the output share so you can tell.
 - **You're not on Anthropic pricing.** Pass `model` to `tanuki_estimate` for provider-correct `cost` (OpenAI tiles, Gemini tiles), overridable via `TANUKI_RATES`.
 
 ## New in 0.11
 
-- **`tanuki_verify`**: hand it a stash id and a value you read off a rendered page; it checks the original bytes on disk — `exact` (with line), `corrected` (the single character you misread), `ambiguous`, or `absent` — with no model. Turns the silent misread into an exact match or an explicit flag; now a default tool.
+- **`tanuki_verify`**: hand it a stash id and a value you read off a rendered page; it checks the original bytes on disk — `exact` (with line), `corrected` (the character you misread — a substitution or an adjacent transposition), `ambiguous`, or `absent` — with no model. Turns the silent misread into an exact match or an explicit flag; now a default tool.
 
 ## New in 0.10
 
