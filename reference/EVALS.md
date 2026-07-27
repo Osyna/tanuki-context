@@ -93,6 +93,11 @@ lossy ladder/distill freely when the model must *understand* the context, not
 transcribe it - biggest cut, task intact; reserve **tiny font** for bulk you
 won't need exact words back from. Small n - rerun with more `TIER_SEEDS`.
 
+`estimate` surfaces this as a `fidelity` field — the density ratio mapped to
+the DeepSeek-OCR read-back curve ([arXiv:2510.18234](https://arxiv.org/abs/2510.18234)),
+with the 4x6 tiny font floored to `low` — so the tradeoff above ships as a
+first-class signal, not tribal knowledge.
+
 ## Reproduce
 
 ```

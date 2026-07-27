@@ -12,6 +12,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { costVerdict } from "./cost.ts";
+import { fidelity } from "./fidelity.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
@@ -186,6 +187,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     imageTokens: imgTok,
     rawTextTokens: rawTok,
     totalSavedPct: pct(rawTok, imgTok + sideTok),
+    fidelity: fidelity(rawTok, imgTok, font === "tiny"),
     protectedLines: p.protectedLines,
     pack: a.pack,
     font: font === "tiny" ? "tiny" : "normal",

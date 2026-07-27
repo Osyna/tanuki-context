@@ -154,3 +154,44 @@ and should follow.
 **Deliberately not doing:** trained encoder (DeepSeek/Glyph) — breaks
 zero-dep + any-model; RL render policy (VTC-R1) — model in the loop, the
 LLMLingua line we already hold.
+
+---
+
+## Shipped from the second research pass (2026-07-27)
+
+A follow-up literature report (DeepSeek-OCR, Glyph, PIXEL, OCR-B, Crockford/
+Damm, Drain, RULER, UTS-39) re-ranked the same curve. What landed and why:
+
+- **Analytic fidelity band in `estimate`** (partial Upgrade 3). The DeepSeek-OCR
+  density cliff ([2510.18234](https://arxiv.org/abs/2510.18234)) is now a
+  first-class `fidelity` field: the text/vision token ratio mapped to a read-back
+  band, with the 4×6 tiny font floored to `low` (an orthogonal legibility axis
+  the ratio misses, confirmed by our own tier sweep). Both engines, parity-locked
+  (`src/fidelity.ts` / `src/fidelity.rs`). The *calibrated per-model* version
+  (Upgrade 2 `calibrate`) is still the next step — this ships the curve as
+  evidence-based defaults without a measured profile.
+- **Confusable-free sigil guard** (measurement half of Upgrade 4a). Rather than
+  repaint the atlas blind, `test/fidelity.test.ts` computes the glyph-confusion
+  distance on the real 5×8 cell and pins every codebook sigil below the `0`/`O`
+  confusability baseline. Measured: the current set already clears it (~1.5×), so
+  the recommended *swap* was unwarranted churn — the guard prevents regression
+  instead. The full atlas repaint stays deferred (broad parity cost, no measured
+  miss at the production font).
+
+Deferred with rationale (researched, not built):
+
+- **Damm/Verhoeff check character on sidecar values** (report rec #1). Marginal
+  here: the `verbatim` sidecar already ships exact strings as *text*, read
+  losslessly — no pixel round-trip left to protect, and no deterministic verifier
+  sees the model's output. It would add a character to every needle for a check
+  nothing in the MCP flow can run.
+- **ms-timestamp / base64 sidecar kinds** (Area 3). Correctly *excluded*:
+  timestamps recur on every log line (they would fill the 32-cap with non-grep
+  targets), and a generic base64 pattern false-positives across hashes/words and
+  guts compression. The measured `ms`/`base64` needle misses are the price of
+  that exclusion, not a bug.
+- **Paired RULER/LongBench-v2 reasoning A/B** (rec #3), **Drain/LogHub distill
+  benchmark** (rec #4), **Glyph-style render search + patch-grid alignment** (recs
+  #5/#7, Upgrades 2–3), **MinHash-LSH dedup** (rec #8), **LLMLingua prose mode**
+  (rec #9): real, but each needs a metered model loop or a larger build; tracked
+  above.

@@ -194,6 +194,7 @@ claims.
 ```
 npx tanuki-context estimate journal.log 0
 # { "imageTokens": 10752, "verdict": "PIPELINE cheaper",
+#   "fidelity": { "ratio": 4.8, "level": "high", "approxAccuracy": "~98%" },
 #   "recommend": { "codebook": true, "imageTokens": 8624, "pages": 6,
 #                  "table": false, "tinyImageTokens": 5208,
 #                  "withDistill": { "codebook": true, "imageTokens": 4256 } }, ... }
@@ -409,6 +410,7 @@ Nothing disappears silently.
 | `verbatim` | uuids/hashes/hex ids/ips/versions ship as a text sidecar next to the pages | grep-targets stay byte-exact; the verdict prices the sidecar honestly |
 | `recommend` | the estimate call walks all safe knob combos server-side | saves ~590 tokens of tool-call probing |
 | provider-real cost | `estimate {model}` counts image tokens by that provider's tile rule and prices its cache ratio | verdicts stop being Anthropic-only guesses |
+| fidelity band | `estimate` maps imaged density to DeepSeek-OCR's read-back curve (4x6 tiny floored to low) | flags a tier past the legibility cliff before you trust it |
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
 | append-stable pages | appending text never changes earlier pages | prompt caching keeps pricing them at cache rates |
 | stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |

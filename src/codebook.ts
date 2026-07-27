@@ -12,7 +12,7 @@
 
 import { charCount, cmpCodepoints, isRustWhitespace } from "./serde.ts";
 
-const SIGILS = "§¤¢£¥µ¶ª°±¬×÷ØÞßæðøþ¡¿";
+export const SIGILS = "§¤¢£¥µ¶ª°±¬×÷ØÞßæðøþ¡¿";
 const MIN_LEN = 12;
 const MIN_COUNT = 3;
 
