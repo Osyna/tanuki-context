@@ -162,6 +162,8 @@ Leave it alone when:
   (Opus 4.8 / Opus 5, 2026-07; Fable refuses). The `verbatim` sidecar
   (default on) pulls uuids/hashes/ids/ips/versions out as text automatically;
   secrets and edit-targets should still never be imaged.
+  Read one off a page anyway? `tanuki_verify` checks it against the stashed
+  original — exact, a corrected single-character misread, or absent — no model.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.
@@ -184,7 +186,7 @@ Leave it alone when:
 ## The three ways to run it
 
 **Explicit (MCP tools), the default and the recommendation.** Your AI gets
-seven tools. It calls `tanuki_estimate` on bulky text, reads the verdict,
+eight tools. It calls tanuki_estimate on bulky text, reads the verdict,
 and renders only when the pipeline wins. The model stays in charge and can
 see exactly what happened to every byte. The estimate answer prices the
 knobs for you: reversible ones as the headline, the lossy-but-counted
@@ -246,7 +248,7 @@ All modes run the same engine and log their savings to the same file, which
   Agent SDK glue (below), with a canned instruction block that teaches
   every agent the estimate-first habit.
 
-## The seven tools
+## The eight tools
 
 | tool              | what it does                                                | when to reach for it                     |
 | ----------------- | ----------------------------------------------------------- | ---------------------------------------- |
@@ -256,6 +258,7 @@ All modes run the same engine and log their savings to the same file, which
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
 | `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
 | `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big  | after a stash, when you actually need it |
+| `tanuki_verify`   | disk-grounded check of a value read off a page (exact/corrected/ambiguous/absent + line) | before quoting an id/hash you transcribed from pixels |
 | `tanuki_stats`    | totals from the session's savings log: optimistic + cache-aware bounds, output share, own furniture cost | end-of-session accounting                |
 
 ### Stash: the retrieval pattern, absorbed
@@ -414,6 +417,7 @@ Nothing disappears silently.
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
 | append-stable pages | appending text never changes earlier pages | prompt caching keeps pricing them at cache rates |
 | stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |
+| verify | `tanuki_verify` checks a transcribed value against the stashed original on disk | a silent misread becomes exact / corrected / absent — no model |
 | `run` wrapper | wrap any command; distilled output inline, full capture stashed | -70% of chars on chatty commands, before tokenization |
 | progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
 | output share | the proxy logs `output_tokens`; `tanuki_stats` reports the share | names the part of the bill no input-side tool can cut |

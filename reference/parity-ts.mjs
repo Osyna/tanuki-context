@@ -8,6 +8,7 @@ import { inflateSync } from "node:zlib";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
@@ -192,6 +193,10 @@ for (const file of files) {
 // --- MCP protocol parity on one canonical session
 console.log("\n== MCP session ==");
 const text = readFileSync(logFile, "utf8");
+// stash+verify parity: a controlled needle string so both engines derive the
+// same id (sha256 first 12 hex, per stash) and verify byte-identically.
+const vText = "alpha\nid 3451bd1b-13c4-4558-aa67-a62bc042905e beta\ngamma cafe1234 delta\n";
+const vId = createHash("sha256").update(vText, "utf8").digest("hex").slice(0, 12);
 const req = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
   { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -204,8 +209,11 @@ const req = [
   { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "tanuki_render", arguments: { text, level: 1 } } },
   { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "nope", arguments: {} } },
   { jsonrpc: "2.0", id: 10, method: "bogus/method" },
+  { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: vText } } },
+  { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "3451bd1b-13c4-4558-aa67-a62bc042905f" } } },
+  { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "cafe1234" } } },
 ];
-const env = { TANUKI_EVENTS: events };
+const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
   mcpSession(TS[0], [...TS.slice(1)], req, env),
   mcpSession(BIN, [], req, env),

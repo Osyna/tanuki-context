@@ -246,6 +246,15 @@ Two further properties:
   map 305 tok; the every-failure-line slice 4,704 as pages vs 22,111 as
   text. Storage is `$TANUKI_STASH` or `~/.tanuki/stash`, plain files, the
   user's own bytes.
+- **verify: the disk-grounded exact check.** The needle harness measures a
+  silent-miss rate the pages themselves cannot fix; `tanuki_verify` is the
+  recovery. Hand it a stash id and a value read off a page and it compares the
+  original bytes on disk — `exact` (with line), `corrected` (a unique
+  substitution-distance-1 neighbour, the character you misread), `ambiguous`,
+  or `absent`. No model in the loop, so a plausible-wrong-character becomes a
+  flagged one: the read-back number is a recall floor, not a corruption risk,
+  once a quote is verified. Parity-locked with Rust (same scan order, same
+  code-point math).
 - **table: whole-JSON columnar — the SmartCrusher answer.** The one domain
   where [headroom](https://github.com/headroomlabs-ai/headroom)'s
   SmartCrusher genuinely beat our line tools was structured JSON (60-95%

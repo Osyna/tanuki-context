@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { distillLog } from "./distill.ts";
-import { rustTrim, truncateChars } from "./serde.ts";
+import { cmpCodepoints, rustTrim, truncateChars } from "./serde.ts";
 
 function stashDir(): string {
   const env = process.env.TANUKI_STASH;
@@ -86,4 +86,80 @@ export function fetchSlice(id: string, query: string | null, lines: string | nul
     return segments.slice(a - 1, b).join("\n");
   }
   return distillLog(text, query, 2).distilled;
+}
+
+export interface VerifyResult {
+  status: "exact" | "corrected" | "ambiguous" | "absent";
+  line: number | null;
+  found: string | null;
+  candidates: string[];
+}
+
+/// ponytail: below this length a distance-1 neighborhood is mostly noise
+/// (every short string is one edit from dozens of others), so short values
+/// get an exact-or-absent answer only. Raise if a real value class needs it.
+const MIN_FUZZY_LEN = 4;
+const VERIFY_CAND_CAP = 8;
+
+/// Disk-grounded exact check for a value read off a rendered page. No model in
+/// the loop: the original bytes are already stashed, so a plausible-wrong-
+/// character misread becomes an `exact` match, a unique `corrected` string, an
+/// `ambiguous` shortlist, or an explicit `absent` flag - never a silent guess.
+/// Parity-locked with the Rust engine (same scan order, same code-point math).
+export function verifyValue(id: string, value: string): VerifyResult {
+  if (value === "") throw new Error("verify needs a non-empty value");
+  let text: string;
+  try {
+    text = readFileSync(`${stashDir()}/${id}`, "utf8");
+  } catch {
+    throw new Error(`unknown stash id: ${id}`);
+  }
+
+  const idx = text.indexOf(value);
+  if (idx >= 0) {
+    let line = 1;
+    for (let i = 0; i < idx; i++) {
+      if (text[i] === "\n") line++;
+    }
+    return { status: "exact", line, found: value, candidates: [] };
+  }
+
+  const val = [...value];
+  const n = val.length;
+  if (n < MIN_FUZZY_LEN) return { status: "absent", line: null, found: null, candidates: [] };
+
+  const cps = [...text];
+  // 1-based line of every code point, one pass.
+  const lineAt = new Int32Array(cps.length);
+  let ln = 1;
+  for (let i = 0; i < cps.length; i++) {
+    lineAt[i] = ln;
+    if (cps[i] === "\n") ln++;
+  }
+
+  // Substitution distance 1 only: the dominant dense-glyph misread (0/O, 5/S,
+  // 1/l) keeps the length, and a same-length window cannot match a fragment of
+  // a longer token the way an indel window would (ponytail: real insert/delete
+  // misreads would need token-boundary awareness; not worth it).
+  const found = new Map<string, number>();
+  if (n <= cps.length) {
+    for (let off = 0; off + n <= cps.length; off++) {
+      let d = 0;
+      for (let i = 0; i < n; i++) {
+        if (val[i] !== cps[off + i] && ++d > 1) break;
+      }
+      if (d === 1) {
+        const s = cps.slice(off, off + n).join("");
+        if (!found.has(s)) found.set(s, lineAt[off]);
+      }
+    }
+  }
+
+  if (found.size === 0) return { status: "absent", line: null, found: null, candidates: [] };
+  if (found.size === 1) {
+    const [s, line] = [...found][0];
+    return { status: "corrected", line, found: s, candidates: [] };
+  }
+  const candidates = [...found.keys()].sort(cmpCodepoints).slice(0, VERIFY_CAND_CAP);
+  return { status: "ambiguous", line: null, found: null, candidates };
 }
