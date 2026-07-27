@@ -4,18 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-
-/**
- * Marker for values Rust holds as f64: serde_json prints whole floats with a
- * trailing `.0` (`50.0`), which plain JS numbers lose. The custom serializer
- * in main.ts formats these like serde_json/ryu.
- */
-export class Float {
-  readonly value: number;
-  constructor(value: number) {
-    this.value = value;
-  }
-}
+import { Float, asU64, isObj, rnd } from "./serde.ts";
 
 export function eventsPath(): string {
   const p = process.env.TANUKI_EVENTS;
@@ -24,16 +13,6 @@ export function eventsPath(): string {
   }
   const home = process.env.HOME ?? "";
   return join(home, ".pxpipe", "events.jsonl");
-}
-
-/** serde_json `as_u64()`: only non-negative integer JSON numbers count. */
-function asU64(v: unknown): number {
-  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
-}
-
-/** Rust f64::round(): half away from zero. */
-function rnd(x: number): number {
-  return x < 0 ? -Math.round(-x) : Math.round(x);
 }
 
 export function pxStats(): object {
@@ -62,21 +41,18 @@ export function pxStats(): object {
       continue;
     }
     requests += 1;
-    const o =
-      e !== null && typeof e === "object" && !Array.isArray(e)
-        ? (e as Record<string, unknown>)
-        : {};
+    const o = isObj(e) ? e : {};
     if (o["compressed"] === true) {
       compressed += 1;
-      origChars += asU64(o["orig_chars"]);
-      images += asU64(o["image_count"]);
+      origChars += asU64(o["orig_chars"]) ?? 0;
+      images += asU64(o["image_count"]) ?? 0;
     }
-    baseline += asU64(o["baseline_tokens"]);
+    baseline += asU64(o["baseline_tokens"]) ?? 0;
     actual +=
-      asU64(o["input_tokens"]) +
-      asU64(o["cache_read_tokens"]) +
-      asU64(o["cache_create_tokens"]);
-    output += asU64(o["output_tokens"]);
+      (asU64(o["input_tokens"]) ?? 0) +
+      (asU64(o["cache_read_tokens"]) ?? 0) +
+      (asU64(o["cache_create_tokens"]) ?? 0);
+    output += asU64(o["output_tokens"]) ?? 0;
   }
   const saved =
     baseline > 0 && actual > 0

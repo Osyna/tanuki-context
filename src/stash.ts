@@ -10,7 +10,8 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
-import { distillLog, rustTrim, truncateChars } from "./distill.ts";
+import { distillLog } from "./distill.ts";
+import { rustTrim, truncateChars } from "./serde.ts";
 
 function stashDir(): string {
   const env = process.env.TANUKI_STASH;

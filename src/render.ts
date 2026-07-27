@@ -16,6 +16,7 @@
 
 import { CELL_H, CELL_W, coverage, coverageScaled, isWide, rank } from "./atlas.ts";
 import { encodeGray } from "./png.ts";
+import { charCount } from "./serde.ts";
 
 export const PAD_X = 4;
 export const PAD_Y = 4;
@@ -79,20 +80,6 @@ function cellsFor(cp: number): number {
   if (cp < 128) return ASCII_CELLS[cp];
   const r = rank(cp);
   return r >= 0 && isWide(r) ? 2 : 1;
-}
-
-/// Codepoint count (Rust chars().count()).
-function cpCount(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) {
-      const d = s.charCodeAt(i + 1);
-      if (d >= 0xdc00 && d < 0xe000) i++;
-    }
-    n++;
-  }
-  return n;
 }
 
 /// Strip trailing spaces/tabs per line, collapse 4+ consecutive \n to 3
@@ -210,7 +197,7 @@ export function splitPages(lines: string[], maxLines: number, maxChars: number):
   let cur: string[] = [];
   let curChars = 0;
   for (const line of lines) {
-    const n = cpCount(line);
+    const n = charCount(line);
     const lineChars = n + (cur.length !== 0 ? 1 : 0);
     if (cur.length !== 0 && (cur.length >= maxLines || curChars + lineChars > maxChars)) {
       pages.push(cur);

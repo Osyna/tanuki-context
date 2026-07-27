@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 //! tanuki-context — token-cutting context pipeline.
-//!   pipeline: text -> distill (stage 0, logs) -> ladder level 0-4 (stage 1)
-//!             -> pxpipe imaging (stage 2, name kept from the original mechanic)
+//!   pipeline: text -> table/distill (stage 0) -> codebook (stage 0.5)
+//!             -> ladder level 0-4 (stage 1) -> pxpipe imaging (stage 2)
 //!
 //! Default: MCP stdio server (newline-delimited JSON-RPC 2.0).
-//! CLI: tanuki-context distill <file> [query]
-//!      tanuki-context estimate <file> [level] [--distill]
-//!      tanuki-context render <file> [level] [outdir]
-//!      tanuki-context proxy [--port N] [--upstream URL] [knobs]   (implicit mode)
+//! CLI: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|run]
+//!      (usage strings live on each case below)
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -18,120 +16,15 @@ import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
-import { estimateText, parseFont, renderText } from "./render.ts";
+import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
+import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
 import { fetchSlice, stashText } from "./stash.ts";
-import { Float, pxStats } from "./stats.ts";
+import { pxStats } from "./stats.ts";
+import { TOOLS } from "./tools.ts";
 
-export const VERSION = "0.6.2";
+export const VERSION = "0.7.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
-
-// ------------------------------------------------------- serde_json parity
-
-/** Rust `String` Ord = UTF-8 byte order = code-point order (not UTF-16 unit order). */
-function keyCmp(a: string, b: string): number {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
-  if (i >= n) {
-    return a.length - b.length;
-  }
-  return a.codePointAt(i)! - b.codePointAt(i)!;
-}
-
-/** serde_json-compatible serializer (compact = `Display`, pretty = 2-space
- *  `to_string_pretty`). serde_json's default Map is a BTreeMap, so object keys
- *  serialize in byte-lexicographic order. Whole f64s (wrapped in `Float`)
- *  print as `50.0`. */
-export function jstring(v: unknown, pretty: boolean, indent = ""): string {
-  if (v === null || v === undefined) {
-    return "null";
-  }
-  if (v instanceof Float) {
-    const f = v.value;
-    return Number.isFinite(f) && Number.isInteger(f) ? f.toFixed(1) : String(f);
-  }
-  const t = typeof v;
-  if (t === "string") {
-    return JSON.stringify(v);
-  }
-  if (t === "number" || t === "boolean") {
-    return String(v);
-  }
-  if (Array.isArray(v)) {
-    if (v.length === 0) {
-      return "[]";
-    }
-    if (!pretty) {
-      let out = "[";
-      for (let i = 0; i < v.length; i++) {
-        if (i > 0) out += ",";
-        out += jstring(v[i], false);
-      }
-      return out + "]";
-    }
-    const inner = indent + "  ";
-    let out = "[\n";
-    for (let i = 0; i < v.length; i++) {
-      if (i > 0) out += ",\n";
-      out += inner + jstring(v[i], true, inner);
-    }
-    return out + "\n" + indent + "]";
-  }
-  const obj = v as Record<string, unknown>;
-  const keys = Object.keys(obj).sort(keyCmp);
-  if (keys.length === 0) {
-    return "{}";
-  }
-  if (!pretty) {
-    let out = "{";
-    for (let i = 0; i < keys.length; i++) {
-      if (i > 0) out += ",";
-      out += JSON.stringify(keys[i]) + ":" + jstring(obj[keys[i]], false);
-    }
-    return out + "}";
-  }
-  const inner = indent + "  ";
-  let out = "{\n";
-  for (let i = 0; i < keys.length; i++) {
-    if (i > 0) out += ",\n";
-    out += inner + JSON.stringify(keys[i]) + ": " + jstring(obj[keys[i]], true, inner);
-  }
-  return out + "\n" + indent + "}";
-}
-
-/** serde_json `Value` string index: Null for non-objects / missing keys. */
-function jget(v: unknown, key: string): unknown {
-  return v !== null && typeof v === "object" && !Array.isArray(v)
-    ? (v as Record<string, unknown>)[key]
-    : undefined;
-}
-
-function asStr(v: unknown): string | null {
-  return typeof v === "string" ? v : null;
-}
-
-function asBool(v: unknown): boolean | null {
-  return typeof v === "boolean" ? v : null;
-}
-
-function asU64(v: unknown): number | null {
-  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
-}
-
-/** Rust `chars().count()`: Unicode scalar values, not UTF-16 units. */
-function charCount(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    n++;
-    const c = s.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
-      const d = s.charCodeAt(i + 1);
-      if (d >= 0xdc00 && d <= 0xdfff) i++;
-    }
-  }
-  return n;
-}
 
 // ------------------------------------------------------------------ stages
 
@@ -185,16 +78,11 @@ function stage01(
   };
 }
 
-function textTokens(chars: number): number {
-  return Math.round(chars / 4.0);
-}
-
 function pct(from: number, to: number): number {
   if (from === 0) {
     return 0;
   }
-  const x = (1.0 - to / from) * 100.0;
-  return x < 0 ? -Math.round(-x) : Math.round(x); // f64::round: half away from zero
+  return rnd((1.0 - to / from) * 100.0);
 }
 
 // ---------------------------------------------------------------- MCP tools
@@ -308,6 +196,15 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   return out;
 }
 
+/// MCP image content blocks for rendered pages.
+function imageBlocks(pages: Page[]): unknown[] {
+  return pages.map((p) => ({
+    type: "image",
+    data: Buffer.from(p.png.buffer, p.png.byteOffset, p.png.byteLength).toString("base64"),
+    mimeType: "image/png",
+  }));
+}
+
 export function toolRender(args: unknown): unknown[] {
   const a = pipeArgs(args);
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
@@ -352,15 +249,7 @@ export function toolRender(args: unknown): unknown[] {
     summary += " · ↵ = newline · engine: pxpipe";
   }
   const content: unknown[] = [{ type: "text", text: summary }];
-  const inline = Math.min(r.pages.length, MAX_INLINE_PAGES);
-  for (let i = 0; i < inline; i++) {
-    const png = r.pages[i].png;
-    content.push({
-      type: "image",
-      data: Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64"),
-      mimeType: "image/png",
-    });
-  }
+  content.push(...imageBlocks(r.pages.slice(0, MAX_INLINE_PAGES)));
   if (r.pages.length > MAX_INLINE_PAGES) {
     content.push({ type: "text", text: `(+${r.pages.length - MAX_INLINE_PAGES} more page(s))` });
   }
@@ -419,120 +308,56 @@ export function toolStash(args: unknown): unknown[] {
   return [{ type: "text", text: s.overview }];
 }
 
-export function toolFetch(args: unknown): unknown[] {
-  const id = asStr(jget(args, "id")) ?? "";
-  const slice = fetchSlice(id, asStr(jget(args, "query")) ?? null, asStr(jget(args, "lines")) ?? null);
-  const rawTok = textTokens(charCount(slice));
-  const r = renderText(slice, true, true, parseFont("normal"));
-  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
-  if (!wins) {
-    return [{ type: "text", text: slice }];
-  }
-  const marker =
-    `[tanuki-context stash ${id}: slice of ${charCount(slice)} chars imaged as ${r.pages.length} PNG page(s), ` +
-    `~${r.tokens} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent]`;
-  const content: unknown[] = [{ type: "text", text: marker }];
-  for (const p of r.pages) {
-    const png = p.png;
-    content.push({
-      type: "image",
-      data: Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64"),
-      mimeType: "image/png",
-    });
-  }
-  return content;
+interface FetchResult {
+  slice: string;
+  rawTok: number;
+  r: Rendered;
+  wins: boolean;
 }
 
+/// Fetch a stash slice and decide the return shape (the tanuki_fetch
+/// contract): pages when they clearly win — >=25% and >=300 tokens cheaper,
+/// <=6 pages — text otherwise.
+function fetchRendered(id: string, query: string | null, lines: string | null): FetchResult {
+  const slice = fetchSlice(id, query, lines);
+  const rawTok = textTokens(charCount(slice));
+  const r = renderText(slice, true, true, "normal");
+  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
+  return { slice, rawTok, r, wins };
+}
+
+export function toolFetch(args: unknown): unknown[] {
+  const id = asStr(jget(args, "id")) ?? "";
+  const f = fetchRendered(id, asStr(jget(args, "query")), asStr(jget(args, "lines")));
+  if (!f.wins) {
+    return [{ type: "text", text: f.slice }];
+  }
+  const marker =
+    `[tanuki-context stash ${id}: slice of ${charCount(f.slice)} chars imaged as ${f.r.pages.length} PNG page(s), ` +
+    `~${f.r.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent]`;
+  return [{ type: "text", text: marker }, ...imageBlocks(f.r.pages)];
+}
+
+/// MCP tools/list, projected from the registry. The JSON schema layout is
+/// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
+/// of it (the pi/SDK projections carry them).
 function toolsList(): Record<string, unknown> {
-  const textProp = { type: "string" };
-  const levelSchema = { type: "integer", minimum: 0, maximum: 4 };
   return {
-    tools: [
-      {
-        name: "tanuki_render",
-        description:
-          "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            text: textProp,
-            level: levelSchema,
-            distill: { type: "boolean" },
-            query: { type: "string" },
-            reflow: { type: "boolean" },
-            pack: { type: "boolean" },
-            font: { type: "string", enum: ["normal", "tiny"] },
-            codebook: { type: "boolean" },
-            table: { type: "boolean" },
-          },
-          required: ["text"],
-        },
-      },
-      {
-        name: "tanuki_estimate",
-        description:
-          "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. One call replaces manual knob probing.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            text: textProp,
-            level: levelSchema,
-            distill: { type: "boolean" },
-            query: { type: "string" },
-            reflow: { type: "boolean" },
-            pack: { type: "boolean" },
-            font: { type: "string", enum: ["normal", "tiny"] },
-            codebook: { type: "boolean" },
-            table: { type: "boolean" },
-            model: { type: "string" },
-            cached: { type: "boolean" },
-          },
-          required: ["text"],
-        },
-      },
-      {
-        name: "tanuki_distill",
-        description:
-          "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. table:true first columnar-encodes whole-JSON input (keys stated once) so identical rows collapse harder. Deterministic, order-preserving.",
-        inputSchema: {
-          type: "object",
-          properties: { text: textProp, query: { type: "string" }, table: { type: "boolean" } },
-          required: ["text"],
-        },
-      },
-      {
-        name: "tanuki_compress",
-        description:
-          "Stage 1 alone: graded text compression for content that stays TEXT. level 0 none · 1 whitespace (lossless, safe for code) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths are preserved verbatim.",
-        inputSchema: {
-          type: "object",
-          properties: { text: textProp, level: levelSchema },
-          required: ["text"],
-        },
-      },
-      {
-        name: "tanuki_stats",
-        description:
-          "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates), and the output-token share of the bill — the part no input-side tool can cut.",
-        inputSchema: { type: "object", properties: {} },
-      },
-      {
-        name: "tanuki_stash",
-        description:
-          "Park bulky text outside the context window (content-addressed file under TANUKI_STASH or ~/.tanuki/stash) and get back a compact map: distill stats, top repeats, first/last lines, and the stash id. Pay a few hundred tokens now, fetch slices later - the retrieval pattern, with tanuki pricing on the way back.",
-        inputSchema: { type: "object", properties: { text: textProp }, required: ["text"] },
-      },
-      {
-        name: "tanuki_fetch",
-        description:
-          "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
-        inputSchema: {
-          type: "object",
-          properties: { id: { type: "string" }, query: { type: "string" }, lines: { type: "string" } },
-          required: ["id"],
-        },
-      },
-    ],
+    tools: TOOLS.map((t) => {
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
+      for (const p of t.params) {
+        const s: Record<string, unknown> = { type: p.type };
+        if (p.values !== undefined) s.enum = p.values;
+        if (p.min !== undefined) s.minimum = p.min;
+        if (p.max !== undefined) s.maximum = p.max;
+        properties[p.key] = s;
+        if (p.required === true) required.push(p.key);
+      }
+      const inputSchema: Record<string, unknown> = { type: "object", properties };
+      if (required.length > 0) inputSchema.required = required;
+      return { name: t.name, description: t.description, inputSchema };
+    }),
   };
 }
 
@@ -587,11 +412,7 @@ function handleLine(raw: string): void {
   } catch {
     return;
   }
-  const hasId =
-    msg !== null &&
-    typeof msg === "object" &&
-    !Array.isArray(msg) &&
-    Object.prototype.hasOwnProperty.call(msg, "id");
+  const hasId = isObj(msg) && Object.prototype.hasOwnProperty.call(msg, "id");
   const id = hasId ? ((msg as Record<string, unknown>)["id"] ?? null) : null;
   const method = asStr(jget(msg, "method"));
   let out: unknown;
@@ -672,6 +493,28 @@ function readFileOrDie(file: string): string {
   }
 }
 
+/** `--flag value` lookup: the value token after `flag`, or null. */
+function flagVal(argv: string[], flag: string): string | null {
+  const i = argv.indexOf(flag);
+  return i !== -1 && argv[i + 1] !== undefined ? argv[i + 1] : null;
+}
+
+/// Write pages as page<N>.png under dir (CLI render/fetch).
+function writePages(dir: string, pages: Page[]): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    fatal("mkdir");
+  }
+  for (let i = 0; i < pages.length; i++) {
+    try {
+      writeFileSync(`${dir}/page${i}.png`, pages[i].png);
+    } catch {
+      fatal("write png");
+    }
+  }
+}
+
 /** Rust uint FromStr: optional '+', digits only, overflow -> Err. */
 function parseUint(s: string, max: bigint): number | null {
   if (!/^\+?[0-9]+$/.test(s)) {
@@ -709,10 +552,8 @@ export function main(): void {
       const text = readFileOrDie(file);
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
       const level = pos.length > 0 ? (parseUint(pos[0], U64_MAX) ?? 0) : 0;
-      const fi = argv.indexOf("--font");
-      const font = fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal";
-      const mi = argv.indexOf("--model");
-      const model = mi !== -1 && argv[mi + 1] !== undefined ? argv[mi + 1] : null;
+      const font = flagVal(argv, "--font") ?? "normal";
+      const model = flagVal(argv, "--model");
       const v = toolEstimate({
         text,
         level,
@@ -738,8 +579,7 @@ export function main(): void {
       const level = pos.length > 0 ? (parseUint(pos[0], U8_MAX) ?? 0) : 0;
       const pack = !argv.includes("--no-pack");
       const useCb = argv.includes("--codebook");
-      const fi = argv.indexOf("--font");
-      const font = parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal");
+      const font = parseFont(flagVal(argv, "--font") ?? "normal");
       const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
       const tok = r.tokens;
@@ -756,18 +596,7 @@ export function main(): void {
       );
       const dir = pos[1];
       if (dir !== undefined) {
-        try {
-          mkdirSync(dir, { recursive: true });
-        } catch {
-          fatal("mkdir");
-        }
-        for (let i = 0; i < r.pages.length; i++) {
-          try {
-            writeFileSync(`${dir}/page${i}.png`, r.pages[i].png);
-          } catch {
-            fatal("write png");
-          }
-        }
+        writePages(dir, r.pages);
       }
       break;
     }
@@ -817,24 +646,22 @@ export function main(): void {
     }
     case "proxy": {
       const num = (flag: string, dflt: number): number => {
-        const i = argv.indexOf(flag);
-        if (i === -1 || argv[i + 1] === undefined) return dflt;
-        const v = Number(argv[i + 1]);
+        const s = flagVal(argv, flag);
+        if (s === null) return dflt;
+        const v = Number(s);
         return Number.isFinite(v) ? v : dflt;
       };
-      const ui = argv.indexOf("--upstream");
-      const fi = argv.indexOf("--font");
       startProxy({
         port: num("--port", 8484),
         upstream:
-          ui !== -1 && argv[ui + 1] !== undefined
-            ? argv[ui + 1]
-            : (process.env.TANUKI_UPSTREAM ?? "https://api.anthropic.com"),
+          flagVal(argv, "--upstream") ??
+          process.env.TANUKI_UPSTREAM ??
+          "https://api.anthropic.com",
         level: num("--level", PROXY_DEFAULTS.level),
         distill: argv.includes("--distill"),
         table: argv.includes("--table"),
         codebook: argv.includes("--codebook"),
-        font: parseFont(fi !== -1 && argv[fi + 1] !== undefined ? argv[fi + 1] : "normal"),
+        font: parseFont(flagVal(argv, "--font") ?? "normal"),
         minChars: num("--min-chars", PROXY_DEFAULTS.minChars),
         ratio: num("--ratio", PROXY_DEFAULTS.ratio),
         minSave: num("--min-save", PROXY_DEFAULTS.minSave),
@@ -850,45 +677,30 @@ export function main(): void {
     }
     case "fetch": {
       const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]");
-      const qi = argv.indexOf("--query");
-      const li = argv.indexOf("--lines");
-      let slice = "";
+      let f: FetchResult;
       try {
-        slice = fetchSlice(id, qi !== -1 ? (argv[qi + 1] ?? null) : null, li !== -1 ? (argv[li + 1] ?? null) : null);
+        f = fetchRendered(id, flagVal(argv, "--query"), flagVal(argv, "--lines"));
       } catch (e) {
         fatal(e instanceof Error ? e.message : String(e));
       }
-      const rawTok = textTokens(charCount(slice));
-      const r = renderText(slice, true, true, parseFont("normal"));
-      const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6;
-      if (!wins) {
-        process.stdout.write(jstring({ mode: "text" }, false) + "\n" + slice + "\n");
+      if (!f.wins) {
+        process.stdout.write(jstring({ mode: "text" }, false) + "\n" + f.slice + "\n");
         break;
       }
       process.stdout.write(
-        jstring({ imageTokens: r.tokens, mode: "pages", pages: r.pages.length, rawTextTokens: rawTok }, false) + "\n",
+        jstring({ imageTokens: f.r.tokens, mode: "pages", pages: f.r.pages.length, rawTextTokens: f.rawTok }, false) + "\n",
       );
-      const flagVals = new Set([qi + 1, li + 1]);
       let dir: string | undefined;
       for (let i = 3; i < argv.length; i++) {
-        if (!argv[i].startsWith("--") && !flagVals.has(i)) {
-          dir = argv[i];
-          break;
+        if (argv[i].startsWith("--")) {
+          if (argv[i] === "--query" || argv[i] === "--lines") i++;
+          continue;
         }
+        dir = argv[i];
+        break;
       }
       if (dir !== undefined) {
-        try {
-          mkdirSync(dir, { recursive: true });
-        } catch {
-          fatal("mkdir");
-        }
-        for (let i = 0; i < r.pages.length; i++) {
-          try {
-            writeFileSync(`${dir}/page${i}.png`, r.pages[i].png);
-          } catch {
-            fatal("write png");
-          }
-        }
+        writePages(dir, f.r.pages);
       }
       break;
     }
@@ -899,8 +711,7 @@ export function main(): void {
       const sep = argv.indexOf("--");
       const cmd = sep !== -1 ? argv.slice(sep + 1) : [];
       if (cmd.length === 0) fatal("usage: tanuki-context run [--query re] -- <command> [args...]");
-      const qi = argv.indexOf("--query");
-      const query = qi !== -1 && qi < sep ? (argv[qi + 1] ?? null) : null;
+      const query = flagVal(argv.slice(0, sep), "--query");
       const r = spawnSync(cmd[0], cmd.slice(1), { encoding: "utf8", maxBuffer: 1 << 28 });
       if (r.error !== undefined) fatal(`spawn failed: ${r.error.message}`);
       const captured =
