@@ -26,21 +26,23 @@ pub struct Rate {
     pub input: f64,
     pub output: f64,
     pub cache_read_mult: f64,
+    pub cache_write_mult: f64,
     pub image_mult: f64,
     pub family: Family,
 }
 
 fn base_rate(key: &str) -> Rate {
     match key {
-        // Anthropic — cache-read 0.1×, image tokens billed at the input rate (1×).
-        "opus" => Rate { input: 15.0, output: 75.0, cache_read_mult: 0.1, image_mult: 1.0, family: Family::Anthropic },
-        "sonnet" => Rate { input: 3.0, output: 15.0, cache_read_mult: 0.1, image_mult: 1.0, family: Family::Anthropic },
-        "haiku" => Rate { input: 1.0, output: 5.0, cache_read_mult: 0.1, image_mult: 1.0, family: Family::Anthropic },
+        // Anthropic — cache-read 0.1×, cache-write 1.25×, image tokens at the input rate (1×).
+        "opus" => Rate { input: 15.0, output: 75.0, cache_read_mult: 0.1, cache_write_mult: 1.25, image_mult: 1.0, family: Family::Anthropic },
+        "sonnet" => Rate { input: 3.0, output: 15.0, cache_read_mult: 0.1, cache_write_mult: 1.25, image_mult: 1.0, family: Family::Anthropic },
+        "haiku" => Rate { input: 1.0, output: 5.0, cache_read_mult: 0.1, cache_write_mult: 1.25, image_mult: 1.0, family: Family::Anthropic },
         // Non-Anthropic — image tokens are COUNTED by that provider's tile rule when
-        // page dims are supplied; cache discounts differ (OpenAI 0.5×, Gemini 0.25×).
-        "gpt" => Rate { input: 1.25, output: 10.0, cache_read_mult: 0.5, image_mult: 1.0, family: Family::Openai },
-        "gemini" => Rate { input: 1.25, output: 10.0, cache_read_mult: 0.25, image_mult: 1.0, family: Family::Gemini },
-        _ => Rate { input: 3.0, output: 15.0, cache_read_mult: 0.1, image_mult: 1.0, family: Family::Anthropic },
+        // page dims are supplied; cache discounts differ (OpenAI reads 0.1×, writes 1.25×;
+        // Gemini implicit caching reads 0.25×, no per-token write premium — storage-fee model).
+        "gpt" => Rate { input: 1.25, output: 10.0, cache_read_mult: 0.1, cache_write_mult: 1.25, image_mult: 1.0, family: Family::Openai },
+        "gemini" => Rate { input: 1.25, output: 10.0, cache_read_mult: 0.25, cache_write_mult: 1.0, image_mult: 1.0, family: Family::Gemini },
+        _ => Rate { input: 3.0, output: 15.0, cache_read_mult: 0.1, cache_write_mult: 1.25, image_mult: 1.0, family: Family::Anthropic },
     }
 }
 
@@ -54,6 +56,7 @@ fn rate_for(key: &str) -> Rate {
                 if let Some(v) = o.get("input").and_then(|x| x.as_f64()) { r.input = v; }
                 if let Some(v) = o.get("output").and_then(|x| x.as_f64()) { r.output = v; }
                 if let Some(v) = o.get("cacheReadMult").and_then(|x| x.as_f64()) { r.cache_read_mult = v; }
+                if let Some(v) = o.get("cacheWriteMult").and_then(|x| x.as_f64()) { r.cache_write_mult = v; }
                 if let Some(v) = o.get("imageMult").and_then(|x| x.as_f64()) { r.image_mult = v; }
                 match o.get("family").and_then(|x| x.as_str()) {
                     Some("anthropic") => r.family = Family::Anthropic,
@@ -79,7 +82,7 @@ pub fn resolve_rate(model: Option<&str>) -> (&'static str, Rate) {
 }
 
 /// Rust f64::round: half away from zero (matches stats/main pct).
-fn rnd(x: f64) -> i64 {
+pub(crate) fn rnd(x: f64) -> i64 {
     if x < 0.0 { -((-x).round() as i64) } else { x.round() as i64 }
 }
 fn usd(x: f64) -> f64 {
@@ -132,7 +135,10 @@ pub fn cost_verdict(
     };
     let in_usd = rate.input / 1e6;
     let text_rate = in_usd * if cached { rate.cache_read_mult } else { 1.0 };
-    let img_rate = in_usd * rate.image_mult;
+    // The flip cost, priced: when the text is already cached, fresh pages are a
+    // cache WRITE (~1.25×), not plain input — the suffix-invalidation premium
+    // the blog math demands. Uncached, both sides are fresh input: no premium.
+    let img_rate = in_usd * rate.image_mult * if cached { rate.cache_write_mult } else { 1.0 };
     let text_usd = text_tokens as f64 * text_rate;
     let image_usd = counted as f64 * img_rate;
     let breakeven: i64 = if img_rate > 0.0 {
@@ -164,8 +170,8 @@ pub fn cost_verdict(
     }
     if cached {
         notes.push(format!(
-            "text priced at cache-read rate ({}× input); imaging already-cached content usually loses",
-            rate.cache_read_mult
+            "text priced at cache-read rate ({}× input), fresh pages at the cache-write rate ({}× input); imaging already-cached content usually loses",
+            rate.cache_read_mult, rate.cache_write_mult
         ));
     }
     json!({
@@ -202,10 +208,10 @@ mod tests {
         let a = cost_verdict(1000, 400, Some("claude-opus-4"), false, None);
         assert_eq!(a["cheaper"], "PIPELINE");
         assert_eq!(a["breakevenImageTokens"], 1000);
-        // cached: text at 0.1× beats 400 image tokens
+        // cached: text reads at 0.1×, pages would be a 1.25× cache write
         let b = cost_verdict(1000, 400, Some("claude-opus-4"), true, None);
         assert_eq!(b["cheaper"], "TEXT");
-        assert_eq!(b["breakevenImageTokens"], 100);
+        assert_eq!(b["breakevenImageTokens"], 80);
         assert!(b["note"].as_str().unwrap().contains("cache-read"));
         // deep cut still wins when cached
         let c = cost_verdict(1000, 50, Some("opus"), true, None);
@@ -221,7 +227,7 @@ mod tests {
         let _env = env_lock();
         std::env::set_var("TANUKI_RATES", r#"{"opus":{"cacheReadMult":0.5}}"#);
         let o = cost_verdict(1000, 400, Some("opus"), true, None);
-        assert_eq!(o["breakevenImageTokens"], 500);
+        assert_eq!(o["breakevenImageTokens"], 400);
         std::env::remove_var("TANUKI_RATES");
     }
 

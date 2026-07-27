@@ -65,6 +65,10 @@ struct ImagedBlock {
     orig_chars: usize,
     pages: usize,
     saved_tokens: i64,
+    /// inputs for the cache-aware ledger: what the block would have cost as
+    /// text and what the replacement costs, both in tokens.
+    raw_tok: u64,
+    cost_tok: u64,
 }
 
 /// Stage 0/0.5/1 + imaging for one text block, or None when text stays cheaper.
@@ -94,21 +98,28 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
 
     let raw_tok = ((orig_chars as f64) / 4.0).round() as u64;
     let r = render::render_text(&working, true, true, cfg.font);
+    let side = crate::needles::scan_needles(&working);
+    let cost = r.tokens + side.tokens;
     if r.pages.len() > cfg.max_pages {
         return None;
     }
-    let saved = raw_tok as i64 - r.tokens as i64;
-    if r.tokens as f64 > raw_tok as f64 * cfg.ratio || saved < cfg.min_save {
+    let saved = raw_tok as i64 - cost as i64;
+    if cost as f64 > raw_tok as f64 * cfg.ratio || saved < cfg.min_save {
         return None;
     }
 
     let mut marker = format!(
-        "[tanuki-context: {orig_chars} chars imaged in place as {} PNG page(s), ~{} vs ~{raw_tok} text tokens. \u{21b5}=newline \u{2192}=tab \u{21e5}N=indent",
+        "[tanuki-context: {orig_chars} chars imaged in place as {} PNG page(s), ~{cost} vs ~{raw_tok} text tokens. \u{21b5}=newline \u{2192}=tab \u{21e5}N=indent",
         r.pages.len(),
-        r.tokens,
     );
     if cb_entries > 0 {
         marker.push_str(&format!("; \u{b7}legend\u{b7} line maps {cb_entries} sigils"));
+    }
+    if !side.needles.is_empty() {
+        marker.push_str(&format!(
+            "; \u{b7}verbatim\u{b7} below carries {} exact strings as text",
+            side.needles.len() + side.more
+        ));
     }
     marker.push(']');
 
@@ -121,11 +132,16 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
             "source": { "type": "base64", "media_type": "image/png", "data": b64.encode(&p.png) },
         }));
     }
+    if !side.text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": side.text }));
+    }
     Some(ImagedBlock {
         blocks,
         orig_chars,
         pages: r.pages.len(),
         saved_tokens: saved,
+        raw_tok,
+        cost_tok: cost,
     })
 }
 
@@ -136,11 +152,61 @@ pub struct TransformResult {
     pub orig_chars: u64,
     pub image_count: u64,
     pub saved_tokens: i64,
+    /// saved_tokens with the session's cache state priced in (can be negative:
+    /// the first text->pages flip of a cached block is a real cost).
+    pub saved_tokens_cache_aware: i64,
+}
+
+/// Cross-request memory, LEDGER-ONLY by construction: it never changes the
+/// emitted bytes (a cross-request rewrite would bust the client's prompt
+/// cache). It exists so the savings log can price a replayed block at the
+/// cache-read rate instead of pretending every avoided token was full-price
+/// input — the counterfactual-accounting hole the rakuen post names.
+pub struct ProxySession {
+    /// sha256 of block texts imaged in EARLIER requests this session.
+    pub seen_blocks: std::collections::HashSet<String>,
+    /// a prior response showed cache traffic (cache_read/cache_creation > 0).
+    pub caching_seen: bool,
+}
+
+impl ProxySession {
+    pub fn new() -> Self {
+        ProxySession { seen_blocks: std::collections::HashSet::new(), caching_seen: false }
+    }
+}
+
+/// Cache-aware tokens saved by one replaced block. Rules, mirrored in the
+/// TS engine byte-for-byte:
+///   no cache traffic seen  -> the raw count (nothing to discount);
+///   block replayed         -> both sides ride cache reads: saved × readMult;
+///   first flip of a block  -> avoided text was a cache read, the new pages
+///                             are a fresh cache WRITE: read-priced saving
+///                             minus write-priced cost. Usually negative —
+///                             that is the point.
+fn cache_aware_saved(
+    raw_tok: u64,
+    cost_tok: u64,
+    replayed: bool,
+    caching_seen: bool,
+    read_mult: f64,
+    write_mult: f64,
+) -> i64 {
+    if !caching_seen {
+        return raw_tok as i64 - cost_tok as i64;
+    }
+    if replayed {
+        return crate::cost::rnd((raw_tok as f64 - cost_tok as f64) * read_mult);
+    }
+    crate::cost::rnd(raw_tok as f64 * read_mult) - crate::cost::rnd(cost_tok as f64 * write_mult)
 }
 
 /// Rewrite a /v1/messages body. Returns None when nothing changed (caller
 /// forwards the original bytes untouched).
-pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResult> {
+pub fn transform_request_body(
+    raw: &str,
+    cfg: &ProxyCfg,
+    mut session: Option<&mut ProxySession>,
+) -> Option<TransformResult> {
     let mut body: Value = serde_json::from_str(raw).ok()?;
     let msg_count = body.get("messages")?.as_array()?.len();
 
@@ -148,28 +214,63 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
     let mut orig_chars = 0u64;
     let mut image_count = 0u64;
     let mut saved_tokens = 0i64;
+    let mut saved_tokens_cache_aware = 0i64;
+    // provider ratios for the cache-aware ledger, from the request's own model
+    let rate = crate::cost::resolve_rate(body.get("model").and_then(|m| m.as_str())).1;
     // Exact-repeat dedupe: block text -> page count, recorded only when a
     // block is actually imaged in THIS request. A later byte-identical block
     // that reaches the funnel becomes one short marker, no repeated pages.
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut funnel = |text: &str| -> Option<Vec<Value>> {
         let tok = |chars: usize| ((chars as f64) / 4.0).round() as i64;
-        if let Some(&pages) = seen.get(text) {
+        let done: ImagedBlock = if let Some(&pages) = seen.get(text) {
             let chars = text.chars().count();
             let marker = format!(
                 "[tanuki-context: {chars} chars, byte-identical to a block imaged above ({pages} PNG page(s)); not repeated]"
             );
-            imaged_blocks += 1;
-            orig_chars += chars as u64;
-            saved_tokens += tok(chars) - tok(marker.chars().count());
-            return Some(vec![json!({ "type": "text", "text": marker })]);
-        }
-        let done = maybe_image(text, cfg)?;
-        seen.insert(text.to_string(), done.pages);
+            ImagedBlock {
+                blocks: vec![json!({ "type": "text", "text": marker })],
+                orig_chars: chars,
+                pages: 0,
+                saved_tokens: tok(chars) - tok(marker.chars().count()),
+                raw_tok: ((chars as f64) / 4.0).round() as u64,
+                cost_tok: ((marker.chars().count() as f64) / 4.0).round() as u64,
+            }
+        } else {
+            let done = maybe_image(text, cfg)?;
+            seen.insert(text.to_string(), done.pages);
+            done
+        };
         imaged_blocks += 1;
         orig_chars += done.orig_chars as u64;
         image_count += done.pages as u64;
         saved_tokens += done.saved_tokens;
+        // ledger only, never bytes: was this exact block imaged in an earlier
+        // request of this session?
+        let hash = crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
+        let (replayed, caching_seen) = match session.as_deref_mut() {
+            Some(s) => (s.seen_blocks.contains(&hash), s.caching_seen),
+            None => (false, false),
+        };
+        saved_tokens_cache_aware += cache_aware_saved(
+            done.raw_tok,
+            done.cost_tok,
+            replayed,
+            caching_seen,
+            rate.cache_read_mult,
+            rate.cache_write_mult,
+        );
+        if let Some(s) = session.as_deref_mut() {
+            if !replayed {
+                // ponytail: bounded memory — at 1024 entries start a fresh window;
+                // old blocks then re-count as first flips, which only UNDERSTATES
+                // savings. Mirrored exactly in the TS engine.
+                if s.seen_blocks.len() >= 1024 {
+                    s.seen_blocks.clear();
+                }
+                s.seen_blocks.insert(hash);
+            }
+        }
         Some(done.blocks)
     };
 
@@ -248,6 +349,7 @@ pub fn transform_request_body(raw: &str, cfg: &ProxyCfg) -> Option<TransformResu
         orig_chars,
         image_count,
         saved_tokens,
+        saved_tokens_cache_aware,
     })
 }
 
@@ -319,7 +421,12 @@ fn upstream_origin(upstream: &str) -> &str {
     }
 }
 
-fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) {
+fn handle(
+    mut request: tiny_http::Request,
+    cfg: &ProxyCfg,
+    agent: &ureq::Agent,
+    session: &Mutex<ProxySession>,
+) {
     let mut body_buf: Vec<u8> = Vec::new();
     let _ = request.as_reader().read_to_end(&mut body_buf);
 
@@ -337,7 +444,8 @@ fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) 
     let mut tstats: Option<TransformResult> = None;
     if is_messages {
         if let Ok(text) = std::str::from_utf8(&body_buf) {
-            tstats = transform_request_body(text, cfg);
+            let mut guard = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            tstats = transform_request_body(text, cfg, Some(&mut guard));
         }
         if let Some(s) = &tstats {
             body_buf = s.body.clone().into_bytes();
@@ -419,6 +527,13 @@ fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) 
         let text = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
         let (input, cache_read, cache_create, output) = scrape_usage(&text);
         let actual = input + cache_read + cache_create;
+        let caching_seen = {
+            let mut guard = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cache_read > 0 || cache_create > 0 {
+                guard.caching_seen = true;
+            }
+            guard.caching_seen
+        };
         log_event(&json!({
             "ts": now_ms(),
             "tool": "proxy",
@@ -428,6 +543,11 @@ fn handle(mut request: tiny_http::Request, cfg: &ProxyCfg, agent: &ureq::Agent) 
             // baseline names its denominator: what Anthropic billed plus
             // what the imaged blocks would have added as text (estimate).
             "baseline_tokens": actual as i64 + tstats.as_ref().map_or(0, |s| s.saved_tokens),
+            // the same estimate with the session's observed cache state
+            // priced in (replays at the cache-read rate, first flips
+            // charged the cache-write premium). Can be negative.
+            "saved_tokens_cache_aware": tstats.as_ref().map_or(0, |s| s.saved_tokens_cache_aware),
+            "caching_seen": caching_seen,
             "input_tokens": input,
             "cache_read_tokens": cache_read,
             "cache_create_tokens": cache_create,
@@ -486,10 +606,13 @@ pub fn bound_port(server: &tiny_http::Server) -> u16 {
 pub fn serve(server: tiny_http::Server, cfg: ProxyCfg) {
     let cfg = Arc::new(cfg);
     let agent = ureq::AgentBuilder::new().redirects(0).build();
+    // one ledger session per proxy process: replay detection + cache evidence
+    let session = Arc::new(Mutex::new(ProxySession::new()));
     for request in server.incoming_requests() {
         let cfg = Arc::clone(&cfg);
         let agent = agent.clone();
-        std::thread::spawn(move || handle(request, &cfg, &agent));
+        let session = Arc::clone(&session);
+        std::thread::spawn(move || handle(request, &cfg, &agent, &session));
     }
 }
 
@@ -556,7 +679,7 @@ mod tests {
             ],
         })
         .to_string();
-        let r = transform_request_body(&body, &cfg()).expect("oversized block must transform");
+        let r = transform_request_body(&body, &cfg(), None).expect("oversized block must transform");
         let out: Value = serde_json::from_str(&r.body).unwrap();
 
         assert_eq!(out["system"], "SYSTEM PROMPT"); // rule 1
@@ -581,7 +704,7 @@ mod tests {
     #[test]
     fn latest_message_never_imaged() {
         let body = json!({ "messages": [msg("user", json!(big()))] }).to_string();
-        assert!(transform_request_body(&body, &cfg()).is_none());
+        assert!(transform_request_body(&body, &cfg(), None).is_none());
     }
 
     #[test]
@@ -591,15 +714,15 @@ mod tests {
             msg("user", json!("latest")),
         ] })
         .to_string();
-        assert!(transform_request_body(&body, &cfg()).is_none()); // rule 4
+        assert!(transform_request_body(&body, &cfg(), None).is_none()); // rule 4
     }
 
     #[test]
     fn small_and_non_message_bodies_pass_through() {
         let small = json!({ "messages": [msg("user", json!("just a short note")), msg("user", json!("x"))] });
-        assert!(transform_request_body(&small.to_string(), &cfg()).is_none());
-        assert!(transform_request_body(r#"{"model":"m"}"#, &cfg()).is_none());
-        assert!(transform_request_body("not json", &cfg()).is_none());
+        assert!(transform_request_body(&small.to_string(), &cfg(), None).is_none());
+        assert!(transform_request_body(r#"{"model":"m"}"#, &cfg(), None).is_none());
+        assert!(transform_request_body("not json", &cfg(), None).is_none());
     }
 
     #[test]
@@ -609,7 +732,7 @@ mod tests {
             msg("user", json!("latest")),
         ] })
         .to_string();
-        let r = transform_request_body(&body, &cfg()).expect("tool_result must transform");
+        let r = transform_request_body(&body, &cfg(), None).expect("tool_result must transform");
         let out: Value = serde_json::from_str(&r.body).unwrap();
         let c = out["messages"][0]["content"].as_array().unwrap();
         assert_eq!(c[0]["type"], "tool_result");
@@ -624,7 +747,7 @@ mod tests {
         let b = big();
         let body = json!({ "messages": [msg("user", json!(b)), msg("user", json!("latest"))] })
             .to_string();
-        let r = transform_request_body(&body, &cfg()).expect("string content must transform");
+        let r = transform_request_body(&body, &cfg(), None).expect("string content must transform");
         let out: Value = serde_json::from_str(&r.body).unwrap();
         let c = out["messages"][0]["content"].as_array().unwrap();
         assert_eq!(c[0]["text"], expected_marker(&b));
@@ -649,7 +772,7 @@ mod tests {
             msg("user", json!("latest")),
         ] })
         .to_string();
-        let r = transform_request_body(&body, &cfg()).expect("dupe request must transform");
+        let r = transform_request_body(&body, &cfg(), None).expect("dupe request must transform");
         let out: Value = serde_json::from_str(&r.body).unwrap();
 
         // first occurrence: normal marker + PNG pages
@@ -694,7 +817,7 @@ mod tests {
             msg("user", json!("latest")),
         ] })
         .to_string();
-        let r = transform_request_body(&body, &cfg()).expect("both blocks must transform");
+        let r = transform_request_body(&body, &cfg(), None).expect("both blocks must transform");
         let out: Value = serde_json::from_str(&r.body).unwrap();
         for i in 0..2 {
             let c = out["messages"][i]["content"].as_array().unwrap();
