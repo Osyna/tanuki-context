@@ -9,8 +9,8 @@ Tokens are chars/4 after each stage. L1 and table are lossless; L2-L4 reword pro
 | service log (synthetic, seeded) | 37,111 | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | **12,902** (-65%) | n/a |
 | journalctl JSON (synthetic, seeded) | 32,534 | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | **8,771** (-73%) | 23,032 (-29%) |
 | npm install log (synthetic, seeded) | 40,514 | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | **2,967** (-93%) | n/a |
-| TypeScript source (src/main.ts) | 6,524 | 6,524 (0%) | 6,519 (0%) | 6,504 (0%) | 6,485 (-1%) | **5,384** (-17%) | n/a |
-| design doc (DESIGN.md) | 7,449 | 7,449 (0%) | 7,447 (0%) | 7,283 (-2%) | **7,075** (-5%) | 7,477 (0%) | n/a |
+| TypeScript source (src/main.ts) | 6,974 | 6,974 (0%) | 6,969 (0%) | 6,954 (0%) | 6,935 (-1%) | **5,773** (-17%) | n/a |
+| design doc (DESIGN.md) | 8,161 | 8,161 (0%) | 8,159 (0%) | 7,993 (-2%) | **7,785** (-5%) | 8,189 (0%) | n/a |
 
 ### Table B. Text becomes pixels: pxpipe baseline and every tanuki knob
 
@@ -21,8 +21,8 @@ Image tokens, exact page geometry. The pxpipe column is the extensions-off mode 
 | service log (synthetic, seeded) | 37,111 | 7,840 (-79%) | 7,840 (-79%) | 6,328 (-83%) | n/a | **6,328** (-83%) pack+codebook | 2,240 (-94%) | 3,808 (-90%) |
 | journalctl JSON (synthetic, seeded) | 32,534 | 6,832 (-79%) | 6,832 (-79%) | 6,664 (-80%) | 3,920 (-88%) | **3,920** (-88%) pack+codebook+table | 1,120 (-97%) | 2,352 (-93%) |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 (-79%) | 8,512 (-79%) | 7,336 (-82%) | n/a | **7,336** (-82%) pack+codebook | 560 (-99%) | 4,368 (-89%) |
-| TypeScript source (src/main.ts) | 6,524 | 1,400 (-79%) | 1,288 (-80%) | 1,232 (-81%) | n/a | **1,232** (-81%) pack+codebook | 1,064 (-84%) | 728 (-89%) |
-| design doc (DESIGN.md) | 7,449 | 1,624 (-78%) | 1,624 (-78%) | 1,568 (-79%) | n/a | **1,568** (-79%) pack+codebook | 1,624 (-78%) | 952 (-87%) |
+| TypeScript source (src/main.ts) | 6,974 | 1,456 (-79%) | 1,400 (-80%) | 1,344 (-81%) | n/a | **1,344** (-81%) pack+codebook | 1,120 (-84%) | 784 (-89%) |
+| design doc (DESIGN.md) | 8,161 | 1,736 (-79%) | 1,736 (-79%) | 1,736 (-79%) | n/a | **1,736** (-79%) pack | 1,736 (-79%) | 1,064 (-87%) |
 
 ### Table C. Winners
 
@@ -33,8 +33,8 @@ Two verdicts per corpus, because the eligible tiers differ by content. When the 
 | service log (synthetic, seeded) | 37,111 | 7,840 | 6,328 pack+codebook | 2,240 | **tanuki distill route** | -71% |
 | journalctl JSON (synthetic, seeded) | 23,032 | 6,832 | 3,920 pack+codebook+table | 1,120 | **tanuki distill route** | -84% |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 | 7,336 pack+codebook | 560 | **tanuki distill route** | -93% |
-| TypeScript source (src/main.ts) | 6,524 | 1,400 | 1,232 pack+codebook | not eligible | **tanuki pack+codebook** | -12% |
-| design doc (DESIGN.md) | 7,449 | 1,624 | 1,568 pack+codebook | not eligible | **tanuki pack+codebook** | -3% |
+| TypeScript source (src/main.ts) | 6,974 | 1,456 | 1,344 pack+codebook | not eligible | **tanuki pack+codebook** | -8% |
+| design doc (DESIGN.md) | 8,161 | 1,736 | 1,736 pack | not eligible | **pxpipe** | 0% |
 
-Corpora: service log (synthetic, seeded) (145 KB); journalctl JSON (synthetic, seeded) (127 KB); npm install log (synthetic, seeded) (158 KB); TypeScript source (src/main.ts) (25 KB); design doc (DESIGN.md) (29 KB).
-Synthetic files were written to /tmp/tanuki-tiers-ke9WAG so you can rerun any single cell by hand.
+Corpora: service log (synthetic, seeded) (145 KB); journalctl JSON (synthetic, seeded) (127 KB); npm install log (synthetic, seeded) (158 KB); TypeScript source (src/main.ts) (27 KB); design doc (DESIGN.md) (32 KB).
+Synthetic files were written to /tmp/tanuki-tiers-CTd8WL so you can rerun any single cell by hand.

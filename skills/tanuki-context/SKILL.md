@@ -55,9 +55,12 @@ verbatim, and every drop is counted.
 5. **Shell commands with chatty output**: run them as
    `tanuki-context run -- <cmd>` instead of reading the firehose. Exit code
    passes through; the full capture is stashed and fetchable.
-6. **End of session**: `tanuki_stats` totals the savings log and reports
-   `outputSharePct` - the share of the bill that is the model's own output,
-   which no input-side tool (including this one) can cut.
+6. **End of session**: `tanuki_stats` totals the savings log. Read
+   `estInputSavedPctCacheAware` (replays priced at cache-read rates, first
+   flips charged the write premium) over the optimistic `estInputSavedPct`;
+   `outputSharePct` is the share of the bill that is the model's own output,
+   which no input-side tool (including this one) can cut; and
+   `toolFurnitureTokens` is tanuki's own schema overhead, counted honestly.
 
 ## Reading the pages
 
@@ -68,9 +71,11 @@ lines collapsed here.
 
 ## Do not
 
-- Do not image content whose exact bytes you must retype later (secrets,
-  hashes, code you are about to edit). Rendering is exact; model read-back
-  of dense hex is not guaranteed.
+- Do not image secrets or code you are about to edit. Rendering is exact;
+  model read-back of dense hex is not (README Table D: 5/10 at normal
+  density). Grep-targets (uuids/hashes/ids/ips/versions) are covered
+  automatically: the `verbatim` sidecar (default on) ships them as text
+  next to the pages - quote them from there, never from pixels.
 - Do not use `font: "tiny"` or ladder levels 2-4 on anything you may need
   to quote. Tiny is a 99.7%-read-back trade; levels 2-4 reword prose.
 - Do not use `withDistill` numbers on source code or docs you want intact -

@@ -308,6 +308,46 @@ Two further properties:
   Opus-class pricing output runs 5× input, so this line is the honest answer
   to "why didn't my bill halve": it tells you when tanuki is the wrong
   lever, in numbers.
+- **verbatim sidecar: fidelity priced, not promised.** The needle harness
+  (`reference/needle-report.mjs`, README Table D) measured what a Reddit
+  reviewer predicted: model read-back of dense random strings from pixels
+  fails *silently* — 5/10 grep-targets at normal density, 3/10 at tiny,
+  every miss one plausible character. pxpipe's factsheet was the fidelity
+  feature we lacked; `verbatim` (default on) is our answer: scan the exact
+  text the pages carry (post-pipeline, so line numbers match and codebook
+  legends are covered) for uuid/digest/0x/frame/hex-run/ipv4/semver
+  needles, ship them as a `·verbatim·` text block next to the image
+  blocks — `L<line> <value>`, first occurrence per distinct value, capped
+  at 32 with an honest `+N more`. The estimate verdict adds sidecar tokens
+  to the image side, so a needle-dense file tips back to "TEXT cheaper"
+  instead of shipping unreadable hashes. Same scanner in both engines
+  (ASCII regex semantics, no lookarounds), sidecar byte-identical under
+  the parity harness; harness coverage check pins 20/20 on the seeded
+  corpus every run.
+- **the honest ledger: counterfactual accounting, named and bounded.** The
+  rakuen post ("Token compression tools measure the wrong thing") is right
+  about the category and was right about us: `estInputSavedPct` prices every
+  avoided token at the full input rate, which overstates savings on a
+  97%-cached session by up to 10×, and no table measured task success. Fixes,
+  in layers. (1) The rate table gained `cacheWriteMult` (~1.25×; the OpenAI
+  read rate corrected 0.5→0.1 per the post), and a `cached` verdict now
+  prices fresh pages at the write premium — cached breakeven moved 100→80 on
+  a 1000-token block. (2) The proxy keeps a per-process `ProxySession` —
+  sha256s of imaged blocks plus a caching-seen flag, LEDGER-ONLY by
+  construction (bytes never depend on it; a cross-request rewrite would bust
+  the client's cache, so cross-request pointer dedupe was rejected). Once
+  cache traffic is observed, replayed blocks book at the provider's
+  cache-read rate and a block's first text→pages flip books negative at the
+  write premium, recouping ~(raw−pages)×0.1 per later turn. Events carry
+  `saved_tokens_cache_aware`; `tanuki_stats` reports both bounds and
+  `toolFurnitureTokens`, our own schemas counted against ourselves
+  (`TANUKI_TOOL_BRIEF=1` serves registry briefs, −46%). (3) The default
+  imaging gate is UNCHANGED — steady-state still favors smaller cached
+  pages, so this is measurement honesty, not a savings retreat. (4) What no
+  ledger can claim, `reference/paired-report.mjs` measures: cost per
+  successful task in paired arms with byte-exact success checks. We ship
+  the harness and refuse to ship a percentage — printing one from our own
+  machine would be the exact `rtk gain` move the post indicts.
 
 ### Implicit mode — the middlebox, readmitted with rules
 

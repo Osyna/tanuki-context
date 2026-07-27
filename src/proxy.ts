@@ -23,10 +23,13 @@ import { tableEncode } from "./table.ts";
 import { URL } from "node:url";
 import { distillLog } from "./distill.ts";
 import { apply as codebookApply } from "./codebook.ts";
+import { scanNeedles } from "./needles.ts";
+import { resolveRate } from "./cost.ts";
+import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
-import { charCount, isObj, textTokens } from "./serde.ts";
+import { charCount, isObj, rnd, textTokens } from "./serde.ts";
 
 export interface ProxyCfg {
   port: number;
@@ -59,6 +62,10 @@ interface ImagedBlock {
   origChars: number;
   pages: number;
   savedTokens: number;
+  /** inputs for the cache-aware ledger: what the block would have cost as
+   *  text and what the replacement costs, both in tokens. */
+  rawTok: number;
+  costTok: number;
 }
 
 /// Stage 0/0.5/1 + imaging for one text block, or null when text stays cheaper.
@@ -81,13 +88,16 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
 
   const rawTok = textTokens(origChars);
   const r = renderText(working, true, true, cfg.font);
+  const side = scanNeedles(working);
+  const cost = r.tokens + side.tokens;
   if (r.pages.length > cfg.maxPages) return null;
-  if (r.tokens > rawTok * cfg.ratio || rawTok - r.tokens < cfg.minSave) return null;
+  if (cost > rawTok * cfg.ratio || rawTok - cost < cfg.minSave) return null;
 
   const marker =
     `[tanuki-context: ${origChars} chars imaged in place as ${r.pages.length} PNG page(s), ` +
-    `~${r.tokens} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
+    `~${cost} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
     (cbEntries > 0 ? `; ·legend· line maps ${cbEntries} sigils` : "") +
+    (side.needles.length > 0 ? `; ·verbatim· below carries ${side.needles.length + side.more} exact strings as text` : "") +
     `]`;
   const blocks: unknown[] = [{ type: "text", text: marker }];
   for (const p of r.pages) {
@@ -100,7 +110,17 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
       },
     });
   }
-  return { blocks, origChars, pages: r.pages.length, savedTokens: rawTok - r.tokens };
+  if (side.text !== "") {
+    blocks.push({ type: "text", text: side.text });
+  }
+  return {
+    blocks,
+    origChars,
+    pages: r.pages.length,
+    savedTokens: rawTok - cost,
+    rawTok,
+    costTok: cost,
+  };
 }
 
 export interface TransformResult {
@@ -109,11 +129,55 @@ export interface TransformResult {
   origChars: number;
   imageCount: number;
   savedTokens: number;
+  /** savedTokens with the session's cache state priced in (can be negative:
+   *  the first text->pages flip of a cached block is a real cost). */
+  savedTokensCacheAware: number;
+}
+
+/// Cross-request memory, LEDGER-ONLY by construction: it never changes the
+/// emitted bytes (a cross-request rewrite would bust the client's prompt
+/// cache). It exists so the savings log can price a replayed block at the
+/// cache-read rate instead of pretending every avoided token was full-price
+/// input — the counterfactual-accounting hole the rakuen post names.
+export interface ProxySession {
+  /// sha256 of block texts imaged in EARLIER requests this session.
+  seenBlocks: Set<string>;
+  /// a prior response showed cache traffic (cache_read/cache_creation > 0).
+  cachingSeen: boolean;
+}
+
+export function newSession(): ProxySession {
+  return { seenBlocks: new Set(), cachingSeen: false };
+}
+
+/// Cache-aware tokens saved by one replaced block. Rules, mirrored in the
+/// Rust engine byte-for-byte:
+///   no cache traffic seen  -> the raw count (nothing to discount);
+///   block replayed         -> both sides ride cache reads: saved × readMult;
+///   first flip of a block  -> avoided text was a cache read, the new pages
+///                             are a fresh cache WRITE: read-priced saving
+///                             minus write-priced cost. Usually negative —
+///                             that is the point.
+function cacheAwareSaved(
+  rawTok: number,
+  costTok: number,
+  replayed: boolean,
+  session: ProxySession | undefined,
+  readMult: number,
+  writeMult: number,
+): number {
+  if (session === undefined || !session.cachingSeen) return rawTok - costTok;
+  if (replayed) return rnd((rawTok - costTok) * readMult);
+  return rnd(rawTok * readMult) - rnd(costTok * writeMult);
 }
 
 /// Rewrite a /v1/messages body. Returns null when nothing changed (caller
 /// forwards the original bytes untouched).
-export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResult | null {
+export function transformRequestBody(
+  raw: string,
+  cfg: ProxyCfg,
+  session?: ProxySession,
+): TransformResult | null {
   let body: unknown;
   try {
     body = JSON.parse(raw);
@@ -126,6 +190,9 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
   let origChars = 0;
   let imageCount = 0;
   let savedTokens = 0;
+  let savedTokensCacheAware = 0;
+  // provider ratios for the cache-aware ledger, from the request's own model
+  const rate = resolveRate(typeof body.model === "string" ? body.model : null).rate;
 
   // ponytail rung 2, applied to the wire: a byte-identical repeat of a block
   // we already imaged in THIS request (agents re-read files constantly) gets
@@ -141,11 +208,15 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
       const marker =
         `[tanuki-context: ${chars} chars, byte-identical to a block imaged above ` +
         `(${priorPages} PNG page(s)); not repeated]`;
+      const rawTok = textTokens(chars);
+      const costTok = textTokens(charCount(marker));
       done = {
         blocks: [{ type: "text", text: marker }],
         origChars: chars,
         pages: 0,
-        savedTokens: textTokens(chars) - textTokens(charCount(marker)),
+        savedTokens: rawTok - costTok,
+        rawTok,
+        costTok,
       };
     } else {
       done = maybeImage(text, cfg);
@@ -156,6 +227,25 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
       origChars += done.origChars;
       imageCount += done.pages;
       savedTokens += done.savedTokens;
+      // ledger only, never bytes: was this exact block imaged in an earlier
+      // request of this session?
+      const hash = createHash("sha256").update(text, "utf8").digest("hex");
+      const replayed = session !== undefined && session.seenBlocks.has(hash);
+      savedTokensCacheAware += cacheAwareSaved(
+        done.rawTok,
+        done.costTok,
+        replayed,
+        session,
+        rate.cacheReadMult,
+        rate.cacheWriteMult,
+      );
+      if (session !== undefined && !replayed) {
+        // ponytail: bounded memory — at 1024 entries start a fresh window;
+        // old blocks then re-count as first flips, which only UNDERSTATES
+        // savings. Mirrored exactly in the Rust engine.
+        if (session.seenBlocks.size >= 1024) session.seenBlocks.clear();
+        session.seenBlocks.add(hash);
+      }
     }
     return done;
   };
@@ -215,7 +305,7 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
   }
 
   if (imagedBlocks === 0) return null;
-  return { body: JSON.stringify(body), imagedBlocks, origChars, imageCount, savedTokens };
+  return { body: JSON.stringify(body), imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware };
 }
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
@@ -259,6 +349,8 @@ function logEvent(row: object): void {
 export function startProxy(cfg: ProxyCfg): http.Server {
   const upstream = new URL(cfg.upstream);
   const client = upstream.protocol === "https:" ? https : http;
+  // one ledger session per proxy process: replay detection + cache evidence
+  const session = newSession();
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -273,7 +365,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
 
       let stats: TransformResult | null = null;
       if (isMessages) {
-        stats = transformRequestBody(bodyBuf.toString("utf8"), cfg);
+        stats = transformRequestBody(bodyBuf.toString("utf8"), cfg, session);
         if (stats) bodyBuf = Buffer.from(stats.body, "utf8");
       }
 
@@ -306,6 +398,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
               res.end();
               const usage = scrapeUsage(Buffer.concat(tee).toString("utf8"));
               const actual = usage.input + usage.cacheRead + usage.cacheCreate;
+              if (usage.cacheRead > 0 || usage.cacheCreate > 0) session.cachingSeen = true;
               logEvent({
                 ts: Date.now(),
                 tool: "proxy",
@@ -315,6 +408,11 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 // baseline names its denominator: what Anthropic billed plus
                 // what the imaged blocks would have added as text (estimate).
                 baseline_tokens: actual + (stats?.savedTokens ?? 0),
+                // the same estimate with the session's observed cache state
+                // priced in (replays at the cache-read rate, first flips
+                // charged the cache-write premium). Can be negative.
+                saved_tokens_cache_aware: stats?.savedTokensCacheAware ?? 0,
+                caching_seen: session.cachingSeen,
                 input_tokens: usage.input,
                 cache_read_tokens: usage.cacheRead,
                 cache_create_tokens: usage.cacheCreate,

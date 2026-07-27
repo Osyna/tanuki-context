@@ -97,7 +97,12 @@ function gen() {
     mkdirSync(dir, { recursive: true });
     execFileSync(CMD[0], [...CMD.slice(1), "render", f, "0", dir, ...d.flags], { cwd: ROOT });
     const pages = readdirSync(dir).filter((p) => p.endsWith(".png"));
-    console.log(`${d.name}: ${pages.length} page(s) -> ${dir}`);
+    // The fix under test: `render` ships a ·verbatim· text sidecar next to
+    // the pages (default on). Coverage = seeded needles present byte-exact.
+    const sidecarPath = path.join(dir, "verbatim.txt");
+    const sidecar = existsSync(sidecarPath) ? readFileSync(sidecarPath, "utf8") : "";
+    const covered = needles.filter((n) => sidecar.includes(n.value)).length;
+    console.log(`${d.name}: ${pages.length} page(s) -> ${dir} · sidecar covers ${covered}/${needles.length} needles as text`);
   }
   writeFileSync(path.join(OUT, "answers.json"), JSON.stringify(answers, null, 2));
   writeFileSync(path.join(OUT, "prompt.txt"),
