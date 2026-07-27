@@ -10,10 +10,7 @@
 //! (85 + 170/tile), Gemini 768px tiles (258/tile, ~approximate — their crop
 //! rule has undocumented edges; the API usage field is authoritative).
 
-/** Rust f64::round(): half away from zero (matches stats.ts / main.ts). */
-function rnd(x: number): number {
-  return x < 0 ? -Math.round(-x) : Math.round(x);
-}
+import { rnd } from "./serde.ts";
 
 /** 6-decimal round for the reported dollar figures (tokens are cheap; keep signal). */
 function usd(x: number): number {

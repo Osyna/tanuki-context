@@ -12,30 +12,20 @@
 //! never appear inside a cell. Round-trip contract: same VALUES in canonical
 //! layout — whitespace and per-object key order are serialization, not
 //! content (nested objects re-print with sorted keys, exactly serde_json's
-//! default Value ordering, which the custom serializer in main.ts already
-//! mimics engine-wide).
+//! default Value ordering, which `jstring` in serde.ts already mimics
+//! engine-wide).
 //!
 //! ponytail: whole-input tables only — mixed prose+JSON stays text; add
 //! block detection if a real corpus ever demands it.
 
-export const COLS_MARK = "·cols·";
+import { charCount, cmpCodepoints } from "./serde.ts";
 
-import { cmpCodepoints } from "./codebook.ts";
+export const COLS_MARK = "·cols·";
 
 export interface Table {
   text: string;
   rows: number;
   cols: number;
-}
-
-/** Unicode-scalar count, matching charCount in main.ts (Rust chars().count()). */
-function chars(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 0xd800 || c > 0xdbff) n++;
-  }
-  return n;
 }
 
 /**
@@ -106,7 +96,7 @@ export function tableEncode(text: string): Table | null {
     out.push(cols.map((k) => (k in r ? jcell(r[k]) : "")).join("\t"));
   }
   const encoded = out.join("\n");
-  if (chars(encoded) >= chars(text)) return null;
+  if (charCount(encoded) >= charCount(text)) return null;
   return { text: encoded, rows: rows.length, cols: cols.length };
 }
 

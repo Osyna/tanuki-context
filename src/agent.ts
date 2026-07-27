@@ -18,18 +18,12 @@
 
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { jstring, toolCompress, toolDistill, toolEstimate, toolFetch, toolRender, toolStash, VERSION } from "./main.ts";
+import { toolCompress, toolDistill, toolEstimate, toolFetch, toolRender, toolStash, VERSION } from "./main.ts";
+import { jstring } from "./serde.ts";
 import { pxStats } from "./stats.ts";
+import { TOOLS, type Knob } from "./tools.ts";
 
-export const TANUKI_TOOL_NAMES = [
-  "tanuki_render",
-  "tanuki_estimate",
-  "tanuki_distill",
-  "tanuki_compress",
-  "tanuki_stats",
-  "tanuki_stash",
-  "tanuki_fetch",
-] as const;
+export const TANUKI_TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
 /// Canned guidance for agents. Used as the SDK server `instructions` block and
 /// exported so teams can append it to a shared system prompt.
@@ -113,76 +107,58 @@ export interface SdkToolSpec {
   handler: (args: Record<string, unknown>) => Promise<{ content: unknown[]; isError?: boolean }>;
 }
 
-/// The five MCP tools as SDK tool specs. Handlers produce byte-identical
-/// content to the stdio server's tools/call path.
-export function tanukiSdkToolSpecs(z: ZodNamespace): SdkToolSpec[] {
-  const text = z.string().describe("the bulky text to process");
-  const level = z.number().int().min(0).max(4).optional().describe("ladder level 0-4 (default 0)");
-  const pipe: Record<string, ZodChain> = {
-    text,
-    level,
-    distill: z.boolean().optional().describe("stage 0 log distiller"),
-    query: z.string().optional().describe("distill: keep matching lines +context"),
-    reflow: z.boolean().optional().describe("pack short lines into full rows (default true)"),
-    pack: z.boolean().optional().describe("indent RLE + width trim, lossless (default true)"),
-    font: z.enum(["normal", "tiny"]).optional().describe("tiny = 4x6 cells, ~40% fewer tokens, gated"),
-    codebook: z.boolean().optional().describe("repeated tokens/paths -> sigils + legend"),
-    table: z.boolean().optional().describe("columnar-encode whole-JSON input (keys stated once, value-lossless)"),
-    model: z.string().optional().describe("estimate: price the decision for this model (opus/sonnet/haiku/gpt/gemini)"),
-    cached: z.boolean().optional().describe("estimate: text already prompt-cached this turn? imaging it usually loses"),
-  };
-  const wrap = (blocks: unknown[]): { content: unknown[] } => ({ content: blocks });
-  const guard = async (fn: () => unknown[]): Promise<{ content: unknown[]; isError?: boolean }> => {
-    try {
-      return wrap(fn());
-    } catch (e) {
-      return { content: [{ type: "text", text: `tanuki-context error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+/// zod projection of the registry knobs (the SDK's inputSchema shape).
+function zodShape(z: ZodNamespace, params: Knob[]): Record<string, ZodChain> {
+  const shape: Record<string, ZodChain> = {};
+  for (const p of params) {
+    let c: ZodChain;
+    if (p.type === "boolean") {
+      c = z.boolean();
+    } else if (p.type === "integer") {
+      c = z.number().int();
+      if (p.min !== undefined) c = c.min(p.min);
+      if (p.max !== undefined) c = c.max(p.max);
+    } else if (p.values !== undefined) {
+      c = z.enum(p.values as readonly [string, ...string[]]);
+    } else {
+      c = z.string();
     }
+    if (p.required !== true) c = c.optional();
+    if (p.hint !== undefined) c = c.describe(p.hint);
+    shape[p.key] = c;
+  }
+  return shape;
+}
+
+/// The MCP tools as SDK tool specs, projected from the registry. Handlers
+/// produce byte-identical content to the stdio server's tools/call path.
+export function tanukiSdkToolSpecs(z: ZodNamespace): SdkToolSpec[] {
+  const run: Record<string, (args: unknown) => unknown[]> = {
+    tanuki_render: toolRender,
+    tanuki_estimate: (a) => [{ type: "text", text: jstring(toolEstimate(a), true) }],
+    tanuki_distill: toolDistill,
+    tanuki_compress: toolCompress,
+    tanuki_stats: () => [{ type: "text", text: jstring(pxStats(), true) }],
+    tanuki_stash: toolStash,
+    tanuki_fetch: toolFetch,
   };
-  return [
-    {
-      name: "tanuki_render",
-      description: "Render text through the pipeline (optional distill/level/codebook) into dense PNG pages. Call after tanuki_estimate says PIPELINE cheaper.",
-      inputSchema: pipe,
-      handler: (args) => guard(() => toolRender(args)),
+  return TOOLS.map((t) => ({
+    name: t.name,
+    description: t.brief,
+    inputSchema: zodShape(z, t.params),
+    handler: async (args: Record<string, unknown>) => {
+      try {
+        return { content: run[t.name](args) };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `tanuki-context error: ${e instanceof Error ? e.message : String(e)}` },
+          ],
+          isError: true,
+        };
+      }
     },
-    {
-      name: "tanuki_estimate",
-      description: "Exact page/token math for the same arguments as tanuki_render, without touching pixels. Pass model and/or cached:true for a real-dollar 'cost' verdict (cached content usually should not be imaged). Instant; call this first.",
-      inputSchema: pipe,
-      handler: (args) => guard(() => [{ type: "text", text: jstring(toolEstimate(args), true) }]),
-    },
-    {
-      name: "tanuki_distill",
-      description: "Stage 0 alone: collapse repeated log lines/blocks and template near-dupes; error/warn lines kept verbatim. Output stays greppable text.",
-      inputSchema: { text, query: pipe.query },
-      handler: (args) => guard(() => toolDistill(args)),
-    },
-    {
-      name: "tanuki_compress",
-      description: "Stage 1 alone: graded text compression, levels 0-4, code/paths/hashes protected from level 2 up.",
-      inputSchema: { text, level },
-      handler: (args) => guard(() => toolCompress(args)),
-    },
-    {
-      name: "tanuki_stats",
-      description: "Session savings summary from the events log (honest denominator: input + cache reads + cache creates).",
-      inputSchema: {},
-      handler: () => guard(() => [{ type: "text", text: jstring(pxStats(), true) }]),
-    },
-    {
-      name: "tanuki_stash",
-      description: "Park bulky text outside the context window; returns a compact map (distill stats, top repeats, id). Retrieval pattern, tanuki pricing on the way back.",
-      inputSchema: { text },
-      handler: (args) => guard(() => toolStash(args)),
-    },
-    {
-      name: "tanuki_fetch",
-      description: "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically.",
-      inputSchema: { id: pipe.query, query: pipe.query, lines: pipe.query },
-      handler: (args) => guard(() => toolFetch(args)),
-    },
-  ];
+  }));
 }
 
 interface AgentSdkModule {

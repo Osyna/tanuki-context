@@ -9,6 +9,7 @@
 // Error/warn/fail/exception lines are ALWAYS kept verbatim.
 
 import { Buffer } from "node:buffer";
+import { isRustWhitespace, rnd, rustTrim, truncateChars } from "./serde.ts";
 
 // No `u` flag anywhere: the Rust spec uses `(?-u:\b)` / ASCII classes precisely
 // to match legacy JS regex semantics (\b, \w, \d are ASCII there).
@@ -41,41 +42,12 @@ function maskLine(l: string): string {
   return s.replace(M_NUM, "<n>");
 }
 
-/** Rust `char::is_whitespace` (Unicode White_Space). All members are BMP,
- * non-surrogate, single UTF-16 unit — safe on charCodeAt values too. */
-function isRustWs(cp: number): boolean {
-  if (cp === 0x20) return true;
-  if (cp < 0x09) return false;
-  if (cp <= 0x0d) return true;
-  if (cp < 0x85) return false;
-  return (
-    cp === 0x85 ||
-    cp === 0xa0 ||
-    cp === 0x1680 ||
-    (cp >= 0x2000 && cp <= 0x200a) ||
-    cp === 0x2028 ||
-    cp === 0x2029 ||
-    cp === 0x202f ||
-    cp === 0x205f ||
-    cp === 0x3000
-  );
-}
-
-/** Rust `str::trim` (Unicode-whitespace on both ends). */
-export function rustTrim(s: string): string {
-  let a = 0;
-  let b = s.length;
-  while (a < b && isRustWs(s.charCodeAt(a))) a++;
-  while (b > a && isRustWs(s.charCodeAt(b - 1))) b--;
-  return a === 0 && b === s.length ? s : s.slice(a, b);
-}
-
 /** true iff Rust `l.trim().chars().count() < n` (codepoint count, early exit). */
 function trimmedCpCountLt(l: string, n: number): boolean {
   let a = 0;
   let b = l.length;
-  while (a < b && isRustWs(l.charCodeAt(a))) a++;
-  while (b > a && isRustWs(l.charCodeAt(b - 1))) b--;
+  while (a < b && isRustWhitespace(l.charCodeAt(a))) a++;
+  while (b > a && isRustWhitespace(l.charCodeAt(b - 1))) b--;
   let count = 0;
   for (let i = a; i < b && count < n; count++) {
     const c = l.charCodeAt(i);
@@ -88,7 +60,7 @@ function trimmedCpCountLt(l: string, n: number): boolean {
 function trimStartHasMarker(l: string): boolean {
   let a = 0;
   const b = l.length;
-  while (a < b && isRustWs(l.charCodeAt(a))) a++;
+  while (a < b && isRustWhitespace(l.charCodeAt(a))) a++;
   // "[×" is two BMP units: 0x5b, 0xd7
   return l.charCodeAt(a) === 0x5b && l.charCodeAt(a + 1) === 0xd7;
 }
@@ -109,7 +81,7 @@ function coarseKey(masked: string): string {
   for (let i = 0; i < masked.length; ) {
     const cp = masked.codePointAt(i)!;
     const step = cp > 0xffff ? 2 : 1;
-    const ws = isRustWs(cp);
+    const ws = isRustWhitespace(cp);
     if (first) {
       first = false;
       if (ws) parts.push("<v>");
@@ -138,20 +110,6 @@ function coarseKey(masked: string): string {
   if (sawNonWs && endsWs) parts.push("<v>"); // trailing whitespace -> trailing empty token in JS
   return parts.join(" ");
 }
-
-/** Rust `truncate_chars`: first n codepoints of s. */
-export function truncateChars(s: string, n: number): string {
-  let i = 0;
-  let c = 0;
-  const len = s.length;
-  while (i < len && c < n) {
-    const u = s.charCodeAt(i);
-    i += u >= 0xd800 && u <= 0xdbff && i + 1 < len ? 2 : 1;
-    c++;
-  }
-  return i >= len ? s : s.slice(0, i);
-}
-
 
 const ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
 
@@ -360,10 +318,8 @@ export function distillLog(
   const distilled = finalLines.join("\n");
   const origChars = Buffer.byteLength(text); // Rust str::len = UTF-8 bytes
   const outChars = Buffer.byteLength(distilled);
-  // Rust f64::round = half away from zero (JS Math.round differs for negatives)
   const pctRaw = (1.0 - outChars / origChars) * 100.0;
-  const savedPct =
-    text.length === 0 ? 0 : pctRaw < 0 ? -Math.round(-pctRaw) : Math.round(pctRaw);
+  const savedPct = text.length === 0 ? 0 : rnd(pctRaw);
   const topRepeats = top.map(([count, kind, exemplar]) => ({
     count,
     exemplar: truncateChars(rustTrim(exemplar), 160),

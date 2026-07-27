@@ -444,7 +444,7 @@ reword prose; distill drops repeats but keeps every error line.
 | service log (synthetic, seeded) | 37,111 | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | 37,111 (0%) | **12,902** (-65%) | n/a |
 | journalctl JSON (synthetic, seeded) | 32,534 | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | 32,534 (0%) | **8,771** (-73%) | 23,032 (-29%) |
 | npm install log (synthetic, seeded) | 40,514 | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | 40,514 (0%) | **2,967** (-93%) | n/a |
-| TypeScript source (src/main.ts) | 8,666 | 8,666 (0%) | 8,658 (0%) | 8,650 (0%) | 8,636 (0%) | **7,228** (-17%) | n/a |
+| TypeScript source (src/main.ts) | 6,524 | 6,524 (0%) | 6,519 (0%) | 6,504 (0%) | 6,485 (-1%) | **5,384** (-17%) | n/a |
 | design doc (DESIGN.md) | 7,449 | 7,449 (0%) | 7,447 (0%) | 7,283 (-2%) | **7,075** (-5%) | 7,477 (0%) | n/a |
 
 Read the zeros, they are the point. The ladder refuses to touch machine
@@ -466,12 +466,12 @@ reversible; the distill route and tiny font are the opt-in trades.
 | service log (synthetic, seeded) | 37,111 | 7,840 (-79%) | 7,840 (-79%) | 6,328 (-83%) | n/a | **6,328** (-83%) pack+codebook | 2,240 (-94%) | 3,808 (-90%) |
 | journalctl JSON (synthetic, seeded) | 32,534 | 6,832 (-79%) | 6,832 (-79%) | 6,664 (-80%) | 3,920 (-88%) | **3,920** (-88%) pack+codebook+table | 1,120 (-97%) | 2,352 (-93%) |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 (-79%) | 8,512 (-79%) | 7,336 (-82%) | n/a | **7,336** (-82%) pack+codebook | 560 (-99%) | 4,368 (-89%) |
-| TypeScript source (src/main.ts) | 8,666 | 1,848 (-79%) | 1,736 (-80%) | 1,624 (-81%) | n/a | **1,624** (-81%) pack+codebook | 1,400 (-84%) | 1,008 (-88%) |
+| TypeScript source (src/main.ts) | 6,524 | 1,400 (-79%) | 1,288 (-80%) | 1,232 (-81%) | n/a | **1,232** (-81%) pack+codebook | 1,064 (-84%) | 728 (-89%) |
 | design doc (DESIGN.md) | 7,449 | 1,624 (-78%) | 1,624 (-78%) | 1,568 (-79%) | n/a | **1,568** (-79%) pack+codebook | 1,624 (-78%) | 952 (-87%) |
 
 Imaging alone is worth about -79% on everything, and that number is the
 same for pxpipe and tanuki because it is the same engine. The knobs are
-where the two differ. pack pays on indented code (1,848 to 1,736), does
+where the two differ. pack pays on indented code (1,400 to 1,288), does
 nothing on flat logs. codebook pays wherever paths and long tokens repeat.
 table only exists for JSON and takes the journalctl corpus from 6,664 to
 3,920. The distill route stacks on top and takes the npm log to 560 tokens,
@@ -489,7 +489,7 @@ route competes too. Margin is the winner vs the pxpipe baseline.
 | service log (synthetic, seeded) | 37,111 | 7,840 | 6,328 pack+codebook | 2,240 | **tanuki distill route** | -71% |
 | journalctl JSON (synthetic, seeded) | 23,032 | 6,832 | 3,920 pack+codebook+table | 1,120 | **tanuki distill route** | -84% |
 | npm install log (synthetic, seeded) | 40,514 | 8,512 | 7,336 pack+codebook | 560 | **tanuki distill route** | -93% |
-| TypeScript source (src/main.ts) | 8,666 | 1,848 | 1,624 pack+codebook | not eligible | **tanuki pack+codebook** | -12% |
+| TypeScript source (src/main.ts) | 6,524 | 1,400 | 1,232 pack+codebook | not eligible | **tanuki pack+codebook** | -12% |
 | design doc (DESIGN.md) | 7,449 | 1,624 | 1,568 pack+codebook | not eligible | **tanuki pack+codebook** | -3% |
 
 The pattern is consistent. On logs, distill first and then image; tanuki
@@ -504,12 +504,12 @@ Measured by `reference/methods-report.mjs` (rerun with
 `bun reference/methods-report.mjs`; percentages vs the baseline renderer on
 the same content):
 
-| knob                | code | prose |  log |
-| ------------------- | ---: | ----: | ---: |
-| `pack` (default on) |  -5% |    0% |   0% |
-| `codebook`          |  -9% |    0% | -38% |
-| `font: "tiny"`      | -36% |  -38% | -40% |
-| all three stacked   | **-45%** | **-38%** | **-62%** |
+| knob                  | code | prose |  log |
+| --------------------- | ---: | ----: | ---: |
+| `pack` (default on)   |  -8% |    0% |   0% |
+| `pack` + `codebook`   | -12% |   -3% | -38% |
+| `font: "tiny"` alone  | -40% |  -41% | -40% |
+| all three stacked     | **-48%** | **-41%** | **-62%** |
 
 Corpora: `src/main.ts` (code), `DESIGN.md` (prose), a path-heavy synthetic
 log. Knobs need something to bite on: codebook needs repetition, pack needs
@@ -848,8 +848,10 @@ unassigned codepoints.
 | path                   | role                                                                                         |
 | ---------------------- | -------------------------------------------------------------------------------------------- |
 | `src/main.ts`          | MCP stdio server (hand-rolled JSON-RPC) + CLI (entry: `src/cli.ts`)                          |
+| `src/tools.ts`         | the tool registry: names, descriptions, knobs — projected into MCP/pi/SDK schemas           |
+| `src/serde.ts`         | Rust-parity primitives: serde_json serializer, Unicode counts/trim/cmp                       |
 | `src/agent.ts`         | Claude Agent SDK glue: `withTanuki`, in-process `tanukiSdkServer`                            |
-| `src/pi.ts`            | pi extension: five native tools over a spawned stdio server (`TANUKI_BIN` picks the engine) |
+| `src/pi.ts`            | pi extension: the tanuki tools over a spawned stdio server (`TANUKI_BIN` picks the engine)  |
 | `src/distill.ts`       | stage 0: 3-pass log distiller (runs, blocks, template near-dupes, query)                    |
 | `src/ladder.ts`        | stage 1: levels 0-4 with the exact-recall guard                                              |
 | `src/table.ts`         | columnar codec for whole-JSON input (`·cols·` header, value-lossless)                       |
@@ -860,6 +862,7 @@ unassigned codepoints.
 | `src/atlas.ts`         | glyph atlas (92,812 codepoints): metadata eager, pixels inflated lazily                     |
 | `src/png.ts`           | minimal grayscale PNG encoder (`node:zlib`, filter-0 rows)                                   |
 | `src/stats.ts`         | event log summary, output-share accounting                                                   |
+| `src/stash.ts`         | stash/fetch: content-addressed park-and-slice under `~/.tanuki/stash`                        |
 | `assets/glyphs.*`      | generated glyph data (0.4 MB packed)                                                         |
 | `tools/gen-glyphs.mjs` | regenerates `assets/` from pxpipe's atlas                                                    |
 | `reference/`           | parity harness + benchmark suites (tiers, methods, node-vs-rust)                            |

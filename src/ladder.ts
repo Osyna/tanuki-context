@@ -2,6 +2,8 @@
 // Levels 0-4, each ⊇ the previous. From level 2 up, any line that looks like
 // code/data or carries a hash/path/URL/long id is passed VERBATIM.
 
+import { isRustWhitespace, rustTrim } from "./serde.ts";
+
 export const LEVELS: [string, string, string][] = [
   ["none", "none", "passthrough (baseline)"],
   [
@@ -69,42 +71,6 @@ const FUNCTION_WORDS = new RegExp(
 const SPACES = / {2,}/g;
 const PUNCT = new RegExp(`${SP}+([.,;:!?])`, "gu");
 const NL3 = /\n{3,}/g;
-
-// char::is_whitespace — Unicode White_Space property.
-function isRustWhitespace(cp: number): boolean {
-  if (cp === 0x20 || (cp >= 0x09 && cp <= 0x0d)) return true;
-  if (cp < 0x85) return false;
-  return (
-    cp === 0x85 ||
-    cp === 0xa0 ||
-    cp === 0x1680 ||
-    (cp >= 0x2000 && cp <= 0x200a) ||
-    cp === 0x2028 ||
-    cp === 0x2029 ||
-    cp === 0x202f ||
-    cp === 0x205f ||
-    cp === 0x3000
-  );
-}
-
-// str::trim — trims Unicode White_Space from both ends.
-function rustTrim(s: string): string {
-  let start = 0;
-  let end = s.length;
-  while (start < end) {
-    const cp = s.codePointAt(start)!;
-    if (!isRustWhitespace(cp)) break;
-    start += cp > 0xffff ? 2 : 1;
-  }
-  while (end > start) {
-    // whitespace codepoints are all BMP, so a low surrogate at end-1 can
-    // never be whitespace and terminates the loop.
-    const c = s.charCodeAt(end - 1);
-    if (!isRustWhitespace(c)) break;
-    end--;
-  }
-  return start === 0 && end === s.length ? s : s.slice(start, end);
-}
 
 /**
  * A line that must be preserved verbatim: indented (code), symbol-dense

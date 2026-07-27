@@ -26,6 +26,7 @@ import { apply as codebookApply } from "./codebook.ts";
 import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
+import { charCount, isObj, textTokens } from "./serde.ts";
 
 export interface ProxyCfg {
   port: number;
@@ -60,15 +61,6 @@ interface ImagedBlock {
   savedTokens: number;
 }
 
-function charCount(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 0xd800 || c > 0xdbff) n++;
-  }
-  return n;
-}
-
 /// Stage 0/0.5/1 + imaging for one text block, or null when text stays cheaper.
 function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   const origChars = charCount(text);
@@ -87,7 +79,7 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   }
   if (cfg.level > 0) working = compressText(working, cfg.level).compressed;
 
-  const rawTok = Math.round(origChars / 4);
+  const rawTok = textTokens(origChars);
   const r = renderText(working, true, true, cfg.font);
   if (r.pages.length > cfg.maxPages) return null;
   if (r.tokens > rawTok * cfg.ratio || rawTok - r.tokens < cfg.minSave) return null;
@@ -109,14 +101,6 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
     });
   }
   return { blocks, origChars, pages: r.pages.length, savedTokens: rawTok - r.tokens };
-}
-
-interface JsonObj {
-  [k: string]: unknown;
-}
-
-function isObj(v: unknown): v is JsonObj {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 export interface TransformResult {
@@ -161,7 +145,7 @@ export function transformRequestBody(raw: string, cfg: ProxyCfg): TransformResul
         blocks: [{ type: "text", text: marker }],
         origChars: chars,
         pages: 0,
-        savedTokens: Math.round(chars / 4) - Math.round(charCount(marker) / 4),
+        savedTokens: textTokens(chars) - textTokens(charCount(marker)),
       };
     } else {
       done = maybeImage(text, cfg);

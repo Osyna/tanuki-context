@@ -10,6 +10,8 @@
 // sigil already present in the source is skipped, so `sigil -> value` is an
 // unambiguous inverse.
 
+import { charCount, cmpCodepoints, isRustWhitespace } from "./serde.ts";
+
 const SIGILS = "§¤¢£¥µ¶ª°±¬×÷ØÞßæðøþ¡¿";
 const MIN_LEN = 12;
 const MIN_COUNT = 3;
@@ -19,58 +21,13 @@ export interface Codebook {
   entries: number;
 }
 
-// char::is_whitespace — Unicode White_Space property.
-function isRustWhitespace(cp: number): boolean {
-  if (cp === 0x20 || (cp >= 0x09 && cp <= 0x0d)) return true;
-  if (cp < 0x85) return false;
-  return (
-    cp === 0x85 ||
-    cp === 0xa0 ||
-    cp === 0x1680 ||
-    (cp >= 0x2000 && cp <= 0x200a) ||
-    cp === 0x2028 ||
-    cp === 0x2029 ||
-    cp === 0x202f ||
-    cp === 0x205f ||
-    cp === 0x3000
-  );
-}
-
-// chars().count()
-function cpLen(s: string): number {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
-      const d = s.charCodeAt(i + 1);
-      if (d >= 0xdc00 && d <= 0xdfff) i++;
-    }
-    n++;
-  }
-  return n;
-}
-
-// Rust String cmp = UTF-8 byte order = codepoint order (NOT UTF-16 unit order).
-export function cmpCodepoints(a: string, b: string): number {
-  let i = 0;
-  let j = 0;
-  while (i < a.length && j < b.length) {
-    const ca = a.codePointAt(i)!;
-    const cb = b.codePointAt(j)!;
-    if (ca !== cb) return ca - cb;
-    i += ca > 0xffff ? 2 : 1;
-    j += cb > 0xffff ? 2 : 1;
-  }
-  return a.length - i - (b.length - j);
-}
-
 export function apply(text: string): Codebook {
   const counts = new Map<string, number>();
   const bump = (k: string): void => {
     counts.set(k, (counts.get(k) ?? 0) + 1);
   };
   const consider = (tok: string): void => {
-    if (cpLen(tok) >= MIN_LEN) bump(tok);
+    if (charCount(tok) >= MIN_LEN) bump(tok);
     if (tok.includes("/")) {
       // count every path prefix at a '/' boundary (>=3 segments deep)
       const segs = tok.split("/");
@@ -80,7 +37,7 @@ export function apply(text: string): Codebook {
         acc += segs[i];
         if (i >= 2) {
           const pref = acc + "/";
-          if (cpLen(pref) >= MIN_LEN) bump(pref);
+          if (charCount(pref) >= MIN_LEN) bump(pref);
         }
       }
     }
@@ -107,7 +64,7 @@ export function apply(text: string): Codebook {
   const cands: { k: string; c: number; len: number; saved: number }[] = [];
   for (const [k, c] of counts) {
     if (c >= MIN_COUNT) {
-      const len = cpLen(k);
+      const len = charCount(k);
       cands.push({ k, c, len, saved: (len - 1) * c });
     }
   }
