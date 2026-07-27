@@ -158,9 +158,10 @@ Leave it alone when:
   about to edit. Rendering is exact, but model read-back of dense random
   strings is not, and it fails silently - you get a plausible wrong
   character, not an error. Our needle harness measures it (table below):
-  5/10 grep-targets survive normal density, 3/10 tiny. The `verbatim`
-  sidecar (default on) pulls uuids/hashes/ids/ips/versions out as text
-  automatically; secrets and edit-targets should still never be imaged.
+  even frontier models read back only 0-1 of 14 dense needles byte-exact
+  (Opus 4.8 / Opus 5, 2026-07; Fable refuses). The `verbatim` sidecar
+  (default on) pulls uuids/hashes/ids/ips/versions out as text automatically;
+  secrets and edit-targets should still never be imaged.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.
@@ -552,24 +553,28 @@ indentation.
 
 ### Table D. Fidelity: the needle read-back test
 
-Savings tables measure cost; this one measures the failure mode. Ten
-needles a person actually greps a log for (UUIDs, semvers, 12-char hex
-ids, `sha256:` prefixes, `file:line:col` frames) are seeded into log
-noise, rendered at each font density, and a vision model is asked to
-return them verbatim. Scoring is byte-exact: one plausible wrong
-character is a miss, and that silent near-miss is the failure mode the
+Savings tables measure cost; this one measures the failure mode. Fourteen
+needles a person actually greps a log for (UUIDs, semvers, 12-char hex ids,
+`sha256:` prefixes, `file:line:col` frames, base64 tokens, ms timestamps) are
+seeded into log noise, rendered at each font density, and a vision model is
+asked to return them verbatim. Scoring is containment-exact: one plausible
+wrong character is a miss, and that silent near-miss is the failure mode the
 test exists to expose.
 
-| density      | uuid | semver | hex12 id | sha256:16 | frame | total |
-| ------------ | ---: | -----: | -------: | --------: | ----: | ----: |
-| normal (5x8) |  0/2 |    1/2 |      1/2 |       1/2 |   2/2 | **5/10** |
-| tiny (4x6)   |  0/2 |    2/2 |      0/2 |       0/2 |   1/2 | **3/10** |
+| model            | normal (5x8) | tiny (4x6) |
+| ---------------- | -----------: | ---------: |
+| claude-opus-4-8  |         0/14 |       0/14 |
+| claude-opus-5    |         1/14 |       0/14 |
+| claude-fable-5   |      refused |    refused |
 
-Read against a production Claude model, 2026-07-27; regenerate the seeded
-pages with `node reference/needle-report.mjs` and score any model you like
-with its `score` subcommand. Every miss in this run was a single
-confusable character (`a279` read as `a379`, `1.15.8` as `1.15.6`).
-Short structured strings survive; long random hex does not. The fix is
+Measured 2026-07-27 across 14 needles/density (uuid, semver, hex id,
+`sha256:`, frame, base64, ms), containment-scored. Even Opus 5, thinking
+hard, lands 1/14; the misses are confident single-character misreads
+(`8`->`3`, `5`->`9`, `a`->`8`), not blanks, and Fable refuses the task.
+Regenerate with `node reference/needle-report.mjs` and score any model
+(`reference/needle-call.mjs`, or the `score` subcommand); the
+task-comprehension arm (image ≈ text — the model still names the root cause
+from pixels) is in [reference/EVALS.md](../reference/EVALS.md). The fix is
 the `verbatim` sidecar (default on): the same needle kinds are scanned
 out of the exact text the pages carry and shipped as a `·verbatim·` text
 block next to the images - `L<line> <value>`, deduped, capped at 32.

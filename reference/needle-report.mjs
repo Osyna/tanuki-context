@@ -156,19 +156,22 @@ function score(transcriptPath) {
   const subs = new Map(); // "e->g" -> count, across every near-miss
   const tally = { glyph: 0, drift: 0, gone: 0 };
   for (const d of DENSITIES) {
-    const list = got[d.name] ?? [];
-    const set = new Set(list);
+    // containment: did the model reproduce the exact needle bytes anywhere in
+    // its answer? Robust to array | prose | markdown - real models don't emit
+    // a clean JSON array. `cands` = loose tokens for the substitution tally.
+    const hay = Array.isArray(got[d.name]) ? got[d.name].join("\n") : String(got[d.name] ?? "");
+    const cands = hay.split(/[\s=,"'()\[\]{}]+/).filter(Boolean);
     const by = {};
     let hit = 0;
     for (const n of answers[d.name]) {
-      const ok = set.has(n.value);
+      const ok = hay.includes(n.value);
       by[n.kind] = (by[n.kind] ?? "") + (ok ? "O" : "X");
       hit += ok;
       if (ok) continue;
       // the model's closest attempt at this needle, if any is close enough
       let best = null;
       let bd = Infinity;
-      for (const c of list) {
+      for (const c of cands) {
         const dd = lev(n.value, c);
         if (dd < bd) {
           bd = dd;
