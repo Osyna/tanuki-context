@@ -23,7 +23,7 @@ import { fetchSlice, stashText } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS } from "./tools.ts";
 
-export const VERSION = "0.7.0";
+export const VERSION = "0.8.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 

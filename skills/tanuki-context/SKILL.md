@@ -1,6 +1,6 @@
 ---
 name: tanuki-context
-version: 0.7.0
+version: 0.8.0
 description: |
   Cut input-token cost by rendering bulky text (logs, command output, long
   docs) as dense PNG pages the model reads at a fraction of the price, or by
