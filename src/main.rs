@@ -816,6 +816,11 @@ fn main() {
                     json!({ "mode": "pages", "pages": r.pages.len(),
                             "imageTokens": r.tokens, "rawTextTokens": raw_tok })
                 );
+                // The sidecar rides with the pages here too, or scripting the
+                // CLI loses every exact string the slice carried.
+                if !side.text.is_empty() {
+                    println!("{}", side.text);
+                }
                 if let Some(dir) = outdir {
                     std::fs::create_dir_all(dir).expect("mkdir");
                     for (i, page) in r.pages.iter().enumerate() {
