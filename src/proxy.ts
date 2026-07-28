@@ -97,14 +97,14 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   }
   if (cfg.level > 0) working = compressText(working, cfg.level).compressed;
 
-  const rawTok = textTokens(origChars);
+  const rawTok = textTokens(text);
   const r = renderText(working, true, true, cfg.font);
   const side = scanNeedles(working, origChars);
   // What the sidecar costs is what it ships. There is no stash on this path,
   // so a lazy pointer names no id: the caller sees the count and the tools,
   // not a fabricated sha.
   const sideTok =
-    cfg.verbatim === "off" ? 0 : cfg.verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, null))) : side.tokens;
+    cfg.verbatim === "off" ? 0 : cfg.verbatim === "lazy" ? textTokens(lazyPointer(side, null)) : side.tokens;
   const cost = r.tokens + sideTok;
   if (r.pages.length > cfg.maxPages) return null;
   // Needle-dense: the sidecar cannot carry every exact string, and this is the
@@ -251,8 +251,8 @@ export function transformRequestBody(
       const marker =
         `[tanuki-context: ${chars} chars, byte-identical to a block imaged above ` +
         `(${priorPages} PNG page(s)); not repeated]`;
-      const rawTok = textTokens(chars);
-      const costTok = textTokens(charCount(marker));
+      const rawTok = textTokens(text);
+      const costTok = textTokens(marker);
       done = {
         blocks: [{ type: "text", text: marker }],
         origChars: chars,

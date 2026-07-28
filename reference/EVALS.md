@@ -266,6 +266,53 @@ dearest — so one collapsed number cannot distinguish a cheap run from a cached
 one, and every "why" in this section was unfalsifiable. 0.18 records them
 separately and reports a cache hit rate.
 
+With the split in place, the tail stops being mysterious
+(`claude-sonnet-5`, both tasks, budget-capped mid-run):
+
+| arm | fresh | cache **write** | cache **read** | hit rate | $/success |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off (inlining) | 14 | **215,673** | 529,067 | **71%** | $0.9952 |
+| on (tanuki) | 24 | **42,237** | 498,953 | **92%** | $0.1955 |
+
+Both arms read a similar volume from cache. The difference is entirely in
+**cache writes — the inlining arm creates 5.1× more of them**, at 12.5× the
+price of a read. That is the $2.94 outlier's mechanism, and it is not "the
+agent re-read the log" as this section previously guessed: a re-read of a
+*warm* prefix is nearly free. It is that inlining a large body keeps
+invalidating the prefix and paying to re-create it, while tanuki's payload is
+small and byte-stable, so it stays cached (92%).
+
+That also explains why the median and the mean disagreed so violently: the
+median run is one where the off arm's cache happened to hold, the tail is one
+where it churned. Compare arms at equal hit rate or the token columns are
+meaningless — which is exactly what summing the three classes hid.
+
+### Corollary: shrinking a cached payload buys almost nothing
+
+The `verbatim` sidecar is **42% of a render's tokens** (5,611 of 13,213 on a
+1,200-line service log), so `verbatim: "lazy"` — ship a one-line pointer, defer
+the strings to `tanuki_fetch`/`tanuki_verify` — looked like the largest single
+payload cut available. Measured as its own arm (`PAIRED_ARMS=on,lazy`,
+`claude-sonnet-5`, budget-capped):
+
+| arm | cache write | hit rate | $/success | solved |
+| --- | ---: | ---: | ---: | ---: |
+| on (full sidecar) | 126,687 | 94% | $0.3351 | 4/6 |
+| lazy | 57,269 | **97%** | $0.3168 | 3/5 |
+
+Lazy halves the cache writes and improves the hit rate, and the cost
+difference is **inside the noise at this n**. The reason is the previous
+table: once a payload is cached it is billed at **$0.30/Mtok**, so removing
+42% of a *cached* payload removes 42% of the cheapest thing in the request.
+
+**So lazy stays opt-in, not the default.** The measurement says the lever
+worth pulling is keeping the cache warm, not making the payload smaller —
+which inverts the intuition the sidecar-size number invites. Both arms also
+failed runs on the verbatim task (the `on` arm 2 of 6), so this is not
+evidence that lazy hurts recall either; it is evidence that at n=5-6 this task
+is too flaky to separate them. Lazy remains the right choice for cold,
+one-shot renders where nothing is cached yet.
+
 That reframes the goal. Losing the median to inlining is not a compression
 problem; it is that a re-read of an already-cached log costs almost nothing
 while tanuki paid full price for its pages **every turn**. Imaged pages are the
@@ -507,6 +554,72 @@ Two boundaries stated rather than hidden:
 
 A parity case pins `password=password`, where an `indexOf`-based splice masks
 the key instead of the value and silently diverges between engines.
+
+## 9. The token estimator — `npm run tokenizer`   *(measured)*
+
+`textTokens` in `src/serde.ts` is the denominator of every decision the router
+makes: the imaging gate (`cost > rawTok * ratio`), the minimum saving, the
+fidelity band's ratio, and the entire saved-token ledger. It was `chars / 4`
+and had never been checked against a real tokenizer.
+
+**The error does not cancel.** Image tokens come from pixel geometry
+(`w*h/750`, exact); text tokens came from a guess. Measured against
+Anthropic's own tokenizer (`/v1/messages/count_tokens`, free — this whole
+section cost $0), 30 samples:
+
+| content | real chars/token | `chars/4` was |
+| --- | ---: | ---: |
+| prose | 4.97 | **+24% high** |
+| gitlog | 2.90 | −27% low |
+| stack-trace | 2.77 | −31% low |
+| ts-source | 3.00 | −25% low |
+| journal | 2.42 | −39% low |
+| dmesg | 2.21 | −45% low |
+| json | 1.92 | −52% low |
+| pacman | 1.90 | −53% low |
+| hex | 1.55 | −61% low |
+| base64 | 1.14 | **−72% low** |
+
+A **2.8× spread**, and it straddles zero: prose was over-priced, logs
+under-priced. So tanuki declined log wins it should have taken *and* imaged
+prose it should have left alone. One divisor cannot fit that, so `textTokens`
+now prices character classes by how a BPE treats them — letters in a word-like
+run are nearly free (~6 chars/token), letters in a vowelless or overlong run
+(base64, hex, ids) fragment to well under one, digits and punctuation
+fragment, whitespace mostly merges into the next word. Least squares over the
+30 samples, integer per-mille weights so both engines are bit-identical.
+
+**Worst residual 19.8% (21.7% leave-one-out) against 72% for `chars/4`; real
+logs land within 3.5%.** `test/tokens.test.ts` pins it to the measured counts
+and includes a guard asserting `chars/4` would still fail the suite — a bound
+that stops discriminating is a decorative bound.
+
+### It also re-calibrated the fidelity band
+
+The band's 8/12/16/20 thresholds come from DeepSeek-OCR's Fox table, which
+defines its ratio with a **real tokenizer**. Feeding it `chars/4` made every
+ratio ~1.5× too low on logs, i.e. tanuki reported a rosier read-back band than
+the density warranted. Re-running the tier sweep after the fix
+(`claude-sonnet-5`, n=5):
+
+| tier | ratio now | band says | task solved |
+| --- | ---: | --- | ---: |
+| L0 normal | 8.3 | good, ~90-97% | **5/5** |
+| L0 tiny | 14.3 | low (tiny floor) | **0/5** |
+| distill | 25 | unreliable, <60% | **1/5** |
+| distill tiny | 33 | unreliable | 1/5 |
+| L4 caveman | 8.3 | good | 5/5 |
+
+Band and outcome now agree: *good* ↔ 100%, *unreliable* ↔ 20%. Under `chars/4`
+distill scored a ratio near 16 and was labelled **"degraded, ~75-87%"** while
+actually solving **1 task in 5**. The estimator fix removed a miscalibration
+nobody had looked for.
+
+Two offline attempts at ground truth were tried first and discarded, which is
+why this waited for a key: assistant `output_tokens` from local session logs
+(thinking bills to output but is not in the logged text — 161 chars against
+962 tokens), and input-token deltas across turns (Claude Code elides tool
+results, so the reconstruction spans 0.15–20.15 chars/token, i.e. noise).
 
 ## Reproduce
 

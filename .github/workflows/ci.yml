@@ -22,3 +22,11 @@ jobs:
       # real log can be committed without leaking machine data. Run
       # `npm run coverage -- --min 95 /var/log/*.log` in your own CI.
       - run: bun reference/adversarial-report.mjs --min 90
+      # Cross-engine proxy check. The MCP parity harness only drives
+      # tools/call, so the proxy's rewritten request body had no test at all
+      # until 0.18 - and it is the path that now places cache breakpoints.
+      # The Rust engine is a sibling worktree, absent in a plain checkout, so
+      # here this asserts the single-engine invariants (breakpoint placement,
+      # recency window and system prompt untouched) and says out loud that it
+      # skipped the cross-engine diff. Set TANUKI_BIN locally to get that too.
+      - run: node reference/proxy-parity.mjs

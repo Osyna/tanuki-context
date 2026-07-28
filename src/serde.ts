@@ -117,9 +117,67 @@ export function rnd(x: number): number {
   return x < 0 ? -Math.round(-x) : Math.round(x);
 }
 
-/** The one text-price heuristic, stated once: ~4 chars per token. */
-export function textTokens(chars: number): number {
-  return Math.round(chars / 4.0);
+/**
+ * The one text-price heuristic, stated once. Measured, not assumed.
+ *
+ * This used to be `chars / 4`, and that is wrong by a factor of three across
+ * the content tanuki actually routes. Against Anthropic's own tokenizer
+ * (`/v1/messages/count_tokens`, 30 samples, EVALS §9) real content runs from
+ * **1.14 chars/token** (base64) to **5.52** (prose) - `chars/4` was off by
+ * -72% on base64 and +38% on prose. It is the denominator of the imaging gate,
+ * the minimum-saving test, the fidelity band's ratio and the savings ledger,
+ * and the error does not cancel: image tokens come from exact pixel geometry,
+ * so understating text tokens made tanuki decline wins AND report a rosier
+ * fidelity band than the density warranted.
+ *
+ * A single divisor cannot fit a 2.8x spread, so this prices character classes
+ * by how a BPE actually treats them:
+ *   - letters inside a word-like run are nearly free (~6 chars/token): the
+ *     merge table was built for words;
+ *   - letters in a run with no vowel, or longer than 14 (base64, hex, ids),
+ *     fragment to roughly a token and a half per character;
+ *   - digits and punctuation fragment hard; whitespace usually merges into the
+ *     following word.
+ * Weights are least-squares over those 30 samples. Worst residual 19.8%,
+ * 21.7% leave-one-out, against 72% for `chars/4`; on real logs it is within
+ * 3.5%.
+ *
+ * Integer per-mille arithmetic on purpose: identical in both engines with no
+ * floating-point parity risk.
+ */
+const W_WORD = 161; // letters in a word-like run, per mille
+const W_ODD = 1501; // letters in a vowelless or overlong run
+const W_DIGIT = 807;
+const W_PUNCT = 690;
+const W_SPACE = 428;
+const MAX_WORD_RUN = 14;
+
+export function textTokens(text: string): number {
+  let word = 0, odd = 0, digits = 0, punct = 0, space = 0;
+  let runLen = 0, runVowels = 0;
+  const flush = (): void => {
+    if (runLen === 0) return;
+    if (runVowels > 0 && runLen <= MAX_WORD_RUN) word += runLen;
+    else odd += runLen;
+    runLen = 0;
+    runVowels = 0;
+  };
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0;
+    const lower = c | 0x20;
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+      runLen++;
+      if (lower === 97 || lower === 101 || lower === 105 || lower === 111 || lower === 117 || lower === 121) runVowels++;
+      continue;
+    }
+    flush();
+    if (c >= 48 && c <= 57) digits++;
+    else if (c === 32 || c === 9 || c === 10 || c === 13) space++;
+    else punct++;
+  }
+  flush();
+  const milli = word * W_WORD + odd * W_ODD + digits * W_DIGIT + punct * W_PUNCT + space * W_SPACE;
+  return Math.round(milli / 1000);
 }
 
 /** Rust `chars().count()`: Unicode scalar values, not UTF-16 units. */

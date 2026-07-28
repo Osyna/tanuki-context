@@ -791,3 +791,40 @@ describe("cache safety and fail-open", () => {
     }
   });
 });
+
+// TANUKI_VERBATIM is a DEFAULT, not an override. Both engines originally got
+// this wrong in the same way - an explicit `verbatim: true` fell through to the
+// env - and because they were wrong identically, the cross-engine check passed.
+const { parseVerbatim } = await import("../src/needles.ts");
+
+describe("TANUKI_VERBATIM default vs explicit argument", () => {
+  const withEnv = (v: string | undefined, fn: () => void): void => {
+    const prev = process.env.TANUKI_VERBATIM;
+    if (v === undefined) delete process.env.TANUKI_VERBATIM;
+    else process.env.TANUKI_VERBATIM = v;
+    try { fn(); } finally {
+      if (prev === undefined) delete process.env.TANUKI_VERBATIM;
+      else process.env.TANUKI_VERBATIM = prev;
+    }
+  };
+
+  test("absent argument takes the env", () => {
+    withEnv("lazy", () => expect(parseVerbatim(undefined)).toBe("lazy"));
+    withEnv("off", () => expect(parseVerbatim(undefined)).toBe("off"));
+    withEnv("LAZY", () => expect(parseVerbatim(undefined)).toBe("lazy"));
+    withEnv("nonsense", () => expect(parseVerbatim(undefined)).toBe("full"));
+    withEnv(undefined, () => expect(parseVerbatim(undefined)).toBe("full"));
+  });
+
+  test("an explicit argument always beats the env", () => {
+    withEnv("lazy", () => {
+      expect(parseVerbatim(true)).toBe("full");
+      expect(parseVerbatim(false)).toBe("off");
+      expect(parseVerbatim("lazy")).toBe("lazy");
+    });
+    withEnv("off", () => {
+      expect(parseVerbatim(true)).toBe("full");
+      expect(parseVerbatim("lazy")).toBe("lazy");
+    });
+  });
+});
