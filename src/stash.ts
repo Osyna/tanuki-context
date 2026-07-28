@@ -88,6 +88,30 @@ export function fetchSlice(id: string, query: string | null, lines: string | nul
   return distillLog(text, query, 2).distilled;
 }
 
+/// How many raw lines of the stash match `query`, and how many there are.
+/// The distilled slice keeps context lines and collapses repeats, so its line
+/// count is NOT a match count - and an agent asked which unit logged the most
+/// errors needs the real one. Without this it cannot count at all: it can only
+/// read slices, and slices cannot count what they do not show (EVALS §6).
+export function matchCount(id: string, query: string): { matched: number; total: number } {
+  let text: string;
+  try {
+    text = readFileSync(`${stashDir()}/${id}`, "utf8");
+  } catch {
+    throw new Error(`unknown stash id: ${id}`);
+  }
+  let re: RegExp;
+  try {
+    re = new RegExp(query);
+  } catch {
+    throw new Error(`bad query regex: ${query}`);
+  }
+  const segments = text.split("\n");
+  let matched = 0;
+  for (const line of segments) if (re.test(line)) matched += 1;
+  return { matched, total: segments.length };
+}
+
 export interface VerifyResult {
   status: "exact" | "corrected" | "ambiguous" | "absent";
   line: number | null;

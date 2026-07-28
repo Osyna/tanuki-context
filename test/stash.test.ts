@@ -90,6 +90,46 @@ describe("stash", () => {
     expect(out).toHaveLength(1);
   });
 
+  // Slices cannot count what they do not show: the distilled slice is
+  // context-padded and collapsed, so an agent comparing frequencies needs the
+  // raw match count. Without it the "which unit logged the most errors" task
+  // was unanswerable through the tools at all (EVALS §6).
+  test("a query fetch reports how many raw lines matched", () => {
+    const units = ["alpha", "beta", "gamma"];
+    const lines: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      const u = units[i % 3];
+      // alpha gets 3x the errors of the others, by construction
+      lines.push(u === "alpha" && i % 6 === 0 ? `svc ${u} ERROR boom` : i % 30 === 0 ? `svc ${u} ERROR boom` : `svc ${u} INFO ok`);
+    }
+    const { id } = stashText(`${lines.join("\n")}\n`);
+    const counts = units.map((u) => {
+      const out = toolFetch({ id, query: `${u} ERROR` }) as { type: string; text?: string }[];
+      const m = /matched (\d+) of (\d+) lines/.exec(out[0].text ?? "");
+      expect(m).not.toBeNull();
+      return Number(m?.[1]);
+    });
+    expect(counts[0]).toBeGreaterThan(counts[1]);
+    expect(counts[0]).toBeGreaterThan(counts[2]);
+    // a lines fetch carries no query, so it reports no count
+    const byLines = toolFetch({ id, lines: "1-3" }) as { text?: string }[];
+    expect(byLines[0].text).not.toContain("matched");
+  });
+
+  // EVALS §7: the sidecar misses pure-random alphabetic ids (70-76% on the
+  // adversarial shapes) because structure cannot tell them from words. That is
+  // a documented bound, not unprotected data - verify covers what the sidecar
+  // does not, with no model in the loop.
+  test("ids the sidecar misses are still covered by verify", () => {
+    const ids = ["UXASIMOWMOFRUAB", "oazhseiengfosy", "qsYfhjBOhAqAOqRRr"];
+    const { id } = stashText(`${ids.map((v, i) => `2026-07-27T09:0${i}:00Z relay INFO ref=${v} ok`).join("\n")}\n`);
+    for (const v of ids) {
+      expect(verifyValue(id, v).status).toBe("exact");
+      const flipped = `${v.slice(0, 4)}${v[4] === "a" ? "b" : "a"}${v.slice(5)}`;
+      expect(verifyValue(id, flipped).status).toBe("corrected");
+    }
+  });
+
   test("errors are exact: unknown id, bad range, arg misuse", () => {
     const { id } = stashText(LOG);
     expect(() => fetchSlice("000000000000", "x", null)).toThrow("unknown stash id: 000000000000");
