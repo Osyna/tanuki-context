@@ -61,6 +61,33 @@ describe("stash", () => {
     expect(big.some((c) => c.type === "image")).toBe(true);
   });
 
+  // An imaged fetch used to ship pages with NO verbatim sidecar, on the very
+  // path the manual recommends for large references: every id in the slice
+  // rode as unprotected pixels, and an agent that could not read one just
+  // fetched again (the loop thrash in EVALS §6).
+  test("an imaged fetch ships its verbatim sidecar", () => {
+    const withIds = Array.from(
+      { length: 400 },
+      (_, i) => `2026-07-26T01:00:00Z INFO worker copied /srv/data/shard/segment_${String(i).padStart(5, "0")}.parquet ok`,
+    ).join("\n");
+    const { id } = stashText(`${withIds}\nrelay dest=86:2b:11:51:58:03 sha 6c9224c done`);
+    const out = toolFetch({ id, lines: "1-401" }) as { type: string; text?: string }[];
+    expect(out.some((c) => c.type === "image")).toBe(true);
+    const side = out.find((c) => c.type === "text" && (c.text ?? "").startsWith("·verbatim·"));
+    expect(side).toBeDefined();
+    expect(side?.text).toContain("86:2b:11:51:58:03");
+    expect(side?.text).toContain("6c9224c");
+    expect(out[0].text).toContain("·verbatim· below carries");
+  });
+
+  test("a needle-dense slice is never imaged", () => {
+    const ids = Array.from({ length: 400 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a token=${String(i).padStart(4, "0")}cafebabe9f21`);
+    const { id } = stashText(ids.join("\n"));
+    const out = toolFetch({ id, lines: "1-400" }) as { type: string; text?: string }[];
+    expect(out.some((c) => c.type === "image")).toBe(false);
+    expect(out).toHaveLength(1);
+  });
+
   test("errors are exact: unknown id, bad range, arg misuse", () => {
     const { id } = stashText(LOG);
     expect(() => fetchSlice("000000000000", "x", null)).toThrow("unknown stash id: 000000000000");

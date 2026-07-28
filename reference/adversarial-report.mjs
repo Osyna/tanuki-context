@@ -49,6 +49,17 @@ const SHAPES = {
   "nanoid-ish": () => gen(`${L}${U}${D}_-`, 21),
   "k8s uid suffix": () => `${some(["ingress", "sidecar"])}-${gen(L + D, 10)}`,
   "hyphen chunks": () => `${gen(L + D, 5)}-${gen(L + D, 5)}-${gen(L + D, 5)}`,
+  // real-world id formats the scanner has no rule for, by name
+  "ksuid base62 27": () => gen(L + U + D, 27),
+  "snowflake 19-digit": () => gen(D, 19),
+  "aws arn": () => `arn:aws:iam::${gen(D, 12)}:role/${gen(L + U, 8)}`,
+  "url-safe base64": () => gen(`${L}${U}${D}_-`, 22),
+  "jwt-ish 3 parts": () => `${gen(L + U + D, 12)}.${gen(L + U + D, 24)}.${gen(L + U + D, 22)}`,
+  "uuid no dashes": () => gen("0123456789abcdef", 32),
+  "ipv6": () => Array.from({ length: 8 }, () => gen("0123456789abcdef", 4)).join(":"),
+  "docker short id": () => gen("0123456789abcdef", 12),
+  "s3 versionid": () => gen(`${L}${U}${D}._`, 32),
+  "trace parent": () => `00-${gen("0123456789abcdef", 32)}-${gen("0123456789abcdef", 16)}-01`,
 };
 
 const args = process.argv.slice(2);

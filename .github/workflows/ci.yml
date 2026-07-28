@@ -18,4 +18,7 @@ jobs:
       # Generalisation gate: ids in shapes the scanner was never designed for.
       # Self-contained (synthesises its own), deterministic, no corpus needed.
       # A rule-per-format scanner scores near zero here - see EVALS §7.
-      - run: bun reference/adversarial-report.mjs --min 88
+      # Coverage is deliberately NOT gated here: it needs real logs, and no
+      # real log can be committed without leaking machine data. Run
+      # `npm run coverage -- --min 95 /var/log/*.log` in your own CI.
+      - run: bun reference/adversarial-report.mjs --min 90

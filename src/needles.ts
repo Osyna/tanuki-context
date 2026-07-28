@@ -142,6 +142,7 @@ export function atRisk(v: string): boolean {
     let e = s;
     let segDigits = 0;
     let segAlpha = 0;
+    let segHexAlpha = 0;
     let vowels = 0;
     let run = 0;
     let maxRun = 0;
@@ -153,6 +154,7 @@ export function atRisk(v: string): boolean {
       else {
         segAlpha++;
         const f = c | 32;
+        if (f >= 97 && f <= 102) segHexAlpha++;
         if (f === 97 || f === 101 || f === 105 || f === 111 || f === 117 || f === 121) {
           vowels++;
           run = 0;
@@ -161,6 +163,11 @@ export function atRisk(v: string): boolean {
       e++;
     }
     const len = e - s;
+    // A bare 7-hex sha is at risk, so one inside `ee70833..0c331b6` is too -
+    // segments must mirror the whole-token hex and numeric rules, or a git
+    // sha range slips through on length alone.
+    if (len >= 6 && segHexAlpha > 0 && segAlpha === segHexAlpha) return true;
+    if (len >= 9 && segAlpha === 0) return true;
     if (len >= 8 && segDigits > 0 && segAlpha > 0) return true;
     if (len >= 8 && segDigits === 0 && (maxRun >= 5 || vowels * 100 < len * 15)) return true;
     s = e;
