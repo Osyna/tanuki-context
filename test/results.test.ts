@@ -4,7 +4,9 @@
 // it all over MCP. `bun test` prints the measured table — the "result".
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   INDENT_ALPHABET,
   NL_LITERAL,
@@ -668,6 +670,38 @@ describe("verbatim: exact strings ride as text, never pixels", () => {
     expect(side?.text).toContain("3451bd1b-13c4-4558-aa67-a62bc042905e");
     const off = toolRender({ text: NOISY, level: 0, verbatim: false }) as Array<{ type: string; text?: string }>;
     expect(off.some((c) => (c.text ?? "").startsWith("·verbatim·"))).toBe(false);
+  });
+
+  // Measured on a 1200-line service log: the sidecar was 5,611 of 13,213
+  // rendered tokens (42%), and 1,199 of its 1,239 strings were irreducible
+  // random hex - compressing it recovers 68 tokens. The only lever left is
+  // not shipping it eagerly, so lazy ships the count and the way back.
+  test("lazy withholds the strings behind one pointer line, dense gate first", async () => {
+    const dir = mkdtempSync(`${tmpdir()}/tanuki-lazy-`);
+    const prev = process.env.TANUKI_STASH;
+    process.env.TANUKI_STASH = dir;
+    try {
+      const found = scanNeedles(NOISY);
+      const content = toolRender({ text: NOISY, level: 0, verbatim: "lazy" }) as Array<{ type: string; text?: string }>;
+      const line = content.find((c) => c.type === "text" && (c.text ?? "").startsWith("·verbatim·"))?.text ?? "";
+      expect(line.split("\n").length).toBe(1);
+      expect(line).toContain(`${found.needles.length + found.more} exact strings withheld (lazy)`);
+      expect(found.needles.length).toBeGreaterThan(0);
+      for (const n of found.needles) expect(line).not.toContain(n.value);
+      // Actionable, not a dead end: the id names the stash of the original, so
+      // every withheld value is one tanuki_fetch or tanuki_verify away.
+      expect(line).toContain(`id=${createHash("sha256").update(NOISY, "utf8").digest("hex").slice(0, 12)}`);
+      expect(content.some((c) => c.type === "image")).toBe(true);
+      // The refusal outranks lazy: a dense block is not imaged either way.
+      const ids = Array.from({ length: 40 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`).join("\n");
+      const refused = toolRender({ text: ids, level: 0, verbatim: "lazy" }) as Array<{ type: string; text?: string }>;
+      expect(refused.length).toBe(1);
+      expect(refused[0].text).toContain("refused to render");
+    } finally {
+      if (prev === undefined) delete process.env.TANUKI_STASH;
+      else process.env.TANUKI_STASH = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

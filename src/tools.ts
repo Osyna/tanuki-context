@@ -6,9 +6,10 @@
 
 export interface Knob {
   key: string;
-  type: "string" | "boolean" | "integer";
+  /** `["boolean", "string"]` for a knob that takes either (verbatim). */
+  type: "string" | "boolean" | "integer" | readonly ["boolean", "string"];
   required?: boolean;
-  values?: readonly string[]; // enum, for string knobs
+  values?: readonly (string | boolean)[]; // enum, for string knobs
   min?: number;
   max?: number;
   hint?: string; // per-parameter description
@@ -37,6 +38,16 @@ const LEVEL: Knob = {
 };
 const QUERY: Knob = { key: "query", type: "string", hint: "distill: keep matching lines + context" };
 
+/// Tri-state, so the schema states the third state instead of hiding it in
+/// prose: `true` (default) ships every exact string as text, `false` opts out,
+/// `"lazy"` ships one pointer line naming the count and how to get them back.
+const VERBATIM: Knob = {
+  key: "verbatim",
+  type: ["boolean", "string"],
+  values: [true, false, "lazy"],
+  hint: "exact strings (uuids/hashes/hex ids/ips/versions) ride as text next to the pages, never trusted to pixels (default true); \"lazy\" withholds them behind a one-line pointer",
+};
+
 /** Shared knobs of the two pipeline tools (render/estimate). */
 const PIPE: Knob[] = [
   TEXT,
@@ -48,7 +59,7 @@ const PIPE: Knob[] = [
   { key: "font", type: "string", values: ["normal", "tiny"], hint: "tiny = 4x6 cells, ~40% fewer tokens, transcription-gated" },
   { key: "codebook", type: "boolean", hint: "repeated tokens/paths -> sigils + legend" },
   { key: "table", type: "boolean", hint: "columnar-encode whole-JSON input (keys stated once, value-lossless)" },
-  { key: "verbatim", type: "boolean", hint: "exact strings (uuids/hashes/hex ids/ips/versions) ride as text next to the pages, never trusted to pixels (default true)" },
+  VERBATIM,
 ];
 
 const MODEL: Knob = {
@@ -126,12 +137,14 @@ export const TOOLS: readonly ToolMeta[] = [
     label: "Tanuki Fetch",
     snippet: "Pull a stashed slice; big answers arrive as cheap dense pages",
     description:
-      "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
-    brief: "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically.",
+      "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text. Credential-shaped values (API keys, tokens, private-key headers) in the returned slice are replaced by a '[redacted:<kind>]' placeholder and counted in a '[N credential(s) redacted]' line - the stash keeps the original bytes, so redact:false returns them verbatim when you actually need the secret.",
+    brief: "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically. Credential-shaped values are redacted in the returned slice; redact:false returns them verbatim.",
     params: [
       { key: "id", type: "string", required: true, hint: "stash id from tanuki_stash" },
       { key: "query", type: "string", hint: "regex: matching lines + error/warn lines + context" },
       { key: "lines", type: "string", hint: "line range 'a-b' (1-based, inclusive)" },
+      { key: "redact", type: "boolean", hint: "mask credential-shaped values in the returned slice (default true); false returns the original bytes" },
+      VERBATIM,
     ],
   },
   {

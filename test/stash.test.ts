@@ -90,6 +90,30 @@ describe("stash", () => {
     expect(out).toHaveLength(1);
   });
 
+  // The credential gate only ever refused to IMAGE a secret; fetch handed one
+  // straight back as text, which is the same secret in the same context window
+  // by a shorter route. The stash still stores raw bytes - redact:false proves
+  // it - but the default outgoing slice is masked, and says so.
+  test("fetch redacts credential-shaped values by default; redact:false returns the bytes", () => {
+    const secret = "sk-ant-api03-SECRETSECRETSECRETSECRETdeadbeef";
+    const { id } = stashText(`svc boot ok\napi_key="${secret}"\nAKIAIOSFODNN7EXAMPLE trailing\n`);
+    const out = toolFetch({ id, lines: "1-3" }) as { type: string; text: string }[];
+    expect(out).toHaveLength(1);
+    expect(out[0].text).not.toContain(secret);
+    expect(out[0].text).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    // visible, and the placeholder sits exactly where the value did
+    expect(out[0].text).toStartWith("[2 credential(s) redacted - redact:false to include]\n");
+    expect(out[0].text).toContain('api_key="[redacted:api-key]"');
+    expect(out[0].text).toContain("[redacted:aws-key] trailing");
+    // opt-out: byte-identical to the stashed original, no notice line
+    const plain = toolFetch({ id, lines: "1-3", redact: false }) as { text: string }[];
+    expect(plain[0].text).toBe(fetchSlice(id, null, "1-3"));
+    expect(plain[0].text).toContain(secret);
+    // credential-free content is untouched either way
+    const clean = stashText(LOG);
+    expect((toolFetch({ id: clean.id, lines: "1-2" }) as { text: string }[])[0].text).toBe(fetchSlice(clean.id, null, "1-2"));
+  });
+
   // Slices cannot count what they do not show: the distilled slice is
   // context-padded and collapsed, so an agent comparing frequencies needs the
   // raw match count. Without it the "which unit logged the most errors" task
@@ -224,5 +248,59 @@ describe("verify: disk-grounded exact check", () => {
     const { id } = stashText(NEEDLES);
     expect(() => verifyValue(id, "")).toThrow("non-empty");
     expect(() => verifyValue("deadbeefcafe", "whatever")).toThrow("unknown stash id");
+  });
+});
+// The shape rules only catch vendors who prefix their tokens. An AWS SECRET
+// access key is 40 chars of base64 with no marker, and it leaked straight
+// through `fetch` until the named rule existed - the same "allowlist with an
+// unbounded complement" failure the sidecar classifier had. Bounds here are
+// measured against 19.7 MB of real logs: 2 hits in 166,985 lines, both real.
+const { redactCredentials } = await import("../src/needles.ts");
+
+describe("named-secret redaction", () => {
+
+  test("catches assignment-shaped secrets the shape rules miss", () => {
+    for (const line of [
+      "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI00K7MDENGbPxRfiCYEXAMPLEKEY",
+      "db_password: hunter2000secret",
+      '{"client_secret": "9f3a2b1c4d5e6f7a"}',
+      "DATABASE_PASSWORD=p@ssw0rd-very-long",
+    ]) {
+      const r = redactCredentials(line);
+      expect(r.count).toBe(1);
+      expect(r.text).toContain("[redacted:named-secret]");
+    }
+  });
+
+  test("leaves the key name readable - a masked slice must stay diagnosable", () => {
+    const r = redactCredentials("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI00K7MDENGbPxRfiCYEXAMPLEKEY");
+    expect(r.text).toBe("AWS_SECRET_ACCESS_KEY=[redacted:named-secret]");
+  });
+
+  test("does not fire on the shapes that made real logs false-positive", () => {
+    for (const line of [
+      "CACHE_KEY=abc12345678", // not a secret word
+      "idempotency-key: 9f3a2b1c4d5e", // ditto
+      "imageTokens: rev.tokens,", // plural: source code, 84 hits in git log
+      "systemd-ask-password-console.path: Deactivated successfully.", // word not at key end, 8 hits
+      "const token = `frame-allocator#${hex(r, 6)}`;", // backtick value, 2 hits
+      "token=short", // under the 8-char floor
+    ]) {
+      expect(redactCredentials(line).count).toBe(0);
+    }
+  });
+
+  test("never re-redacts a placeholder an earlier rule wrote", () => {
+    // aws-key fires first; named-secret must not then eat [redacted:aws-key]
+    // and double-count it (it did, until '[' was excluded from value starts)
+    const r = redactCredentials('api_key="AKIAIOSFODNN7EXAMPLE"');
+    expect(r.count).toBe(1);
+    expect(r.text).toBe('api_key="[redacted:aws-key]"');
+  });
+
+  test("splices at the LAST occurrence, which is where Rust splices", () => {
+    // `password=password`: an indexOf-based splice masks the key instead of
+    // the value and silently diverges from the Rust engine
+    expect(redactCredentials("password=password").text).toBe("password=[redacted:named-secret]");
   });
 });

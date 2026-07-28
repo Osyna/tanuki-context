@@ -35,6 +35,34 @@ export interface Sidecar {
   tokens: number; // textTokens(text)
 }
 
+/// The sidecar is tri-state on the wire. Measured on a 1200-line service log:
+/// the sidecar is 5,611 tokens of a 13,213-token render (42%), and 1,199 of
+/// its 1,239 strings are irreducible random hex — compressing it recovers 68
+/// tokens, so the only lever is not shipping it eagerly. `lazy` ships one
+/// pointer line instead, for callers that read the bulk and never quote an id.
+export type Verbatim = "full" | "lazy" | "off";
+
+/// `false` opts out, `"lazy"` withholds, anything else (absent included) is
+/// the full sidecar. Rust eq_ignore_ascii_case: fold ASCII letters only.
+export function parseVerbatim(v: unknown): Verbatim {
+  if (v === false) return "off";
+  if (typeof v !== "string") return "full";
+  return v.length === 4 && v.replace(/[A-Z]/g, (c) => c.toLowerCase()) === "lazy" ? "lazy" : "full";
+}
+
+/// The lazy sidecar: what was withheld and how to get it back. `id` is the
+/// stash the strings can be fetched from; the proxy path has no stash, so it
+/// passes null and the `id=` clause is omitted rather than invented.
+/// Counts what was FOUND, not what a full sidecar would have carried - lazy
+/// withholds the overflow too.
+export function lazyPointer(side: Sidecar, id: string | null): string {
+  return (
+    `·verbatim· ${side.needles.length + side.more} exact strings withheld (lazy) - tanuki_fetch ` +
+    (id === null ? "" : `id=${id} `) +
+    `query=<substring>, or tanuki_verify to settle one value`
+  );
+}
+
 /// The sidecar exists to protect the compression win, so it must not erase
 /// it. Budget its text at half the RAW characters it is an alternative to:
 /// under that, carry every exact string; over it, the sidecar approaches the
@@ -282,6 +310,26 @@ const CREDENTIALS: readonly (readonly [string, RegExp])[] = [
   ["api-key", /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b/g],
   ["private-key", /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g],
   ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g],
+  // Structure, not signature. Every rule above matches a value by its own
+  // shape, which only works for vendors who prefix their tokens. An AWS SECRET
+  // access key is 40 chars of base64 with no marker at all - indistinguishable
+  // from a build hash by shape, and it leaked straight through until this rule
+  // existed. Same inversion the sidecar classifier needed: when the LEFT side
+  // of an assignment names a secret, the right side is one whatever it looks
+  // like.
+  //
+  // Tightened against 19.7 MB of real logs (journal, dmesg, git log, pacman),
+  // which is the only reason the bounds below look arbitrary:
+  //   - the secret word must END the key, or `systemd-ask-password-console.path:
+  //     Deactivated` redacts a status line (8 hits);
+  //   - singular only, or `imageTokens: rev.tokens` redacts source code (84);
+  //   - values exclude backticks, or a template literal matches (2).
+  // Residual is 2 hits in 166,985 lines, and both are real: a test fixture
+  // holding an `sk-ant-` key, and `"x-api-key": process.env.ANTHROPIC_API_KEY`.
+  [
+    "named-secret",
+    /\b[A-Za-z0-9_.-]*(?:secret|password|passwd|token|credential|auth[_-]?key|api[_-]?key|access[_-]?key|private[_-]?key)"?\s*[=:]\s*"?([^\s"',;`\[]{8,})"?/gi,
+  ],
 ];
 
 /// Distinct credential kinds found in `text`, sorted. Empty = safe to image.
@@ -293,4 +341,46 @@ export function scanCredentials(text: string): string[] {
     if (pat.test(text)) kinds.add(kind);
   }
   return [...kinds].sort();
+}
+
+/// Fetch-side counterpart to `scanCredentials`, over the SAME pattern table -
+/// one detector, two verbs. The credential gate stops a secret from becoming
+/// pixels; it never stopped `tanuki_fetch` from handing one back as text,
+/// which is the same secret in the same context window by a shorter route.
+/// So a returned slice is masked on the way out. The stash itself is
+/// untouched: it stores raw bytes (the 19.7 MB round-trip is byte-exact by
+/// construction) and `redact:false` still returns them.
+///
+/// The count is values replaced, not kinds: the caller states it out loud,
+/// because a silently altered slice is a slice the agent re-fetches, or worse,
+/// quotes the placeholder as fact.
+///
+/// ponytail: `private-key` matches the BEGIN header only, so a PEM body still
+/// ships as text below a redacted header. Widen that one pattern in BOTH
+/// engines if a real key corpus ever justifies it - a second heuristic here
+/// would let the gate and the mask disagree about what a secret is.
+export function redactCredentials(text: string): { text: string; count: number } {
+  let out = text;
+  let count = 0;
+  for (const [kind, pat] of CREDENTIALS) {
+    pat.lastIndex = 0;
+    if (!pat.test(out)) continue;
+    pat.lastIndex = 0;
+    // NB: String.replace passes the match OFFSET as the second argument when
+    // the pattern has no capture groups, so this must test for a string - an
+    // `undefined` check silently splices at a number and mangles the output.
+    out = out.replace(pat, (m: string, value: unknown) => {
+      count++;
+      if (typeof value !== "string") return `[redacted:${kind}]`;
+      // Shape rules match the secret itself; the named rule matches
+      // `NAME=value` and captures only the value, so the key stays readable.
+      // lastIndexOf, not indexOf: nothing but an optional quote follows the
+      // capture, so the last occurrence IS the capture - which is the position
+      // the Rust engine replaces at. `password=password` would diverge under
+      // indexOf, and a parity case pins exactly that.
+      const at = m.lastIndexOf(value);
+      return `${m.slice(0, at)}[redacted:${kind}]${m.slice(at + value.length)}`;
+    });
+  }
+  return { text: out, count };
 }

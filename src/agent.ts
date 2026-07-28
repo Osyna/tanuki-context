@@ -99,6 +99,7 @@ export interface ZodNamespace {
   boolean(): ZodChain;
   number(): ZodChain;
   enum(values: readonly [string, ...string[]]): ZodChain;
+  union(options: ZodChain[]): ZodChain;
 }
 
 export interface SdkToolSpec {
@@ -113,7 +114,9 @@ function zodShape(z: ZodNamespace, params: Knob[]): Record<string, ZodChain> {
   const shape: Record<string, ZodChain> = {};
   for (const p of params) {
     let c: ZodChain;
-    if (p.type === "boolean") {
+    if (Array.isArray(p.type)) {
+      c = z.union([z.boolean(), z.string()]);
+    } else if (p.type === "boolean") {
       c = z.boolean();
     } else if (p.type === "integer") {
       c = z.number().int();

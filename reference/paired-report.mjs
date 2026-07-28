@@ -141,7 +141,13 @@ async function runOne(arm, task) {
   const options = arm === "off" ? base : withTanuki(base);
   let text = "";
   let usd = 0;
-  let inputSide = 0;
+  // The three input classes differ by up to 12.5x in price ($3.00 fresh /
+  // $3.75 cache-write / $0.30 cache-read per Mtok on Sonnet), so a single
+  // summed number makes every cost conclusion unfalsifiable: a cached rerun
+  // and a cold run look identical. Record them apart; sum only for display.
+  let fresh = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
   let err = null;
   try {
     for await (const m of query({ prompt, options })) {
@@ -149,14 +155,24 @@ async function runOne(arm, task) {
         text = m.subtype === "success" ? m.result : "";
         usd = m.total_cost_usd ?? 0;
         const u = m.usage ?? {};
-        inputSide = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+        fresh = u.input_tokens ?? 0;
+        cacheRead = u.cache_read_input_tokens ?? 0;
+        cacheWrite = u.cache_creation_input_tokens ?? 0;
       }
     }
   } catch (e) {
     // A hit turn-cap or SDK error is a FAILED task, not a crashed harness.
     err = e?.message ? String(e.message) : String(e);
   }
-  return { ok: err === null && task.check(text), usd, inputSide, text: err ? `[error: ${err.slice(0, 80)}]` : text.slice(0, 200) };
+  return {
+    ok: err === null && task.check(text),
+    usd,
+    fresh,
+    cacheRead,
+    cacheWrite,
+    inputSide: fresh + cacheRead + cacheWrite,
+    text: err ? `[error: ${err.slice(0, 80)}]` : text.slice(0, 200),
+  };
 }
 
 // ---- paired runs, task-major so arms interleave under identical conditions --
@@ -167,7 +183,10 @@ outer: for (const task of PLAN) {
     for (const arm of ["off", "on"]) {
       const r = await runOne(arm, task);
       rows.push({ task: task.name, arm, run: i + 1, ...r });
-      console.log(`  ${task.name} ${arm} #${i + 1}: ${r.ok ? "PASS" : "FAIL"} $${r.usd.toFixed(4)} in=${r.inputSide}`);
+      console.log(
+        `  ${task.name} ${arm} #${i + 1}: ${r.ok ? "PASS" : "FAIL"} $${r.usd.toFixed(4)} ` +
+          `in=${r.inputSide} (fresh ${r.fresh} / write ${r.cacheWrite} / read ${r.cacheRead})`,
+      );
       if (JSON_OUT) appendFileSync(JSON_OUT, JSON.stringify(rows.at(-1)) + "\n");
       spent += r.usd;
       if (BUDGET > 0 && spent >= BUDGET) {
@@ -181,19 +200,31 @@ outer: for (const task of PLAN) {
 // ---- the table ---------------------------------------------------------------
 function armStats(arm) {
   const rs = rows.filter((r) => r.arm === arm);
+  const sum = (f) => rs.reduce((a, r) => a + f(r), 0);
   const ok = rs.filter((r) => r.ok).length;
-  const usd = rs.reduce((a, r) => a + r.usd, 0);
-  const inTok = rs.reduce((a, r) => a + r.inputSide, 0);
-  return { runs: rs.length, ok, usd, inTok, perSuccess: ok > 0 ? usd / ok : null };
+  const usd = sum((r) => r.usd);
+  const fresh = sum((r) => r.fresh);
+  const cacheRead = sum((r) => r.cacheRead);
+  const cacheWrite = sum((r) => r.cacheWrite);
+  const inTok = fresh + cacheRead + cacheWrite;
+  return { runs: rs.length, ok, usd, fresh, cacheRead, cacheWrite, inTok, perSuccess: ok > 0 ? usd / ok : null };
 }
 const off = armStats("off");
 const on = armStats("on");
 const fmt = (s) =>
-  `| ${s.runs} | ${s.ok} (${Math.round((100 * s.ok) / s.runs)}%) | $${s.usd.toFixed(4)} | ${s.inTok} | ${s.perSuccess === null ? "n/a (0 successes)" : `$${s.perSuccess.toFixed(4)}`} |`;
-console.log("\n| arm | runs | successes | total $ | input-side tokens | cost per successful task |");
-console.log("| --- | ---: | ---: | ---: | ---: | ---: |");
+  `| ${s.runs} | ${s.ok} (${Math.round((100 * s.ok) / s.runs)}%) | $${s.usd.toFixed(4)} | ` +
+  `${s.fresh} | ${s.cacheWrite} | ${s.cacheRead} | ` +
+  `${s.inTok === 0 ? "n/a" : `${Math.round((100 * s.cacheRead) / s.inTok)}%`} | ${s.inTok} | ` +
+  `${s.perSuccess === null ? "n/a (0 successes)" : `$${s.perSuccess.toFixed(4)}`} |`;
+console.log(
+  "\n| arm | runs | successes | total $ | fresh in | cache write | cache read | cache hit | input-side tokens | cost per successful task |",
+);
+console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 console.log(`| off (raw text) ${fmt(off)}`);
 console.log(`| on (tanuki) ${fmt(on)}`);
 console.log(
   "\nRead cost-per-success, not the token column: a cheap failure is not a saving. Rerun with PAIRED_RUNS=5+ before believing any single delta.",
+);
+console.log(
+  "The three input classes are priced 12.5x apart (fresh / cache-write / cache-read), so compare arms at the same cache hit rate or the token columns say nothing about spend.",
 );

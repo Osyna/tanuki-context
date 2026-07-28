@@ -201,6 +201,14 @@ const vId = createHash("sha256").update(vText, "utf8").digest("hex").slice(0, 12
 // and return the slice as text identically in both engines (0.14).
 const fText = `${Array.from({ length: 400 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a token=${String(i).padStart(4, "0")}cafebabe9f21`).join("\n")}\n`;
 const fId = createHash("sha256").update(fText, "utf8").digest("hex").slice(0, 12);
+// redaction parity (0.18): a slice carrying credential-shaped values, so a
+// default fetch must mask them and a redact:false fetch must not, identically.
+const secretText = `${Array.from({ length: 40 }, (_, i) =>
+  i % 4 === 0
+    ? `2026-07-27 cfg load AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI${String(i).padStart(2, "0")}K7MDENGbPxRfiCYEXAMPLEKEY`
+    : `2026-07-27 worker-${i % 5} INFO handled request in ${i * 7}ms`,
+).join("\n")}\n`;
+const secretId = createHash("sha256").update(secretText, "utf8").digest("hex").slice(0, 12);
 const req = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
   { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -284,6 +292,17 @@ const req = [
   // measured weak reader: both engines must floor the band and refuse to image
   { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text, level: 0, model: "claude-haiku-4-5" } } },
   { jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text, level: 0, model: "claude-opus-5" } } },
+  // 0.18 lazy sidecar: one pointer line instead of the carried strings. Both
+  // engines must emit it character-for-character, including the id= clause.
+  { jsonrpc: "2.0", id: 23, method: "tools/call", params: { name: "tanuki_render", arguments: { text, verbatim: "lazy" } } },
+  { jsonrpc: "2.0", id: 24, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, lines: "1-400", verbatim: "lazy" } } },
+  // an unrecognised verbatim value must fall back to full in BOTH engines
+  { jsonrpc: "2.0", id: 25, method: "tools/call", params: { name: "tanuki_render", arguments: { text, verbatim: "nonsense" } } },
+  // 0.18 redaction: a fetched slice masks credentials by default, returns raw
+  // bytes under redact:false. Both engines must agree on the mask and count.
+  { jsonrpc: "2.0", id: 26, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: secretText } } },
+  { jsonrpc: "2.0", id: 27, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "1-40" } } },
+  { jsonrpc: "2.0", id: 28, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "1-40", redact: false } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
@@ -293,8 +312,9 @@ const [tsOut, rsOut] = await Promise.all([
 check("MCP reply count", tsOut.length === rsOut.length, `${tsOut.length} vs ${rsOut.length}`);
 for (let i = 0; i < Math.min(tsOut.length, rsOut.length); i++) {
   const a = tsOut[i], b = rsOut[i];
-  if (b.id === 8) {
-    // render: compare text blocks verbatim, images by decoded pixels
+  // renders return PNGs, whose compressed bytes differ by zlib encoder; compare
+  // their text blocks verbatim and their images by decoded pixels
+  if (b.id === 8 || b.id === 23 || b.id === 25) {
     const ta = a.result.content, tb = b.result.content;
     let ok = ta.length === tb.length;
     let detail = ok ? "" : `content len ${ta.length} vs ${tb.length}`;

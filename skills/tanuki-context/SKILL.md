@@ -39,7 +39,9 @@ verbatim, and every drop is counted.
      instead of pasting the text.
    - You only need parts of it, now or later -> `tanuki_stash { text }`
      (returns a ~300-token map + id), then `tanuki_fetch { id, query }` or
-     `{ id, lines: "a-b" }`. Big slices arrive as pages automatically.
+     `{ id, lines: "a-b" }`. Big slices arrive as pages automatically, and
+     credential-shaped values come back as `[redacted:<kind>]` with a count
+     line - pass `redact: false` only when you actually need the secret.
    - **Verify before you quote.** Any id/hash/version/path you read off a
      page -> `tanuki_verify { id, value }` (disk-grounded, no model):
      `exact` (with line), `corrected` (you misread one char - use it),

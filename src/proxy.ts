@@ -27,7 +27,7 @@ import { tableEncode } from "./table.ts";
 import { URL } from "node:url";
 import { distillLog } from "./distill.ts";
 import { apply as codebookApply } from "./codebook.ts";
-import { scanNeedles, scanCredentials } from "./needles.ts";
+import { lazyPointer, scanNeedles, scanCredentials, type Verbatim } from "./needles.ts";
 import { resolveRate } from "./cost.ts";
 import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
@@ -48,6 +48,8 @@ export interface ProxyCfg {
   minSave: number; // and save at least this many tokens
   maxPages: number; // give up on absurdly large single blocks
   recencyWindow: number; // trailing messages always kept as text (default 1)
+  cache: boolean; // place a cache breakpoint on the last imaged message (default on)
+  verbatim: Verbatim; // sidecar next to the pages: full · lazy pointer · off
 }
 
 export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
@@ -61,6 +63,8 @@ export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   minSave: 300,
   maxPages: 20,
   recencyWindow: 1,
+  cache: true,
+  verbatim: "full",
 };
 
 interface ImagedBlock {
@@ -96,23 +100,28 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   const rawTok = textTokens(origChars);
   const r = renderText(working, true, true, cfg.font);
   const side = scanNeedles(working, origChars);
-  const cost = r.tokens + side.tokens;
+  // What the sidecar costs is what it ships. There is no stash on this path,
+  // so a lazy pointer names no id: the caller sees the count and the tools,
+  // not a fabricated sha.
+  const sideTok =
+    cfg.verbatim === "off" ? 0 : cfg.verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, null))) : side.tokens;
+  const cost = r.tokens + sideTok;
   if (r.pages.length > cfg.maxPages) return null;
   // Needle-dense: the sidecar cannot carry every exact string, and this is the
   // automatic path - leaving it as text is the only honest option.
-  if (side.dense) return null;
+  if (side.dense && cfg.verbatim !== "off") return null;
   if (cost > rawTok * cfg.ratio || rawTok - cost < cfg.minSave) return null;
 
   const marker =
     `[tanuki-context: ${origChars} chars imaged in place as ${r.pages.length} PNG page(s), ` +
     `~${cost} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
     (cbEntries > 0 ? `; ·legend· line maps ${cbEntries} sigils` : "") +
-    (side.needles.length > 0 ? `; the ·verbatim· block next carries ${side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
+    (cfg.verbatim === "full" && side.needles.length > 0 ? `; the ·verbatim· block next carries ${side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
     `]`;
   // Sidecar BEFORE the pages: exact strings first, bulk second.
   const blocks: unknown[] = [{ type: "text", text: marker }];
-  if (side.text !== "") {
-    blocks.push({ type: "text", text: side.text });
+  if (cfg.verbatim !== "off" && side.text !== "") {
+    blocks.push({ type: "text", text: cfg.verbatim === "lazy" ? lazyPointer(side, null) : side.text });
   }
   for (const p of r.pages) {
     blocks.push({
@@ -143,6 +152,8 @@ export interface TransformResult {
   /** savedTokens with the session's cache state priced in (can be negative:
    *  the first text->pages flip of a cached block is a real cost). */
   savedTokensCacheAware: number;
+  /** whether a cache_control breakpoint was placed on the imaged prefix. */
+  cached: boolean;
 }
 
 /// Cross-request memory, LEDGER-ONLY by construction: it never changes the
@@ -182,6 +193,25 @@ function cacheAwareSaved(
   return rnd(rawTok * readMult) - rnd(costTok * writeMult);
 }
 
+/// Anthropic accepts at most 4 `cache_control` breakpoints per request and
+/// 400s on a 5th, so count the ones the client already placed (system, tools
+/// and message blocks) before adding ours. Fail-open: a request that worked
+/// without the proxy must still work through it.
+const MAX_BREAKPOINTS = 4;
+function countBreakpoints(body: Record<string, unknown>): number {
+  let n = 0;
+  const scan = (arr: unknown): void => {
+    if (!Array.isArray(arr)) return;
+    for (const b of arr) if (isObj(b) && b.cache_control !== undefined) n++;
+  };
+  scan(body.system);
+  scan(body.tools);
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) if (isObj(m)) scan(m.content);
+  }
+  return n;
+}
+
 /// Rewrite a /v1/messages body. Returns null when nothing changed (caller
 /// forwards the original bytes untouched).
 export function transformRequestBody(
@@ -202,6 +232,8 @@ export function transformRequestBody(
   let imageCount = 0;
   let savedTokens = 0;
   let savedTokensCacheAware = 0;
+  // index of the last message we imaged into; where the cache breakpoint goes
+  let lastImagedMsg = -1;
   // provider ratios for the cache-aware ledger, from the request's own model
   const rate = resolveRate(typeof body.model === "string" ? body.model : null).rate;
 
@@ -271,10 +303,14 @@ export function transformRequestBody(
 
     if (typeof m.content === "string") {
       const done = imageBlock(m.content);
-      if (done) m.content = done.blocks;
+      if (done) {
+        m.content = done.blocks;
+        lastImagedMsg = i;
+      }
       continue;
     }
     if (!Array.isArray(m.content)) continue;
+    const before = imagedBlocks;
 
     const out: unknown[] = [];
     for (const block of m.content) {
@@ -315,10 +351,33 @@ export function transformRequestBody(
       out.push(block);
     }
     m.content = out;
+    if (imagedBlocks > before) lastImagedMsg = i;
   }
 
   if (imagedBlocks === 0) return null;
-  return { body: JSON.stringify(body), imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware };
+
+  // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
+  // the render tests) and re-sent verbatim on every later turn. The proxy has
+  // always PRICED caching (cacheAwareSaved) but never CREATED it. Measured at
+  // Sonnet rates on a 7530-token page set, re-sending it costs $0.226 over 10
+  // turns uncached vs $0.0486 cached - 4.7x, 3.0x over 5 turns, 2.1x over 3.
+  // The breakpoint goes on the last block of the last message we imaged: it is
+  // before the recency window, so everything it covers is settled history.
+  // ponytail: no minimum-prefix check - Anthropic silently declines to cache a
+  // prefix under the model's floor rather than erroring, so a size test would
+  // only duplicate a rule the API already enforces.
+  let cached = false;
+  if (cfg.cache && lastImagedMsg >= 0 && countBreakpoints(body) < MAX_BREAKPOINTS) {
+    const m = body.messages[lastImagedMsg];
+    if (isObj(m) && Array.isArray(m.content) && m.content.length > 0) {
+      const tail = m.content[m.content.length - 1];
+      if (isObj(tail) && tail.cache_control === undefined) {
+        tail.cache_control = { type: "ephemeral" };
+        cached = true;
+      }
+    }
+  }
+  return { body: JSON.stringify(body), imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached };
 }
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
@@ -435,6 +494,9 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 // charged the cache-write premium). Can be negative.
                 saved_tokens_cache_aware: stats?.savedTokensCacheAware ?? 0,
                 caching_seen: session.cachingSeen,
+                // whether WE placed the breakpoint (as opposed to the client
+                // already caching): separates our win from theirs in the ledger
+                cache_breakpoint: stats?.cached ?? false,
                 input_tokens: usage.input,
                 cache_read_tokens: usage.cacheRead,
                 cache_create_tokens: usage.cacheCreate,
@@ -463,7 +525,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once\n` +
+        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });
