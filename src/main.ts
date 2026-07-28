@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.14.0";
+export const VERSION = "0.14.1";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -853,6 +853,9 @@ export function main(): void {
       process.stdout.write(
         jstring({ imageTokens: f.r.tokens, mode: "pages", pages: f.r.pages.length, rawTextTokens: f.rawTok }, false) + "\n",
       );
+      // The sidecar rides with the pages here too, or scripting the CLI loses
+      // every exact string the slice carried.
+      if (f.side.text !== "") process.stdout.write(f.side.text + "\n");
       let dir: string | undefined;
       for (let i = 3; i < argv.length; i++) {
         if (argv[i].startsWith("--")) {
