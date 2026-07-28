@@ -250,3 +250,43 @@ describe("cache-aware ledger", () => {
     expect(warm!.body).toBe(cold!.body);
   });
 });
+// The proxy has always PRICED caching but never CREATED it. Imaged pages are
+// the ideal cache payload: byte-stable and re-sent every turn. Measured at
+// Sonnet rates on a 7530-token page set: 2.1x cheaper over 3 turns, 4.7x
+// over 10.
+describe("cache breakpoint on the imaged prefix", () => {
+  const bodyWith = (extra: Record<string, unknown>): string =>
+    JSON.stringify({
+      messages: [msg("user", [{ type: "text", text: BIG }, { type: "text", text: "tail" }]), msg("user", "latest")],
+      ...extra,
+    });
+
+  test("marks the last block of the last imaged message", () => {
+    const r = transformRequestBody(bodyWith({}), CFG);
+    expect(r!.cached).toBe(true);
+    const c = parse(r).messages[0].content as Block[];
+    // breakpoint sits at the END of the imaged message, so the whole prefix
+    // (system, tools, pages) is covered by one boundary
+    expect(c.at(-1)!.cache_control).toEqual({ type: "ephemeral" });
+    expect(c.filter((b) => b.cache_control !== undefined).length).toBe(1);
+    // and the volatile trailing message is NOT part of the cached prefix
+    expect(parse(r).messages[1].content).toBe("latest");
+  });
+
+  test("never exceeds Anthropic's 4-breakpoint ceiling", () => {
+    // client already spent all four; a fifth is a 400, so we must decline
+    const four = [0, 1, 2, 3].map(() => ({ type: "text", text: "x", cache_control: { type: "ephemeral" } }));
+    const r = transformRequestBody(bodyWith({ system: four }), CFG);
+    expect(r).not.toBeNull(); // still images - only the breakpoint is skipped
+    expect(r!.cached).toBe(false);
+    const c = parse(r).messages[0].content as Block[];
+    expect(c.some((b) => b.cache_control !== undefined)).toBe(false);
+  });
+
+  test("opt-out leaves the body free of breakpoints", () => {
+    const r = transformRequestBody(bodyWith({}), { ...CFG, cache: false });
+    expect(r!.cached).toBe(false);
+    const c = parse(r).messages[0].content as Block[];
+    expect(c.some((b) => b.cache_control !== undefined)).toBe(false);
+  });
+});

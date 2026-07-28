@@ -16,7 +16,7 @@ import { fidelity, weakReader } from "./fidelity.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
-import { scanNeedles, scanCredentials, type Sidecar } from "./needles.ts";
+import { lazyPointer, parseVerbatim, scanNeedles, scanCredentials, redactCredentials, type Sidecar, type Verbatim } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
@@ -24,7 +24,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.17.0";
+export const VERSION = "0.18.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -100,7 +100,7 @@ interface PipeArgs {
   font: string;
   codebook: boolean;
   table: boolean;
-  verbatim: boolean;
+  verbatim: Verbatim;
 }
 
 function pipeArgs(args: unknown): PipeArgs {
@@ -114,7 +114,7 @@ function pipeArgs(args: unknown): PipeArgs {
     font: asStr(jget(args, "font")) ?? "normal",
     codebook: asBool(jget(args, "codebook")) ?? false,
     table: asBool(jget(args, "table")) ?? false,
-    verbatim: asBool(jget(args, "verbatim")) ?? true,
+    verbatim: parseVerbatim(jget(args, "verbatim")),
   };
 }
 
@@ -240,8 +240,12 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
-  const side = a.verbatim ? scanNeedles(p.compressed, charCount(a.text)) : null;
-  const sideTok = side === null ? 0 : side.tokens;
+  const side = a.verbatim === "off" ? null : scanNeedles(p.compressed, charCount(a.text));
+  // `lazy` ships the pointer line instead of the strings, so price what
+  // actually ships or the verdict argues against a mode that costs ~30 tokens
+  // in place of 5,611. estimate stashes nothing, so its pointer names no id.
+  const sideTok =
+    side === null ? 0 : a.verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, null))) : side.tokens;
   const imgTok = est.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
@@ -269,7 +273,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
-    verbatim: side === null ? false : { more: side.more, dense: side.dense, needles: side.needles.length + side.more, tokens: side.tokens },
+    verbatim: side === null ? false : { more: side.more, dense: side.dense, needles: side.needles.length + side.more, tokens: sideTok },
     verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : side !== null && side.dense ? "TEXT cheaper (needle-dense)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     credentials: creds.length > 0 ? creds : false,
     recommend: rec,
@@ -304,7 +308,7 @@ export function toolRender(args: unknown): unknown[] {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
-  const side = a.verbatim ? scanNeedles(p.compressed, charCount(a.text)) : null;
+  const side = a.verbatim === "off" ? null : scanNeedles(p.compressed, charCount(a.text));
   if (side !== null && side.dense) {
     // Same contract as the credential gate: exactness must never ride on
     // pixels silently. `estimate` already routes this to text; rendering
@@ -354,14 +358,29 @@ export function toolRender(args: unknown): unknown[] {
   if (a.reflow) {
     summary += " · ↵ = newline · engine: pxpipe";
   }
-  if (side !== null && side.needles.length > 0) {
+  // Under `lazy` the strings do not follow, so the clause that promises them
+  // is dropped: the pointer line below says what happened instead.
+  if (a.verbatim === "full" && side !== null && side.needles.length > 0) {
     summary += ` · verbatim: ${side.needles.length} exact strings follow as text - read ids from there, not from the pages`;
   }
   // Sidecar BEFORE the pages: exact strings first, bulk second. Trailing it
   // after the images is how a traced agent missed an id it already had.
   const content: unknown[] = [{ type: "text", text: summary }];
   if (side !== null && side.text !== "") {
-    content.push({ type: "text", text: side.text });
+    let block = side.text;
+    if (a.verbatim === "lazy") {
+      // Stash the original so the pointer is actionable: without an id neither
+      // tanuki_fetch nor tanuki_verify can settle a value lazy withheld. The
+      // id is content-addressed, so both engines name the same stash.
+      let sid: string | null = null;
+      try {
+        sid = stashText(a.text).id;
+      } catch {
+        sid = null; // unwritable stash: name no id rather than invent one
+      }
+      block = lazyPointer(side, sid);
+    }
+    content.push({ type: "text", text: block });
   }
   content.push(...imageBlocks(r.pages.slice(0, MAX_INLINE_PAGES)));
   if (r.pages.length > MAX_INLINE_PAGES) {
@@ -427,6 +446,7 @@ interface FetchResult {
   rawTok: number;
   r: Rendered;
   side: Sidecar;
+  sideTok: number; // what the sidecar SHIPS: 0 off, one pointer line lazy
   wins: boolean;
 }
 
@@ -439,25 +459,31 @@ interface FetchResult {
 /// manual recommends for large references — and an agent that cannot read an
 /// id off the page just fetches again, which is the loop thrash in EVALS §6.
 /// Sidecar tokens count against the win, and a needle-dense slice stays text.
-function fetchRendered(id: string, query: string | null, lines: string | null): FetchResult {
+function fetchRendered(id: string, query: string | null, lines: string | null, verbatim: Verbatim): FetchResult {
   const slice = fetchSlice(id, query, lines);
   const rawTok = textTokens(charCount(slice));
   const r = renderText(slice, true, true, "normal");
   const side = scanNeedles(slice, charCount(slice));
-  const cost = r.tokens + side.tokens;
+  const sideTok =
+    verbatim === "off" ? 0 : verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, id))) : side.tokens;
+  const cost = r.tokens + sideTok;
+  // `lazy` withholds the strings but never the refusal: a needle-dense slice
+  // still stays text, exactly as it does under the full sidecar.
   const wins =
     cost <= rawTok * 0.75 &&
     rawTok - cost >= 300 &&
     r.pages.length <= 6 &&
     scanCredentials(slice).length === 0 &&
-    !side.dense;
-  return { slice, rawTok, r, side, wins };
+    (verbatim === "off" || !side.dense);
+  return { slice, rawTok, r, side, sideTok, wins };
 }
 
 export function toolFetch(args: unknown): unknown[] {
   const id = asStr(jget(args, "id")) ?? "";
   const query = asStr(jget(args, "query"));
-  const f = fetchRendered(id, query, asStr(jget(args, "lines")));
+  const redact = asBool(jget(args, "redact")) ?? true;
+  const verbatim = parseVerbatim(jget(args, "verbatim"));
+  const f = fetchRendered(id, query, asStr(jget(args, "lines")), verbatim);
   // A query fetch reports how many raw lines matched. The slice is distilled
   // and context-padded, so counting it is wrong - and without a real count an
   // agent cannot answer "which unit logged the most errors" at all: it can
@@ -467,19 +493,29 @@ export function toolFetch(args: unknown): unknown[] {
     return `[query matched ${c.matched} of ${c.total} lines]`;
   })();
   if (!f.wins) {
-    return [{ type: "text", text: counted === "" ? f.slice : `${counted}\n${f.slice}` }];
+    // The only path a credential can reach the context on: `wins` already
+    // requires a credential-free slice, so an imaged fetch never carries one.
+    // Visible, never silent - a masked slice the agent cannot see was masked
+    // is a slice it re-fetches, or quotes the placeholder from as fact.
+    const red = redact ? redactCredentials(f.slice) : { text: f.slice, count: 0 };
+    let body = red.text;
+    if (red.count > 0) body = `[${red.count} credential(s) redacted - redact:false to include]\n${body}`;
+    if (counted !== "") body = `${counted}\n${body}`;
+    return [{ type: "text", text: body }];
   }
   const marker =
     `[tanuki-context stash ${id}: slice of ${charCount(f.slice)} chars imaged as ${f.r.pages.length} PNG page(s), ` +
-    `~${f.r.tokens + f.side.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
+    `~${f.r.tokens + f.sideTok} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
     (query === null ? "" : `; ${counted.slice(1, -1)}`) +
-    (f.side.needles.length > 0 ? `; the ·verbatim· block next carries ${f.side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
+    (verbatim === "full" && f.side.needles.length > 0 ? `; the ·verbatim· block next carries ${f.side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
     `]`;
   // Sidecar BEFORE the pages. Trailing it after a 12KB image is how a traced
   // agent missed the answer it had already been handed and re-queried six
   // times (EVALS §6). Exact strings first, bulk second.
   const out: unknown[] = [{ type: "text", text: marker }];
-  if (f.side.text !== "") out.push({ type: "text", text: f.side.text });
+  if (verbatim !== "off" && f.side.text !== "") {
+    out.push({ type: "text", text: verbatim === "lazy" ? lazyPointer(f.side, id) : f.side.text });
+  }
   out.push(...imageBlocks(f.r.pages));
   return out;
 }
@@ -852,6 +888,8 @@ export function main(): void {
             ? Number(process.env.TANUKI_RECENCY)
             : PROXY_DEFAULTS.recencyWindow,
         ),
+        cache: !argv.includes("--no-cache"),
+        verbatim: parseVerbatim(flagVal(argv, "--verbatim")),
       });
       break;
     }
@@ -862,15 +900,21 @@ export function main(): void {
       break;
     }
     case "fetch": {
-      const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]");
+      const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]");
+      const verbatim = parseVerbatim(flagVal(argv, "--verbatim"));
       let f: FetchResult;
       try {
-        f = fetchRendered(id, flagVal(argv, "--query"), flagVal(argv, "--lines"));
+        f = fetchRendered(id, flagVal(argv, "--query"), flagVal(argv, "--lines"), verbatim);
       } catch (e) {
         fatal(e instanceof Error ? e.message : String(e));
       }
       if (!f.wins) {
-        process.stdout.write(jstring({ mode: "text" }, false) + "\n" + f.slice + "\n");
+        // Same contract as the tool: the text a caller pipes onward is masked
+        // unless it asks for the bytes. `--no-redact` is what the EVALS §7
+        // byte-identity round-trip (stash, fetch, cmp) passes.
+        const red = argv.includes("--no-redact") ? { text: f.slice, count: 0 } : redactCredentials(f.slice);
+        const head = red.count > 0 ? { mode: "text", redacted: red.count } : { mode: "text" };
+        process.stdout.write(jstring(head, false) + "\n" + red.text + "\n");
         break;
       }
       process.stdout.write(
@@ -878,11 +922,13 @@ export function main(): void {
       );
       // The sidecar rides with the pages here too, or scripting the CLI loses
       // every exact string the slice carried.
-      if (f.side.text !== "") process.stdout.write(f.side.text + "\n");
+      if (verbatim !== "off" && f.side.text !== "") {
+        process.stdout.write((verbatim === "lazy" ? lazyPointer(f.side, id) : f.side.text) + "\n");
+      }
       let dir: string | undefined;
       for (let i = 3; i < argv.length; i++) {
         if (argv[i].startsWith("--")) {
-          if (argv[i] === "--query" || argv[i] === "--lines") i++;
+          if (argv[i] === "--query" || argv[i] === "--lines" || argv[i] === "--verbatim") i++;
           continue;
         }
         dir = argv[i];

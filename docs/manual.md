@@ -258,7 +258,7 @@ All modes run the same engine and log their savings to the same file, which
 | `tanuki_distill`  | de-noises a log (`table:true` for NDJSON), output stays text | when you want greppable text, not images |
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
 | `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
-| `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big  | after a stash, when you actually need it |
+| `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big; credential-shaped values masked on the way out (`redact:false` for the bytes) | after a stash, when you actually need it |
 | `tanuki_verify`   | disk-grounded check of a value read off a page (exact/corrected/ambiguous/absent + line) | before quoting an id/hash you transcribed from pixels |
 | `tanuki_stats`    | totals from the session's savings log: optimistic + cache-aware bounds, output share, own furniture cost | end-of-session accounting                |
 
@@ -917,7 +917,7 @@ npx tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--
 npx tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 npx tanuki-context stash <file>             # park text, print the map + id
-npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact]
 npx tanuki-context run [--query re] -- <command> [args...]   # rtk-style wrapper
 ```
 
