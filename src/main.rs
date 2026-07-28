@@ -167,6 +167,16 @@ fn recommend_for(text: &str) -> Value {
     let distilled = distill::distill_log(dis_base, None, 2).distilled;
     let (dcb, dest, _) = walk(&distilled);
     let tiny = render::estimate_text(&winner, true, true, render::Font::Tiny);
+    // Stays-as-text route (no pxpipe): the wider router's answer for when imaging
+    // loses - cached text, small inputs, or credential content that must not be
+    // pixels. Lossless whitespace (ladder L1: trailing ws + blank-line runs, safe
+    // for code) is the headline; distill is the lossy-but-error-preserving log
+    // sibling, priced as text - the same distilled bytes withDistill counts as
+    // pages. Tier 0/1 of the density note: delete waste before you reach to image.
+    let raw_text_tok = text_tokens(text.chars().count());
+    let ws_tok = text_tokens(ladder::compress_text(text, 1).compressed.chars().count());
+    let ws_wins = ws_tok < raw_text_tok;
+    let text_tok = if ws_wins { ws_tok } else { raw_text_tok };
     json!({
         "codebook": cb,
         "imageTokens": est.tokens,
@@ -174,7 +184,43 @@ fn recommend_for(text: &str) -> Value {
         "table": table,
         "tinyImageTokens": tiny.tokens,
         "withDistill": { "codebook": dcb, "imageTokens": dest.tokens },
+        "text": {
+            "transform": if ws_wins { "whitespace" } else { "none" },
+            "tokens": text_tok,
+            "savedPct": pct(raw_text_tok, text_tok),
+            "withDistill": text_tokens(distilled.chars().count()),
+        },
     })
+}
+
+/// The hybrid pick: ONE recommended route over the candidates `recommend`
+/// already prices, gated by real cost AND read-back fidelity - not just fewest
+/// tokens. Imaging is chosen only when it clears the DeepSeek-OCR clean band
+/// (high/good) AND is the genuine save; past the cliff, on cached content, or on
+/// credentials it routes to the lossless text side. Every alternative stays
+/// priced in `recommend` for the caller to override - the historic image/text
+/// call widened to hybrid. Byte-identical decision with the TS engine.
+fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper: Option<&str>) -> Value {
+    let rec_img = rec["imageTokens"].as_u64().unwrap();
+    let text_tok = rec["text"]["tokens"].as_u64().unwrap();
+    let transform = rec["text"]["transform"].as_str().unwrap();
+    let image_tok = rec_img + side_tok; // imaging always ships the verbatim sidecar
+    let fid = fidelity::fidelity(raw_tok, rec_img, false);
+    let level = fid["level"].as_str().unwrap();
+    let image_clean = level == "high" || level == "good";
+    let text_pick = if transform == "none" { "raw" } else { "text" };
+    let (pick, tokens, fidelity_s, reason): (&str, u64, &str, &str) = if creds {
+        (text_pick, text_tok, "exact", "credential content is never imaged - stay text")
+    } else if cost_cheaper == Some("TEXT") {
+        (text_pick, text_tok, "exact", "priced in dollars the text side wins (cached content loses as pixels)")
+    } else if image_clean && image_tok < text_tok {
+        ("image", image_tok, level, "imaging clears the read-back band and beats the text side on tokens")
+    } else if !image_clean {
+        (text_pick, text_tok, "exact", "imaging is past the read-back cliff; the lossless text route keeps fidelity (image only to comprehend the bulk)")
+    } else {
+        (text_pick, text_tok, "exact", "the text side is already the cheaper route; imaging adds no real save")
+    };
+    json!({ "pick": pick, "tokens": tokens, "savedPct": pct(raw_tok, tokens), "fidelity": fidelity_s, "reason": reason })
 }
 
 fn tool_estimate(args: &Value) -> Value {
@@ -191,6 +237,7 @@ fn tool_estimate(args: &Value) -> Value {
     let cached = args["cached"].as_bool().unwrap_or(false);
     let creds = needles::scan_credentials(a.text);
     let has_creds = !creds.is_empty();
+    let rec = recommend_for(a.text);
     let mut out = json!({
         "engine": "pxpipe",
         "level": format!("{} {}", p.level, name),
@@ -205,7 +252,7 @@ fn tool_estimate(args: &Value) -> Value {
         "totalSavedPct": pct(raw_tok, img_tok + side_tok),
         "fidelity": fidelity::fidelity(raw_tok, img_tok, font == render::Font::Tiny),
         "protectedLines": p.protected_lines,
-        "recommend": recommend_for(a.text),
+        "recommend": rec.clone(),
         "pack": a.pack,
         "font": if font == render::Font::Tiny { "tiny" } else { "normal" },
         "codebook": if a.codebook { json!(p.cb_entries) } else { json!(false) },
@@ -225,6 +272,8 @@ fn tool_estimate(args: &Value) -> Value {
     if model.is_some() || cached {
         out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached, Some(&est.dims));
     }
+    let cost_cheaper = out.get("cost").and_then(|c| c["cheaper"].as_str()).map(str::to_string);
+    out["route"] = route_for(raw_tok, &rec, side_tok, has_creds, cost_cheaper.as_deref());
     out
 }
 
@@ -399,7 +448,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_estimate",
-            "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. The 'fidelity' field maps the imaged density ratio to expected read-back accuracy (DeepSeek-OCR's cliff: ~98% under 8x text/vision tokens, ~60% by 20x; the 4x6 tiny font is capped lower), a signal to keep exact-recall in the verbatim sidecar and reserve lossy tiers for comprehension. One call replaces manual knob probing.",
+            "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route; its 'text' sub-field prices the best stays-as-text cut (lossless whitespace, plus a distill sibling) for when imaging loses — cached, small, or credential content. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. The 'fidelity' field maps the imaged density ratio to expected read-back accuracy (DeepSeek-OCR's cliff: ~98% under 8x text/vision tokens, ~60% by 20x; the 4x6 tiny font is capped lower), a signal to keep exact-recall in the verbatim sidecar and reserve lossy tiers for comprehension. The top-level 'route' field then makes the hybrid call for you — one recommended pick (image / text / raw) weighing real cost AND the read-back fidelity band, not just token count: image only when it clears the clean band and genuinely saves, else the lossless text side (cached, credential, or past-the-cliff content). One call replaces manual knob probing.",
             "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
@@ -883,7 +932,7 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["codebook", "imageTokens", "pages", "table", "tinyImageTokens", "withDistill"]
+            ["codebook", "imageTokens", "pages", "table", "text", "tinyImageTokens", "withDistill"]
         );
         // distill collapses the heartbeat lines, so the lossy route is cheaper
         assert!(
@@ -893,6 +942,14 @@ mod tests {
         assert!(r["pages"].as_u64().unwrap() >= 1);
         assert!(
             r["tinyImageTokens"].as_u64().unwrap() <= r["imageTokens"].as_u64().unwrap()
+        );
+        // stays-as-text route (no pxpipe): distill de-noise beats raw text as text
+        let tf = r["text"]["transform"].as_str().unwrap();
+        assert!(tf == "whitespace" || tf == "none");
+        assert!(r["text"]["tokens"].as_u64().unwrap() <= v["rawTextTokens"].as_u64().unwrap());
+        assert!(r["text"]["savedPct"].as_i64().unwrap() >= 0);
+        assert!(
+            r["text"]["withDistill"].as_u64().unwrap() < r["text"]["tokens"].as_u64().unwrap()
         );
     }
 
@@ -912,6 +969,8 @@ mod tests {
         assert_eq!(v["recommend"]["codebook"], false);
         assert_eq!(v["recommend"]["withDistill"]["codebook"], false);
         assert_eq!(v["recommend"]["imageTokens"].as_u64().unwrap(), plain);
+        // no trailing ws / blank runs and not a log -> nothing safe to cut, stays raw
+        assert_eq!(v["recommend"]["text"]["transform"], "none");
     }
 
     #[test]
@@ -922,6 +981,40 @@ mod tests {
             "text": text, "level": 3, "distill": true, "codebook": true, "font": "tiny",
         }));
         assert_eq!(plain["recommend"], knobbed["recommend"]);
+    }
+
+    #[test]
+    fn route_is_a_hybrid_pick_over_cost_and_fidelity() {
+        let mut logx = String::new();
+        for i in 0..300 {
+            logx.push_str(&format!(
+                "2026-07-27T09:{:02}:00Z worker INFO poll ok latency={}ms\n",
+                i % 60,
+                i % 40
+            ));
+        }
+        // clean band + cheaper imaging -> image
+        let v = tool_estimate(&json!({ "text": logx.clone() }));
+        let r = &v["route"];
+        assert_eq!(r["pick"], "image");
+        let fid = r["fidelity"].as_str().unwrap();
+        assert!(fid == "high" || fid == "good");
+        assert!(r["savedPct"].as_i64().unwrap() > 0);
+        // credentials -> never imaged, text-side and exact
+        let c = tool_estimate(&json!({
+            "text": "api_key=\"sk-ant-api03-SECRETSECRETSECRETSECRETdeadbeef\"\nsurrounding config line for padding and context here\n"
+        }));
+        let cr = &c["route"];
+        let cp = cr["pick"].as_str().unwrap();
+        assert!(cp == "text" || cp == "raw");
+        assert_eq!(cr["fidelity"], "exact");
+        assert!(cr["reason"].as_str().unwrap().contains("credential"));
+        // cached -> real dollars flip the pick to the text side
+        let ch = tool_estimate(&json!({ "text": logx, "model": "claude-opus-4", "cached": true }));
+        let chr = &ch["route"];
+        let chp = chr["pick"].as_str().unwrap();
+        assert!(chp == "text" || chp == "raw");
+        assert!(chr["reason"].as_str().unwrap().contains("cached"));
     }
 
     #[test]
