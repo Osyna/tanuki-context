@@ -16,7 +16,7 @@ import { fidelity } from "./fidelity.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
-import { scanNeedles, scanCredentials } from "./needles.ts";
+import { scanNeedles, scanCredentials, type Sidecar } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.13.2";
+export const VERSION = "0.14.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -417,18 +417,32 @@ interface FetchResult {
   slice: string;
   rawTok: number;
   r: Rendered;
+  side: Sidecar;
   wins: boolean;
 }
 
 /// Fetch a stash slice and decide the return shape (the tanuki_fetch
 /// contract): pages when they clearly win — >=25% and >=300 tokens cheaper,
 /// <=6 pages — text otherwise.
+///
+/// The slice ships its verbatim sidecar exactly like render does. Imaging a
+/// fetched slice without one left every id in it unprotected, on the path the
+/// manual recommends for large references — and an agent that cannot read an
+/// id off the page just fetches again, which is the loop thrash in EVALS §6.
+/// Sidecar tokens count against the win, and a needle-dense slice stays text.
 function fetchRendered(id: string, query: string | null, lines: string | null): FetchResult {
   const slice = fetchSlice(id, query, lines);
   const rawTok = textTokens(charCount(slice));
   const r = renderText(slice, true, true, "normal");
-  const wins = r.tokens <= rawTok * 0.75 && rawTok - r.tokens >= 300 && r.pages.length <= 6 && scanCredentials(slice).length === 0;
-  return { slice, rawTok, r, wins };
+  const side = scanNeedles(slice, charCount(slice));
+  const cost = r.tokens + side.tokens;
+  const wins =
+    cost <= rawTok * 0.75 &&
+    rawTok - cost >= 300 &&
+    r.pages.length <= 6 &&
+    scanCredentials(slice).length === 0 &&
+    !side.dense;
+  return { slice, rawTok, r, side, wins };
 }
 
 export function toolFetch(args: unknown): unknown[] {
@@ -439,8 +453,12 @@ export function toolFetch(args: unknown): unknown[] {
   }
   const marker =
     `[tanuki-context stash ${id}: slice of ${charCount(f.slice)} chars imaged as ${f.r.pages.length} PNG page(s), ` +
-    `~${f.r.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent]`;
-  return [{ type: "text", text: marker }, ...imageBlocks(f.r.pages)];
+    `~${f.r.tokens + f.side.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
+    (f.side.needles.length > 0 ? `; ·verbatim· below carries ${f.side.needles.length} exact strings as text` : "") +
+    `]`;
+  const out: unknown[] = [{ type: "text", text: marker }, ...imageBlocks(f.r.pages)];
+  if (f.side.text !== "") out.push({ type: "text", text: f.side.text });
+  return out;
 }
 
 export function toolVerify(args: unknown): unknown[] {

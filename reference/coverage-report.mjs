@@ -37,7 +37,7 @@ const BLOCK = 120; // lines per rendered page, matches a realistic render
 const RECOVERABLE = [
   /^\d+(?:\.\d+)?(?:ns|us|ms|s|m|h|d|B|[KMGT]i?B|%)$/i,
   /^(?:\d+h)?(?:\d+m)?\d+(?:\.\d+)?s$/,
-  /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.+\-]*)?$/,
+  /^\d{4}-\d{2}-\d{2}(?:[T ][\dZz:.+\-]*)?$/, // ISO; `Z` belongs here or a UTC stamp reads as an id
   /^\d{2}:\d{2}:\d{2}(?:[.,]\d+)?$/,
   /^[vV]?\d+(?:[._]\d+)+$/,
   /^\d{1,8}$/,
@@ -48,10 +48,18 @@ const FAMILIES = [
   [/^[0-9a-fA-F]{6,}$/, "hex run >=6 (git short sha, request id)"],
   [/^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/, "MAC address"],
   [/^(?:[0-9a-fA-F]{4}:)+[0-9a-fA-F]{4}(?:\.[0-9A-Fa-f]+)?$/, "PCI/USB id"],
-  [/^[A-Za-z0-9+/]{16,}={0,2}$/, "base64 blob"],
   [/^\d{9,}$/, "long numeric id"],
   [/^[0-9a-fA-F]{4,}(?:[:-][0-9a-fA-F]{4,})+$/, "hex-group id"],
 ];
+
+/// `/` is in the base64 alphabet, so a bare `{16,}` match also swallows paths
+/// (`dev/input/event5`), fractions (`4379046/60989440`) and hyphen-free prose
+/// (`Encryption/Decryption`). Real base64 draws on all three classes; that is
+/// the cheapest way to keep the family without inventing path heuristics.
+function isBase64Blob(v) {
+  if (!/^[A-Za-z0-9+/]{16,}={0,2}$/.test(v)) return false;
+  return /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v);
+}
 
 /// Whitespace token -> the part that carries the risk (`key=value` -> value).
 function value(tok) {
@@ -66,6 +74,7 @@ function atRiskFamily(v) {
   if (v.length < 6) return null;
   for (const r of RECOVERABLE) if (r.test(v)) return null;
   for (const [r, name] of FAMILIES) if (r.test(v)) return name;
+  if (isBase64Blob(v)) return "base64 blob";
   if (v.length >= 10 && /[0-9]/.test(v) && /[A-Za-z]/.test(v)) {
     let flips = 0;
     for (let i = 1; i < v.length; i++) {
@@ -79,15 +88,25 @@ function atRiskFamily(v) {
 export function coverage(text) {
   const lines = text.split("\n");
   const shipped = new Set();
+  // A dense block is REFUSED for imaging (0.13.2), so it ships as text and
+  // every id in it stays byte-exact readable. Measuring only the sidecar
+  // scores that as a miss and understates the actual guarantee.
+  const refused = [];
   let dense = 0;
   let blocks = 0;
   for (let i = 0; i < lines.length; i += BLOCK) {
-    const s = scanNeedles(lines.slice(i, i + BLOCK).join("\n"));
+    const chunk = lines.slice(i, i + BLOCK).join("\n");
+    const s = scanNeedles(chunk);
     blocks++;
-    if (s.dense) dense++;
+    if (s.dense) {
+      dense++;
+      refused.push(chunk);
+    }
     for (const n of s.needles) shipped.add(n.value);
   }
-  const joined = [...shipped].join("\n"); // byte-exact readability, bare or in-token
+  // byte-exact readability: in the sidecar, or in a block that stayed text
+  const joined = [...shipped].join("\n");
+  const refusedText = refused.join("\n");
   const freq = new Map();
   for (const raw of text.split(/\s+/)) {
     if (raw.length >= 6) freq.set(raw, (freq.get(raw) ?? 0) + 1);
@@ -104,7 +123,7 @@ export function coverage(text) {
     if (fam === null) continue;
     atRisk++;
     riskChars += v.length;
-    if (shipped.has(v) || joined.includes(v)) covered++;
+    if (shipped.has(v) || joined.includes(v) || refusedText.includes(v)) covered++;
     else {
       missChars += v.length;
       miss.set(fam, (miss.get(fam) ?? 0) + 1);
