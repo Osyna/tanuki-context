@@ -15,7 +15,7 @@ import {
   renderText,
 } from "../src/render.ts";
 import { apply as codebookApply } from "../src/codebook.ts";
-import { NEEDLE_CAP, scanCredentials, scanNeedles } from "../src/needles.ts";
+import { NEEDLE_CAP_MIN, scanCredentials, scanNeedles } from "../src/needles.ts";
 import { toolEstimate, toolRender } from "../src/main.ts";
 import { DEFAULT_TOOL_NAMES, TOOLS, visibleTools } from "../src/tools.ts";
 
@@ -537,14 +537,50 @@ describe("verbatim: exact strings ride as text, never pixels", () => {
     expect(s.tokens).toBe(0);
   });
 
-  test("dedupe keeps first occurrence, cap reports the rest", async () => {
+  test("dedupe keeps first occurrence; the cap scales with the block", async () => {
     const dup = "sha256:26e7f9e3971a538a\nsha256:26e7f9e3971a538a";
     expect(scanNeedles(dup).needles.length).toBe(1);
-    const many = Array.from({ length: NEEDLE_CAP + 8 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`).join("\n");
-    const s = scanNeedles(many);
-    expect(s.needles.length).toBe(NEEDLE_CAP);
-    expect(s.more).toBe(8);
-    expect(s.text).toContain("+8 more");
+    // 40 ids on 40 lines: the old flat cap of 32 dropped 8 of them silently.
+    const ids = Array.from({ length: NEEDLE_CAP_MIN + 8 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`);
+    const perLine = scanNeedles(ids.join("\n"));
+    expect(perLine.needles.length).toBe(NEEDLE_CAP_MIN + 8);
+    expect(perLine.more).toBe(0);
+    expect(perLine.dense).toBe(false);
+    // density is what truncates now, and it announces itself
+    const crammed = scanNeedles(ids.join(" "));
+    expect(crammed.needles.length).toBe(NEEDLE_CAP_MIN);
+    expect(crammed.more).toBe(8);
+    expect(crammed.dense).toBe(true);
+    expect(crammed.text).toContain("+8 more");
+  });
+
+  // EVALS §7: the allowlist carried 30.9% of unrecoverable ids on 19.7 MB of
+  // real logs. These are the families it missed - they must not regress.
+  test("ids that match no named format still ride as text", async () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["86:2b:11:51:58:03", "relay dest=86:2b:11:51:58:03 unreachable"],
+      ["6c9224c", "merged 6c9224c into main"],
+      ["1022:14e5", "device 1022:14e5 bound to amdgpu"],
+      ["api-worker-7d9f8b6c4-x2ktp", "pod api-worker-7d9f8b6c4-x2ktp evicted"],
+      ["aGVsbG8gd29ybGQxMjM0NTY3", "body aGVsbG8gd29ybGQxMjM0NTY3 sent"],
+      ["ryvkuvrdmg", "ref=ryvkuvrdmg failed"],
+      ["YHFJNKGNSMTQBWC", "ref=YHFJNKGNSMTQBWC failed"],
+      ["ORD-5171-JRUBJMGB", "order ORD-5171-JRUBJMGB shipped"],
+    ];
+    for (const [id, line] of cases) expect(scanNeedles(line).text).toContain(id);
+  });
+
+  // The other half of the contract: ordinary prose must stay out, or the
+  // sidecar bloats and the compression win goes with it.
+  test("words, durations and timestamps stay out of the sidecar", async () => {
+    for (const line of [
+      "systemd-udev-load-credentials.service started successfully",
+      "upstream.protocol negotiated background filesystem throughput",
+      "lastseen=34m51s lastRecv=35m44s latency=14ms conn=3",
+      "installed ocean-sound-theme noto-fonts-emoji lib32-libunistring",
+    ]) {
+      expect(scanNeedles(line).needles).toEqual([]);
+    }
   });
 
   test("estimate prices the sidecar and the verdict accounts for it", async () => {

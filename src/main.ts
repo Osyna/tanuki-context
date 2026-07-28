@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.12.0";
+export const VERSION = "0.13.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -255,7 +255,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
-    verbatim: side === null ? false : { more: side.more, needles: side.needles.length + side.more, tokens: side.tokens },
+    verbatim: side === null ? false : { more: side.more, dense: side.dense, needles: side.needles.length + side.more, tokens: side.tokens },
     verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     credentials: creds.length > 0 ? creds : false,
     recommend: rec,
