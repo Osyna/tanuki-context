@@ -21,11 +21,18 @@ verbatim, and every drop is counted.
 ## Workflow
 
 1. **Estimate first, always.** `tanuki_estimate { text }` is instant and
-   never renders pixels. Read two things from the answer:
+   never renders pixels. Read the answer's recommendation, top down:
+   - `route` - **the pick**: the one recommended strategy (`image` / `text` /
+     `raw`), chosen by weighing real cost AND the read-back fidelity band, not
+     just tokens. `route.reason` says why; `route.fidelity` is the band (or
+     `exact` for a lossless text pick). Act on this unless you know better.
    - `recommend` - the cheapest reversible knob set (pack/codebook, and
      `table` for whole-JSON input), priced.
    - `recommend.withDistill` - the log route (repeats collapsed with exact
      counts). Cheaper, and honest for logs; do not use it on source code.
+   - `recommend.text` - the best cut that stays TEXT (no pixels): lossless
+     whitespace, plus a distill sibling. The answer when the verdict is TEXT
+     (cached, small, or credential content) - you still save without imaging.
 2. **Act on the verdict.**
    - `"PIPELINE cheaper"` and you need the content in front of you ->
      `tanuki_render` with the recommended knobs. Use the returned pages
