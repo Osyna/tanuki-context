@@ -95,7 +95,7 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
 
   const rawTok = textTokens(origChars);
   const r = renderText(working, true, true, cfg.font);
-  const side = scanNeedles(working);
+  const side = scanNeedles(working, origChars);
   const cost = r.tokens + side.tokens;
   if (r.pages.length > cfg.maxPages) return null;
   if (cost > rawTok * cfg.ratio || rawTok - cost < cfg.minSave) return null;

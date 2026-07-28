@@ -189,11 +189,11 @@ self-correct), ≥6 chars, and **not** a format recoverable from context
 
 ### What the allowlist actually covered
 
-| | before (0.12) | after (0.13) |
+| | before (0.12) | after (0.13.1) |
 | --- | ---: | ---: |
-| at-risk ids carried as text | **1,588 / 5,136 (30.9%)** | **4,982 / 5,136 (97.0%)** |
-| unprotected at-risk chars | 4,204/million = **1 in 238** | 164/million = **1 in 6,101** |
-| needle-dense pages flagged | (silently truncated) | 21 / 1,393 |
+| at-risk ids carried as text | **1,588 / 5,136 (30.9%)** | **5,012 / 5,136 (97.6%)** |
+| unprotected at-risk chars | 4,204/million = **1 in 238** | 132/million = **1 in 7,561** |
+| needle-dense pages flagged | (silently truncated) | 2 / 1,393 |
 
 The families the allowlist could not name, ranked by misses before the fix —
 the reader's three guesses (internal id, pod name, base64 chunk) were the top
@@ -220,10 +220,34 @@ Bias is to recall: a false positive costs a few tokens and is never wrong.
 A second, independent hole compounded the first: `NEEDLE_CAP` was a flat 32
 per rendered block, so **74% of 240-line pages hit it and dropped 31% of the
 needles the scanner had already found** (10% at 120 lines). Better patterns
-are worthless while the cap discards them, so the cap now scales with the
-block (32…512) and overflow sets a `dense` flag — the honest signal that the
-content should stay text. Cost of all this: **~10 extra text tokens per
-120-line page**, about 0.5% of that page's image cost.
+are worthless while the cap discards them.
+
+**0.13.0 half-fixed this and shipped a worse bug.** Scaling the cap by line
+count (32…512) stopped the truncation but left the cap *bounding its own
+cost*: a needle-dense block therefore stayed cheap while dropping the ids the
+sidecar exists to carry, and the router picked it up as a bargain —
+
+```
+720 at-risk ids | sidecar kept 120 | dropped 600 | dense=true
+route: {"pick":"image", "fidelity":"high", "savedPct":65}
+```
+
+600 values unverifiable, imaged at "high" fidelity. The cost math structurally
+cannot catch this, because the thing that overflowed is the thing that would
+have priced it. 0.13.1 fixes both halves:
+
+- the cap is a **budget, not a count** — the sidecar grows until its text
+  would reach half the **raw** characters it protects, the point where imaging
+  stops paying. Measured against raw, not the compressed text handed to the
+  scanner, or a `codebook`/`tiny` run would be refused precisely for
+  compressing well.
+- `dense` is a **hard refusal**, ranked with credentials: `route` stays text,
+  `verdict` reads `TEXT cheaper (needle-dense)`.
+
+Real-log pages flagged dense fell **21/1393 → 2/1393** (fewer false
+truncations) while the genuinely id-dense block is now correctly refused.
+Cost of all this: **~10 extra text tokens per 120-line page**, about 0.5% of
+that page's image cost.
 
 ### The check that cannot be a tautology — `npm run adversarial`
 

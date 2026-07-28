@@ -15,7 +15,7 @@ import {
   renderText,
 } from "../src/render.ts";
 import { apply as codebookApply } from "../src/codebook.ts";
-import { NEEDLE_CAP_MIN, scanCredentials, scanNeedles } from "../src/needles.ts";
+import { SIDECAR_MIN_CHARS, scanCredentials, scanNeedles, sidecarBudget } from "../src/needles.ts";
 import { toolEstimate, toolRender } from "../src/main.ts";
 import { DEFAULT_TOOL_NAMES, TOOLS, visibleTools } from "../src/tools.ts";
 
@@ -537,21 +537,50 @@ describe("verbatim: exact strings ride as text, never pixels", () => {
     expect(s.tokens).toBe(0);
   });
 
-  test("dedupe keeps first occurrence; the cap scales with the block", async () => {
+  test("dedupe keeps first occurrence; the budget carries real logs", async () => {
     const dup = "sha256:26e7f9e3971a538a\nsha256:26e7f9e3971a538a";
     expect(scanNeedles(dup).needles.length).toBe(1);
-    // 40 ids on 40 lines: the old flat cap of 32 dropped 8 of them silently.
-    const ids = Array.from({ length: NEEDLE_CAP_MIN + 8 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`);
-    const perLine = scanNeedles(ids.join("\n"));
-    expect(perLine.needles.length).toBe(NEEDLE_CAP_MIN + 8);
-    expect(perLine.more).toBe(0);
-    expect(perLine.dense).toBe(false);
-    // density is what truncates now, and it announces itself
-    const crammed = scanNeedles(ids.join(" "));
-    expect(crammed.needles.length).toBe(NEEDLE_CAP_MIN);
-    expect(crammed.more).toBe(8);
+    // Ordinary content: prose around a couple of ids, nothing truncated.
+    const mixed = Array.from({ length: 40 }, (_, i) => `2026-07-27T09:30:00Z relay INFO worker heartbeat seq ${i} ok latency=14ms`)
+      .concat(["relay dest=86:2b:11:51:58:03 down", "merged 6c9224c into main"]);
+    const ok = scanNeedles(mixed.join("\n"));
+    expect(ok.more).toBe(0);
+    expect(ok.dense).toBe(false);
+    expect(ok.text).toContain("86:2b:11:51:58:03");
+    expect(ok.text).toContain("6c9224c");
+    // A block that is nothing but ids cannot be protected by a sidecar smaller
+    // than itself: it must say so rather than image them away silently.
+    const ids = Array.from({ length: 40 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`);
+    const crammed = scanNeedles(ids.join("\n"));
     expect(crammed.dense).toBe(true);
-    expect(crammed.text).toContain("+8 more");
+    expect(crammed.more).toBeGreaterThan(0);
+    expect(crammed.text).toContain("more (needle-dense");
+  });
+
+  test("budget scales with raw size", async () => {
+    expect(sidecarBudget(0)).toBe(SIDECAR_MIN_CHARS);
+    expect(sidecarBudget(40_000)).toBe(20_000);
+  });
+
+  // The bug 0.13.0 shipped: a capped sidecar stays cheap while dropping the
+  // ids it exists to protect, so the cost math alone routed dense blocks to
+  // "image" at "high" fidelity with hundreds of values unverifiable.
+  test("a needle-dense block is never routed to image", async () => {
+    let s = 7;
+    const rnd = (): number => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const hex = (n: number): string => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+    const dense = Array.from({ length: 120 }, (_, i) =>
+      `2026-07-27T09:${String(i % 60).padStart(2, "0")}:00Z relay INFO request ${Array.from({ length: 6 }, () => `id=${hex(16)}`).join(" ")} ok`).join("\n");
+    const e = toolEstimate({ text: dense, level: 0 }) as {
+      verdict: string;
+      verbatim: { dense: boolean; more: number };
+      route: { pick: string; reason: string };
+    };
+    expect(e.verbatim.dense).toBe(true);
+    expect(e.verbatim.more).toBeGreaterThan(0);
+    expect(e.route.pick).not.toBe("image");
+    expect(e.route.reason).toContain("needle-dense");
+    expect(e.verdict).toBe("TEXT cheaper (needle-dense)");
   });
 
   // EVALS §7: the allowlist carried 30.9% of unrecoverable ids on 19.7 MB of
