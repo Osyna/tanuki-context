@@ -253,6 +253,23 @@ const req = [
       },
     },
   },
+  // render must REFUSE a needle-dense block, byte-identically, in both
+  // engines (0.13.2 - estimate alone was gated, the action path was not).
+  {
+    jsonrpc: "2.0",
+    id: 17,
+    method: "tools/call",
+    params: {
+      name: "tanuki_render",
+      arguments: {
+        text: Array.from(
+          { length: 40 },
+          (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a token=${String(i).padStart(4, "0")}cafebabe9f21`,
+        ).join("\n"),
+        level: 0,
+      },
+    },
+  },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

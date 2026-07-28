@@ -246,7 +246,12 @@ export function scanNeedles(text: string, rawChars?: number): Sidecar {
   }
   if (kept.length === 0) return { needles: [], more: 0, dense: false, text: "", tokens: 0 };
   kept.sort((a, b) => a.line - b.line);
-  let out = `·verbatim· ${kept.length + more} exact strings (read them here, not from pixels)`;
+  // Say what is CARRIED, not what was found: "read them here" is false for
+  // anything past the budget, and the footer alone is easy to miss.
+  let out =
+    more > 0
+      ? `·verbatim· ${kept.length} of ${kept.length + more} exact strings (read them here, not from pixels)`
+      : `·verbatim· ${kept.length} exact strings (read them here, not from pixels)`;
   for (const n of kept) out += `\nL${n.line} ${n.value}`;
   if (more > 0) out += `\n… +${more} more (needle-dense; keep the source as text)`;
   return { needles: kept, more, dense: more > 0, text: out, tokens: textTokens(charCount(out)) };

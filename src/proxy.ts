@@ -98,13 +98,16 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   const side = scanNeedles(working, origChars);
   const cost = r.tokens + side.tokens;
   if (r.pages.length > cfg.maxPages) return null;
+  // Needle-dense: the sidecar cannot carry every exact string, and this is the
+  // automatic path - leaving it as text is the only honest option.
+  if (side.dense) return null;
   if (cost > rawTok * cfg.ratio || rawTok - cost < cfg.minSave) return null;
 
   const marker =
     `[tanuki-context: ${origChars} chars imaged in place as ${r.pages.length} PNG page(s), ` +
     `~${cost} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
     (cbEntries > 0 ? `; ·legend· line maps ${cbEntries} sigils` : "") +
-    (side.needles.length > 0 ? `; ·verbatim· below carries ${side.needles.length + side.more} exact strings as text` : "") +
+    (side.needles.length > 0 ? `; ·verbatim· below carries ${side.needles.length} exact strings as text` : "") +
     `]`;
   const blocks: unknown[] = [{ type: "text", text: marker }];
   for (const p of r.pages) {

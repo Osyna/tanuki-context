@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.13.1";
+export const VERSION = "0.13.2";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -298,6 +298,17 @@ export function toolRender(args: unknown): unknown[] {
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
   const side = a.verbatim ? scanNeedles(p.compressed, charCount(a.text)) : null;
+  if (side !== null && side.dense) {
+    // Same contract as the credential gate: exactness must never ride on
+    // pixels silently. `estimate` already routes this to text; rendering
+    // anyway would walk straight past that and drop `more` ids unverifiably.
+    return [
+      {
+        type: "text",
+        text: `[tanuki-context: refused to render — ${side.more} of ${side.needles.length + side.more} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:false to opt out knowingly]`,
+      },
+    ];
+  }
   const imgTok = r.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
@@ -337,7 +348,7 @@ export function toolRender(args: unknown): unknown[] {
     summary += " · ↵ = newline · engine: pxpipe";
   }
   if (side !== null && side.needles.length > 0) {
-    summary += ` · verbatim: ${side.needles.length + side.more} exact strings ride below as text`;
+    summary += ` · verbatim: ${side.needles.length} exact strings ride below as text`;
   }
   const content: unknown[] = [{ type: "text", text: summary }];
   content.push(...imageBlocks(r.pages.slice(0, MAX_INLINE_PAGES)));
