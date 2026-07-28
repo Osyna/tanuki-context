@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.11.1";
+export const VERSION = "0.12.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -148,8 +148,19 @@ function recommendFor(text: string): Record<string, unknown> {
     }
   }
   const disBase = table && tbl !== null ? tbl.text : text;
-  const dis = walk(distillLog(disBase, null, 2).distilled);
+  const disDistilled = distillLog(disBase, null, 2).distilled;
+  const dis = walk(disDistilled);
   const tiny = estimateText(rev.text, true, true, parseFont("tiny"));
+  // Stays-as-text route (no pxpipe): the wider router's answer for when imaging
+  // loses - cached text, small inputs, or credential content that must not be
+  // pixels. Lossless whitespace (ladder L1: trailing ws + blank-line runs, safe
+  // for code) is the headline; distill is the lossy-but-error-preserving log
+  // sibling, priced as text - the same distilled bytes withDistill counts as
+  // pages. Tier 0/1 of the density note: delete waste before you reach to image.
+  const rawTextTok = textTokens(charCount(text));
+  const wsTok = textTokens(charCount(compressText(text, 1).compressed));
+  const wsWins = wsTok < rawTextTok;
+  const textTok = wsWins ? wsTok : rawTextTok;
   return {
     codebook: rev.codebook,
     imageTokens: rev.tokens,
@@ -157,7 +168,57 @@ function recommendFor(text: string): Record<string, unknown> {
     table,
     tinyImageTokens: tiny.tokens,
     withDistill: { codebook: dis.codebook, imageTokens: dis.tokens },
+    text: {
+      transform: wsWins ? "whitespace" : "none",
+      tokens: textTok,
+      savedPct: pct(rawTextTok, textTok),
+      withDistill: textTokens(charCount(disDistilled)),
+    },
   };
+}
+
+/// The hybrid pick: ONE recommended route over the candidates `recommend`
+/// already prices, gated by real cost AND read-back fidelity - not just fewest
+/// tokens. Imaging is chosen only when it clears the DeepSeek-OCR clean band
+/// (high/good) AND is the genuine save; past the cliff, on cached content, or on
+/// credentials it routes to the lossless text side. Every alternative stays
+/// priced in `recommend` for the caller to override - this is the historic
+/// image/text call widened to hybrid: pxpipe when it wins without losing the
+/// task, a text tier when it does not.
+function routeFor(
+  rawTok: number,
+  rec: Record<string, unknown>,
+  sideTok: number,
+  creds: number,
+  costCheaper: string | null,
+): Record<string, unknown> {
+  const recImg = rec.imageTokens as number;
+  const text = rec.text as { transform: string; tokens: number };
+  const imageTok = recImg + sideTok; // imaging always ships the verbatim sidecar
+  const level = fidelity(rawTok, recImg, false).level;
+  const imageClean = level === "high" || level === "good";
+  const textPick = text.transform === "none" ? "raw" : "text";
+  let pick: string;
+  let tokens: number;
+  let fid: string;
+  let reason: string;
+  if (creds > 0) {
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "credential content is never imaged - stay text";
+  } else if (costCheaper === "TEXT") {
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "priced in dollars the text side wins (cached content loses as pixels)";
+  } else if (imageClean && imageTok < text.tokens) {
+    pick = "image"; tokens = imageTok; fid = level;
+    reason = "imaging clears the read-back band and beats the text side on tokens";
+  } else if (!imageClean) {
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "imaging is past the read-back cliff; the lossless text route keeps fidelity (image only to comprehend the bulk)";
+  } else {
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "the text side is already the cheaper route; imaging adds no real save";
+  }
+  return { pick, tokens, savedPct: pct(rawTok, tokens), fidelity: fid, reason };
 }
 
 export function toolEstimate(args: unknown): Record<string, unknown> {
@@ -175,6 +236,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const model = asStr(jget(args, "model"));
   const cached = asBool(jget(args, "cached")) ?? false;
   const creds = scanCredentials(a.text);
+  const rec = recommendFor(a.text);
   const out: Record<string, unknown> = {
     engine: "pxpipe",
     level: `${p.level} ${name}`,
@@ -196,13 +258,17 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     verbatim: side === null ? false : { more: side.more, needles: side.needles.length + side.more, tokens: side.tokens },
     verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     credentials: creds.length > 0 ? creds : false,
-    recommend: recommendFor(a.text),
+    recommend: rec,
   };
   // Situation-aware real cost: only when a model or cache state is supplied, so
   // the default token-count result (and the parity harness) stay byte-identical.
+  let costCheaper: string | null = null;
   if (model !== null || cached) {
-    out.cost = costVerdict(rawTok, imgTok, { model, cached }, { dims: est.dims });
+    const cost = costVerdict(rawTok, imgTok, { model, cached }, { dims: est.dims });
+    out.cost = cost;
+    costCheaper = cost.cheaper;
   }
+  out.route = routeFor(rawTok, rec, sideTok, creds.length, costCheaper);
   return out;
 }
 

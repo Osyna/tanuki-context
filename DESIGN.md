@@ -225,6 +225,21 @@ Two further properties:
   distill, which collapses similar-looking lines. Cheapest and safe are
   different claims: the headline now walks reversible knobs only, and the
   distill route is priced separately under `withDistill`.
+- **`recommend.text`: the router widened to the no-image case (0.12.0).** The
+  verdict can be TEXT - cached content, small inputs, or credentials that must
+  never be pixels - and the old answer stopped at "send it raw." Now the same
+  call prices the best stays-as-text cut: lossless whitespace (ladder L1) as the
+  headline, distill as the lossy log sibling, counted as text not pages. Tier
+  0/1 of the base64-density note (delete waste, tokenizer-friendly) folded into
+  the one router, so there is always a token answer even when imaging loses.
+- **`route`: the hybrid pick, cost AND fidelity (0.12.0).** `recommend` prices
+  the routes; `route` chooses one. The historic call was image-vs-text on token
+  count alone - which would image content past the DeepSeek-OCR read-back cliff
+  just because pixels are fewer tokens. `route` gates on the fidelity band and
+  real dollars too: image only when it clears the clean band (high/good) and is
+  the genuine save; text/raw on credentials, cached content, or past-the-cliff
+  density. Every alternative stays priced for override - a transparent policy
+  over measured signals, not a guess about the task.
 - **`recommend`: the knob walk is server-side.** Tool chatter is context
   too: probing the knob combos by hand costs ~590 tokens of estimate
   rounds, and the tool-call overhead of using tanuki is as real as the
