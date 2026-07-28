@@ -200,12 +200,12 @@ fn recommend_for(text: &str) -> Value {
 /// credentials it routes to the lossless text side. Every alternative stays
 /// priced in `recommend` for the caller to override - the historic image/text
 /// call widened to hybrid. Byte-identical decision with the TS engine.
-fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper: Option<&str>, dense: bool) -> Value {
+fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper: Option<&str>, dense: bool, weak: bool) -> Value {
     let rec_img = rec["imageTokens"].as_u64().unwrap();
     let text_tok = rec["text"]["tokens"].as_u64().unwrap();
     let transform = rec["text"]["transform"].as_str().unwrap();
     let image_tok = rec_img + side_tok; // imaging always ships the verbatim sidecar
-    let fid = fidelity::fidelity(raw_tok, rec_img, false);
+    let fid = fidelity::fidelity(raw_tok, rec_img, false, weak);
     let level = fid["level"].as_str().unwrap();
     let image_clean = level == "high" || level == "good";
     let text_pick = if transform == "none" { "raw" } else { "text" };
@@ -216,6 +216,10 @@ fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper
         // The cost math cannot catch this alone - a capped sidecar stays cheap
         // while dropping the very ids it exists to protect.
         (text_pick, text_tok, "exact", "needle-dense: more exact strings than the sidecar can carry, so imaging would drop some of them unverifiably - stay text")
+    } else if weak {
+        // The band is calibrated to a capable reader. This one is measured at
+        // 0% on pages while scoring 100% as text, so no density is safe for it.
+        (text_pick, text_tok, "exact", "this model reads dense pages at 0% task success while scoring 100% on the same task as text (EVALS \u{a7}3) - stay text")
     } else if cost_cheaper == Some("TEXT") {
         (text_pick, text_tok, "exact", "priced in dollars the text side wins (cached content loses as pixels)")
     } else if image_clean && image_tok < text_tok {
@@ -255,7 +259,7 @@ fn tool_estimate(args: &Value) -> Value {
         "imageTokens": img_tok,
         "rawTextTokens": raw_tok,
         "totalSavedPct": pct(raw_tok, img_tok + side_tok),
-        "fidelity": fidelity::fidelity(raw_tok, img_tok, font == render::Font::Tiny),
+        "fidelity": fidelity::fidelity(raw_tok, img_tok, font == render::Font::Tiny, fidelity::weak_reader(model)),
         "protectedLines": p.protected_lines,
         "recommend": rec.clone(),
         "pack": a.pack,
@@ -278,7 +282,7 @@ fn tool_estimate(args: &Value) -> Value {
         out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached, Some(&est.dims));
     }
     let cost_cheaper = out.get("cost").and_then(|c| c["cheaper"].as_str()).map(str::to_string);
-    out["route"] = route_for(raw_tok, &rec, side_tok, has_creds, cost_cheaper.as_deref(), side.as_ref().is_some_and(|s| s.dense));
+    out["route"] = route_for(raw_tok, &rec, side_tok, has_creds, cost_cheaper.as_deref(), side.as_ref().is_some_and(|s| s.dense), fidelity::weak_reader(model));
     out
 }
 

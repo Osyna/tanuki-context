@@ -118,11 +118,11 @@ const HEADERS = {
   "anthropic-version": "2023-06-01",
 };
 
-async function ask(content) {
+async function ask(content, model) {
   const res = await fetch(API, {
     method: "POST",
     headers: HEADERS,
-    body: JSON.stringify({ model: MODEL, max_tokens: 4000, messages: [{ role: "user", content }] }),
+    body: JSON.stringify({ model, max_tokens: 4000, messages: [{ role: "user", content }] }),
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
   const data = await res.json();
@@ -131,42 +131,57 @@ async function ask(content) {
   return txt || blocks.map((b) => b.thinking || "").join("").trim(); // thinking fallback if truncated
 }
 
-const askText = (c) => ask([{ type: "text", text: `${c.textArm}\n\n${QUESTION}` }]);
-const askImage = (c) =>
-  ask([
-    ...c.pages.map((p) => ({
-      type: "image",
-      source: { type: "base64", media_type: "image/png", data: readFileSync(p).toString("base64") },
-    })),
-    { type: "text", text: QUESTION },
-  ]);
+const askText = (c, model) => ask([{ type: "text", text: `${c.textArm}\n\n${QUESTION}` }], model);
+const askImage = (c, model) =>
+  ask(
+    [
+      ...c.pages.map((p) => ({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: readFileSync(p).toString("base64") },
+      })),
+      { type: "text", text: QUESTION },
+    ],
+    model,
+  );
 
 // substring is the pass bar; exact is reported alongside as the stricter signal.
-const stats = { text: { n: 0, correct: 0, exact: 0 }, image: { n: 0, correct: 0, exact: 0 } };
-for (const c of cases) {
-  for (const [arm, askFn] of [["text", askText], ["image", askImage]]) {
-    let answer = "";
-    try {
-      answer = await askFn(c);
-    } catch (e) {
-      console.error(`  seed ${c.seed} ${arm}: ERROR ${e.message}`);
+// TASK_MODELS profiles several readers in one run: the fidelity band in
+// `estimate` is calibrated to a CAPABLE reader, and which models qualify is a
+// measured question, not an assumption (EVALS §3).
+const MODELS = (process.env.TASK_MODELS || MODEL).split(",").map((s) => s.trim()).filter(Boolean);
+const profile = [];
+for (const model of MODELS) {
+  const stats = { text: { n: 0, correct: 0, exact: 0 }, image: { n: 0, correct: 0, exact: 0 } };
+  console.log(`\n== ${model} ==`);
+  for (const c of cases) {
+    for (const [arm, askFn] of [["text", askText], ["image", askImage]]) {
+      let answer = "";
+      try {
+        answer = await askFn(c, model);
+      } catch (e) {
+        console.error(`  seed ${c.seed} ${arm}: ERROR ${e.message}`);
+      }
+      const correct = answer.includes(c.token);
+      const exact = answer === c.token;
+      stats[arm].n++;
+      stats[arm].correct += correct ? 1 : 0;
+      stats[arm].exact += exact ? 1 : 0;
+      console.log(`  seed ${c.seed} ${arm}: ${correct ? "PASS" : "FAIL"}${exact ? " (exact)" : ""} <- ${answer.slice(0, 60)}`);
     }
-    const correct = answer.includes(c.token);
-    const exact = answer === c.token;
-    stats[arm].n++;
-    stats[arm].correct += correct ? 1 : 0;
-    stats[arm].exact += exact ? 1 : 0;
-    console.log(`  seed ${c.seed} ${arm}: ${correct ? "PASS" : "FAIL"}${exact ? " (exact)" : ""} <- ${answer.slice(0, 80)}`);
   }
+  profile.push({ model, ...stats });
 }
 
 const pct = (a) => (a.n ? Math.round((100 * a.correct) / a.n) : 0);
-console.log("\n| arm | n | correct | accuracy | exact |");
-console.log("| --- | ---: | ---: | ---: | ---: |");
-for (const arm of ["text", "image"]) {
-  const a = stats[arm];
-  console.log(`| ${arm} | ${a.n} | ${a.correct} | ${pct(a)}% | ${a.exact} |`);
+console.log("\n| model | n | text | image | image exact | reader |");
+console.log("| --- | ---: | ---: | ---: | ---: | --- |");
+for (const p of profile) {
+  // "capable" is the band's own premise: the page kept the task as solvable as
+  // the text did. Anything materially below its own text arm is not.
+  const gap = pct(p.text) - pct(p.image);
+  const verdict = p.image.n === 0 ? "n/a" : pct(p.image) >= 80 && gap <= 20 ? "capable" : pct(p.image) === 0 ? "cannot read pages" : "degraded";
+  console.log(`| ${p.model} | ${p.text.n} | ${pct(p.text)}% | ${pct(p.image)}% | ${p.image.exact} | ${verdict} |`);
 }
 console.log(
-  "\nThe number that matters is image accuracy vs text accuracy: if image ~ text, the page render kept the task solvable. Rerun with more TASK_SEEDS before trusting any single delta.",
+  "\nThe number that matters is image accuracy vs text accuracy on the SAME model: if image ~ text, the page render kept the task solvable. A model whose image arm collapses while its text arm holds is not the 'capable reader' the fidelity band assumes - keep its context as text or raise the font.",
 );
