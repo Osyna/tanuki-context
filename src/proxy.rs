@@ -458,7 +458,15 @@ fn handle(
     if is_messages {
         if let Ok(text) = std::str::from_utf8(&body_buf) {
             let mut guard = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            tstats = transform_request_body(text, cfg, Some(&mut guard));
+            // Fail open. A compression proxy sits in the request path and must
+            // never break the request it is optimizing; a panic here would take
+            // the connection down with it. Forward the original bytes instead.
+            // AssertUnwindSafe is sound because a panic discards tstats and the
+            // session is best-effort stats whose poisoning is already handled.
+            tstats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transform_request_body(text, cfg, Some(&mut guard))
+            }))
+            .unwrap_or(None);
         }
         if let Some(s) = &tstats {
             body_buf = s.body.clone().into_bytes();
