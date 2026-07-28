@@ -427,22 +427,40 @@ fn tool_stash(args: &Value) -> Result<Value, String> {
 /// win, and a needle-dense slice stays text.
 fn tool_fetch(args: &Value) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
-    let slice = stash::fetch_slice(id, args["query"].as_str(), args["lines"].as_str())?;
+    let query = args["query"].as_str();
+    let slice = stash::fetch_slice(id, query, args["lines"].as_str())?;
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
     let raw_tok = text_tokens(chars);
     let side = needles::scan_needles_sized(&slice, chars);
     let cost = r.tokens + side.tokens;
+    // A query fetch reports how many RAW lines matched: the slice is distilled
+    // and context-padded, so counting it is wrong, and without a real count an
+    // agent cannot answer "which unit logged the most errors" at all.
+    let counted = match query {
+        Some(q) => {
+            let (m, t) = stash::match_count(id, q)?;
+            Some(format!("[query matched {m} of {t} lines]"))
+        }
+        None => None,
+    };
     if !stash_pages_win(cost, r.pages.len(), raw_tok)
         || !needles::scan_credentials(&slice).is_empty()
         || side.dense
     {
-        return Ok(json!([{ "type": "text", "text": slice }]));
+        let body = match &counted {
+            Some(c) => format!("{c}\n{slice}"),
+            None => slice,
+        };
+        return Ok(json!([{ "type": "text", "text": body }]));
     }
     let mut marker = format!(
         "[tanuki-context stash {id}: slice of {chars} chars imaged as {} PNG page(s), ~{cost} vs ~{raw_tok} text tokens. ↵=newline →=tab ⇥N=indent",
         r.pages.len(),
     );
+    if let Some(c) = &counted {
+        marker.push_str(&format!("; {}", &c[1..c.len() - 1]));
+    }
     if !side.needles.is_empty() {
         marker.push_str(&format!(
             "; the \u{b7}verbatim\u{b7} block next carries {} exact strings as text - read ids from there, not from the pages",

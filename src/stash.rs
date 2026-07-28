@@ -85,6 +85,20 @@ pub fn fetch_slice(id: &str, query: Option<&str>, lines: Option<&str>) -> Result
     Ok(segs[a - 1..b].join("\n"))
 }
 
+/// How many raw lines of the stash match `query`, and how many there are.
+/// The distilled slice keeps context lines and collapses repeats, so its line
+/// count is NOT a match count - and without a real one an agent cannot answer
+/// "which unit logged the most errors" at all (EVALS section 6).
+pub fn match_count(id: &str, query: &str) -> Result<(usize, usize), String> {
+    let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
+        return Err(format!("unknown stash id: {id}"));
+    };
+    let re = regex::Regex::new(query).map_err(|_| format!("bad query regex: {query}"))?;
+    let segs: Vec<&str> = text.split('\n').collect();
+    let matched = segs.iter().filter(|l| re.is_match(l)).count();
+    Ok((matched, segs.len()))
+}
+
 /// "a-b" -> (a, b); None when unparsable or a > b.
 fn parse_range(s: &str) -> Option<(usize, usize)> {
     let (a, b) = s.split_once('-')?;
@@ -320,6 +334,35 @@ mod tests {
 
             assert_eq!(verify_value(&id, "").unwrap_err(), "verify needs a non-empty value");
             assert_eq!(verify_value("deadbeefcafe", "whatever").unwrap_err(), "unknown stash id: deadbeefcafe");
+        })
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    /// Slices cannot count what they do not show - the distilled slice is
+    /// context-padded and collapsed, so a frequency question needs the raw
+    /// match count (EVALS section 6).
+    #[test]
+    fn match_count_is_raw_not_distilled() {
+        with_test_dir("mc", || {
+            let mut lines: Vec<String> = Vec::new();
+            for i in 0..300 {
+                let u = ["alpha", "beta", "gamma"][i % 3];
+                let err = (u == "alpha" && i % 6 == 0) || i % 30 == 0;
+                lines.push(format!("svc {u} {} boom", if err { "ERROR" } else { "INFO" }));
+            }
+            let text = format!("{}\n", lines.join("\n"));
+            let (id, _) = stash_text(&text).unwrap();
+            let (a, total) = match_count(&id, "alpha ERROR").unwrap();
+            let (b, _) = match_count(&id, "beta ERROR").unwrap();
+            let (c, _) = match_count(&id, "gamma ERROR").unwrap();
+            assert!(a > b && a > c, "alpha {a} beta {b} gamma {c}");
+            assert_eq!(total, 301);
+            assert!(match_count("000000000000", "x").is_err());
+            assert!(match_count(&id, "[unclosed").is_err());
         })
     }
 }
