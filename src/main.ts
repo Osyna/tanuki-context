@@ -20,11 +20,11 @@ import { scanNeedles, scanCredentials, type Sidecar } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
-import { fetchSlice, stashText, verifyValue } from "./stash.ts";
+import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.15.0";
+export const VERSION = "0.16.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -449,13 +449,23 @@ function fetchRendered(id: string, query: string | null, lines: string | null): 
 
 export function toolFetch(args: unknown): unknown[] {
   const id = asStr(jget(args, "id")) ?? "";
-  const f = fetchRendered(id, asStr(jget(args, "query")), asStr(jget(args, "lines")));
+  const query = asStr(jget(args, "query"));
+  const f = fetchRendered(id, query, asStr(jget(args, "lines")));
+  // A query fetch reports how many raw lines matched. The slice is distilled
+  // and context-padded, so counting it is wrong - and without a real count an
+  // agent cannot answer "which unit logged the most errors" at all: it can
+  // only read slices, and slices cannot count what they do not show.
+  const counted = query === null ? "" : (() => {
+    const c = matchCount(id, query);
+    return `[query matched ${c.matched} of ${c.total} lines]`;
+  })();
   if (!f.wins) {
-    return [{ type: "text", text: f.slice }];
+    return [{ type: "text", text: counted === "" ? f.slice : `${counted}\n${f.slice}` }];
   }
   const marker =
     `[tanuki-context stash ${id}: slice of ${charCount(f.slice)} chars imaged as ${f.r.pages.length} PNG page(s), ` +
     `~${f.r.tokens + f.side.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
+    (query === null ? "" : `; ${counted.slice(1, -1)}`) +
     (f.side.needles.length > 0 ? `; the ·verbatim· block next carries ${f.side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
     `]`;
   // Sidecar BEFORE the pages. Trailing it after a 12KB image is how a traced
