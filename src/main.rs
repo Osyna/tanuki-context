@@ -85,8 +85,70 @@ fn stage01(
     }
 }
 
-fn text_tokens(chars: usize) -> u64 {
-    ((chars as f64) / 4.0).round() as u64
+/// The one text-price heuristic, stated once. Measured, not assumed.
+///
+/// This used to be `chars / 4`, and that is wrong by a factor of three across
+/// the content tanuki actually routes. Against Anthropic's own tokenizer
+/// (`/v1/messages/count_tokens`, 30 samples, EVALS section 9) real content runs
+/// from 1.14 chars/token (base64) to 5.52 (prose); `chars/4` was off by -72%
+/// and +38% at those ends. It is the denominator of the imaging gate, the
+/// minimum-saving test, the fidelity ratio and the savings ledger, and the
+/// error does not cancel: image tokens come from exact pixel geometry, so
+/// understating text tokens made tanuki decline wins AND report a rosier
+/// fidelity band than the density warranted.
+///
+/// A single divisor cannot fit a 2.8x spread, so this prices character classes
+/// by how a BPE treats them: letters inside a word-like run are nearly free,
+/// letters in a vowelless or overlong run (base64, hex, ids) fragment hard,
+/// digits and punctuation fragment, whitespace mostly merges into the next
+/// word. Least squares over those 30 samples; worst residual 19.8%, 21.7%
+/// leave-one-out, against 72% for `chars/4`.
+///
+/// Integer per-mille arithmetic on purpose: byte-identical to `textTokens` in
+/// `src/serde.ts` with no floating-point parity risk.
+const W_WORD: u64 = 161;
+const W_ODD: u64 = 1501;
+const W_DIGIT: u64 = 807;
+const W_PUNCT: u64 = 690;
+const W_SPACE: u64 = 428;
+const MAX_WORD_RUN: u64 = 14;
+
+pub(crate) fn text_tokens(text: &str) -> u64 {
+    let (mut word, mut odd, mut digits, mut punct, mut space) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut run_len, mut run_vowels) = (0u64, 0u64);
+    macro_rules! flush {
+        () => {
+            if run_len > 0 {
+                if run_vowels > 0 && run_len <= MAX_WORD_RUN {
+                    word += run_len;
+                } else {
+                    odd += run_len;
+                }
+                run_len = 0;
+                run_vowels = 0;
+            }
+        };
+    }
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic() {
+            run_len += 1;
+            if matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y') {
+                run_vowels += 1;
+            }
+            continue;
+        }
+        flush!();
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+            space += 1;
+        } else {
+            punct += 1;
+        }
+    }
+    flush!();
+    let milli = word * W_WORD + odd * W_ODD + digits * W_DIGIT + punct * W_PUNCT + space * W_SPACE;
+    ((milli as f64) / 1000.0).round() as u64
 }
 
 fn pct(from: u64, to: u64) -> i64 {
@@ -173,8 +235,8 @@ fn recommend_for(text: &str) -> Value {
     // for code) is the headline; distill is the lossy-but-error-preserving log
     // sibling, priced as text - the same distilled bytes withDistill counts as
     // pages. Tier 0/1 of the density note: delete waste before you reach to image.
-    let raw_text_tok = text_tokens(text.chars().count());
-    let ws_tok = text_tokens(ladder::compress_text(text, 1).compressed.chars().count());
+    let raw_text_tok = text_tokens(&text);
+    let ws_tok = text_tokens(&ladder::compress_text(text, 1).compressed);
     let ws_wins = ws_tok < raw_text_tok;
     let text_tok = if ws_wins { ws_tok } else { raw_text_tok };
     json!({
@@ -188,7 +250,7 @@ fn recommend_for(text: &str) -> Value {
             "transform": if ws_wins { "whitespace" } else { "none" },
             "tokens": text_tok,
             "savedPct": pct(raw_text_tok, text_tok),
-            "withDistill": text_tokens(distilled.chars().count()),
+            "withDistill": text_tokens(&distilled),
         },
     })
 }
@@ -243,13 +305,13 @@ fn tool_estimate(args: &Value) -> Value {
     // tokens in place of 5,611. estimate stashes nothing, so no id is named.
     let side_tok = side.as_ref().map_or(0, |s| {
         if a.verbatim == needles::Verbatim::Lazy {
-            text_tokens(needles::lazy_pointer(s, None).chars().count())
+            text_tokens(&needles::lazy_pointer(s, None))
         } else {
             s.tokens
         }
     });
     let img_tok = est.tokens;
-    let raw_tok = text_tokens(a.text.chars().count());
+    let raw_tok = text_tokens(&a.text);
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     let model = args["model"].as_str();
     let cached = args["cached"].as_bool().unwrap_or(false);
@@ -313,7 +375,7 @@ fn tool_render(args: &Value) -> Value {
         }
     }
     let img_tok = r.tokens;
-    let raw_tok = text_tokens(a.text.chars().count());
+    let raw_tok = text_tokens(&a.text);
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
     let mut summary = String::new();
     if let Some((rows, cols)) = p.table {
@@ -421,8 +483,8 @@ fn tool_compress(args: &Value) -> Value {
     let level = args["level"].as_u64().unwrap_or(1) as u8;
     let c = ladder::compress_text(text, level);
     let (name, loss, desc) = ladder::LEVELS[c.level as usize];
-    let o_tok = text_tokens(text.chars().count());
-    let n_tok = text_tokens(c.compressed.chars().count());
+    let o_tok = text_tokens(&text);
+    let n_tok = text_tokens(&c.compressed);
     let stats = json!({
         "level": format!("{} {}", c.level, name), "loss": loss, "note": desc,
         "origChars": text.chars().count(), "outChars": c.compressed.chars().count(),
@@ -461,11 +523,11 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     let slice = stash::fetch_slice(id, query, args["lines"].as_str())?;
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
-    let raw_tok = text_tokens(chars);
+    let raw_tok = text_tokens(&slice);
     let side = needles::scan_needles_sized(&slice, chars);
     let side_tok = match verbatim {
         needles::Verbatim::Off => 0,
-        needles::Verbatim::Lazy => text_tokens(needles::lazy_pointer(&side, Some(id)).chars().count()),
+        needles::Verbatim::Lazy => text_tokens(&needles::lazy_pointer(&side, Some(id))),
         needles::Verbatim::Full => side.tokens,
     };
     let cost = r.tokens + side_tok;
@@ -645,8 +707,8 @@ fn tools_call(params: &Value) -> Result<Value, String> {
             // carries (they ride the prompt cache after the first write, but they
             // are never free). No other tool in this category reports its own furniture.
             let mut s = stats::px_stats();
-            let furniture = serde_json::to_string(&tools_list()).unwrap().chars().count();
-            s["toolFurnitureTokens"] = json!(((furniture as f64) / 4.0).round() as u64);
+            let furniture = serde_json::to_string(&tools_list()).unwrap();
+            s["toolFurnitureTokens"] = json!(text_tokens(&furniture));
             json!([{ "type": "text", "text": serde_json::to_string_pretty(&s).unwrap() }])
         }
         "tanuki_stash" => tool_stash(args)?,
@@ -796,7 +858,7 @@ fn main() {
             println!(
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
-                        "rawTextTokens": text_tokens(text.chars().count()),
+                        "rawTextTokens": text_tokens(&text),
                         "verbatimTokens": side.as_ref().map_or(0, |s| s.tokens) })
             );
             if let Some(dir) = pos.get(1).map(|s| s.as_str()) {
@@ -898,14 +960,14 @@ fn main() {
                 std::process::exit(1)
             });
             let r = render::render_text(&slice, true, true, render::Font::Normal);
-            let raw_tok = text_tokens(slice.chars().count());
+            let raw_tok = text_tokens(&slice);
             // Same gate as tool_fetch: sidecar cost counts against the win and
             // a needle-dense slice stays text.
             let side = needles::scan_needles_sized(&slice, slice.chars().count());
             let verbatim = needles::Verbatim::parse(&json!(vflag));
             let side_tok = match verbatim {
                 needles::Verbatim::Off => 0,
-                needles::Verbatim::Lazy => text_tokens(needles::lazy_pointer(&side, Some(id)).chars().count()),
+                needles::Verbatim::Lazy => text_tokens(&needles::lazy_pointer(&side, Some(id))),
                 needles::Verbatim::Full => side.tokens,
             };
             if stash_pages_win(r.tokens + side_tok, r.pages.len(), raw_tok)
@@ -1222,7 +1284,7 @@ mod tests {
             let slice = stash::fetch_slice(&id, None, Some("1-400")).unwrap();
             let r = render::render_text(&slice, true, true, render::Font::Normal);
             let chars = slice.chars().count();
-            let raw = text_tokens(chars);
+            let raw = text_tokens(&slice);
             assert!(stash_pages_win(r.tokens, r.pages.len(), raw), "premise: gate must fire");
 
             let marker = format!(
@@ -1354,5 +1416,80 @@ mod tests {
             tabled_distilled["imageTokens"].as_u64().unwrap()
                 < tabled_only["imageTokens"].as_u64().unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod token_estimator_tests {
+    use super::text_tokens;
+
+    // Checked against Anthropic's own tokenizer, not against itself. Every
+    // count came from /v1/messages/count_tokens (claude-sonnet-4-5, envelope
+    // subtracted) on exactly the string the generator produces - EVALS 9.
+    // Mirrors test/tokens.test.ts; both engines must agree with reality AND
+    // with each other.
+    fn svc_log() -> String {
+        (0..400)
+            .map(|i: u64| {
+                format!(
+                    "2026-07-27T08:{:02}:0{}Z worker-{} INFO poll ok req=7f3a{:08x} conn={}/64 latency={}ms",
+                    i % 60, i % 10, i % 5,
+                    ((i.wrapping_mul(2654435761)) & 0xffff_ffff) as u32,
+                    i % 40, i % 900
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn csv() -> String {
+        (0..700).map(|i| format!("{},node-{},{},{},ok", i, i % 12, i % 900, (i * 7) % 1000)).collect::<Vec<_>>().join("\n")
+    }
+    fn stack() -> String {
+        (0..200).map(|i| format!("  at com.example.svc.Handler$Inner.process(Handler.java:{})", 100 + i)).collect::<Vec<_>>().join("\n")
+    }
+    fn hex() -> String {
+        (0..500u64).map(|i| format!("{:08x}", ((i.wrapping_mul(2654435761)) & 0xffff_ffff) as u32)).collect::<Vec<_>>().join(" ")
+    }
+
+    fn within(name: &str, text: &str, real: u64, bound: f64) {
+        let est = text_tokens(text) as f64;
+        let err = (est / real as f64 - 1.0).abs();
+        assert!(err < bound, "{name}: est {est} vs real {real} = {:.1}% off (bound {:.0}%)", err * 100.0, bound * 100.0);
+    }
+
+    #[test]
+    fn tracks_the_real_tokenizer() {
+        within("csv", &csv(), 8400, 0.25);
+        within("stack-trace", &stack(), 4399, 0.25);
+        within("hex", &hex(), 2904, 0.25);
+    }
+
+    #[test]
+    fn log_like_content_lands_within_12_percent() {
+        within("service-log", &svc_log(), 17300, 0.12);
+        within("csv", &csv(), 8400, 0.12);
+    }
+
+    #[test]
+    fn chars_over_four_would_fail_this_suite() {
+        // if this stops failing the samples no longer discriminate
+        let worst = [(csv(), 8400.0), (hex(), 2904.0), (svc_log(), 17300.0)]
+            .iter()
+            .map(|(t, real)| ((t.chars().count() as f64 / 4.0) / real - 1.0).abs())
+            .fold(0.0f64, f64::max);
+        assert!(worst > 0.5, "chars/4 worst error only {:.1}%", worst * 100.0);
+    }
+
+    #[test]
+    fn degenerate_inputs_are_safe() {
+        for s in ["", " ", "\n", "a", "1", "!!!", "\u{e9}\u{4e2d}\u{6587}", "\u{1f600}"] {
+            let _ = text_tokens(s);
+        }
+        assert_eq!(text_tokens(""), 0);
+    }
+
+    #[test]
+    fn word_run_is_cheaper_than_random_run() {
+        assert!(text_tokens("consideration") < text_tokens("f3a9c2e17b4d0"));
     }
 }

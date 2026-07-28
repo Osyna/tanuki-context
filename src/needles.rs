@@ -29,7 +29,7 @@ pub struct Sidecar {
 /// its 1,239 strings are irreducible random hex - compressing it recovers 68
 /// tokens, so the only lever is not shipping it eagerly. `Lazy` ships one
 /// pointer line instead, for callers that read the bulk and never quote an id.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verbatim {
     Full,
     Lazy,
@@ -39,8 +39,27 @@ pub enum Verbatim {
 impl Verbatim {
     /// `false` opts out, `"lazy"` withholds, anything else (absent included)
     /// is the full sidecar.
+    ///
+    /// `TANUKI_VERBATIM` sets the default for callers that do not pass
+    /// `verbatim`, so an operator can set the sidecar policy once for a
+    /// deployment instead of per call. An explicit argument always wins.
+    /// Unset or unrecognised = Full, the shipped default, so nothing changes
+    /// for anyone who does not set it.
+    fn from_env() -> Verbatim {
+        match std::env::var("TANUKI_VERBATIM") {
+            Ok(e) if e.eq_ignore_ascii_case("lazy") => Verbatim::Lazy,
+            Ok(e) if e.eq_ignore_ascii_case("off") || e.eq_ignore_ascii_case("false") => Verbatim::Off,
+            _ => Verbatim::Full,
+        }
+    }
+
     pub fn parse(v: &Value) -> Verbatim {
         match v {
+            // Only an ABSENT argument consults the environment. An explicit
+            // `true` must mean the full sidecar even under
+            // TANUKI_VERBATIM=lazy, or the env stops being a default and
+            // becomes an override the caller cannot escape.
+            Value::Null => Verbatim::from_env(),
             Value::Bool(false) => Verbatim::Off,
             Value::String(s) if s.eq_ignore_ascii_case("lazy") => Verbatim::Lazy,
             _ => Verbatim::Full,
@@ -358,7 +377,7 @@ pub fn scan_needles_sized(text: &str, raw_chars: usize) -> Sidecar {
     if more > 0 {
         out.push_str(&format!("\n\u{2026} +{more} more (needle-dense; keep the source as text)"));
     }
-    let tokens = ((out.chars().count() as f64) / 4.0).round() as u64;
+    let tokens = crate::text_tokens(&out);
     Sidecar { needles: kept, more, dense: more > 0, text: out, tokens }
 }
 
@@ -607,5 +626,35 @@ mod named_secret_tests {
     fn splices_at_the_last_occurrence() {
         // matches the TS engine's lastIndexOf; indexOf would mask the key
         assert_eq!(redact_credentials("password=password").0, "password=[redacted:named-secret]");
+    }
+}
+
+#[cfg(test)]
+mod verbatim_env_tests {
+    use super::Verbatim;
+    use serde_json::json;
+
+    /// TANUKI_VERBATIM is a DEFAULT, not an override. Both engines originally
+    /// got this wrong in the same way - an explicit `true` fell through to the
+    /// env - and because they were wrong identically the cross-engine check
+    /// passed. Serialised: env is process-global.
+    #[test]
+    fn env_is_a_default_that_an_explicit_argument_beats() {
+        // SAFETY: single-threaded test, restored before returning
+        unsafe { std::env::set_var("TANUKI_VERBATIM", "lazy") };
+        assert_eq!(Verbatim::parse(&json!(null)), Verbatim::Lazy, "absent takes the env");
+        assert_eq!(Verbatim::parse(&json!(true)), Verbatim::Full, "explicit true beats the env");
+        assert_eq!(Verbatim::parse(&json!(false)), Verbatim::Off);
+        assert_eq!(Verbatim::parse(&json!("lazy")), Verbatim::Lazy);
+
+        unsafe { std::env::set_var("TANUKI_VERBATIM", "off") };
+        assert_eq!(Verbatim::parse(&json!(null)), Verbatim::Off);
+        assert_eq!(Verbatim::parse(&json!(true)), Verbatim::Full);
+
+        unsafe { std::env::set_var("TANUKI_VERBATIM", "nonsense") };
+        assert_eq!(Verbatim::parse(&json!(null)), Verbatim::Full);
+
+        unsafe { std::env::remove_var("TANUKI_VERBATIM") };
+        assert_eq!(Verbatim::parse(&json!(null)), Verbatim::Full);
     }
 }
