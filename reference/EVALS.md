@@ -58,7 +58,9 @@ containment-scored:
 single-character misreads (`3→1`, `4→a`, `5→8`, `a→3`), delivered as fact, not
 blanks. That is the silent failure the project is built around, and **why the
 `verbatim` sidecar exists**: it ships 10/14 of these needles as text beside the
-pages, so exactness never rides on transcription. (An earlier run scored
+pages, so exactness never rides on transcription — but that 10/14 is scored on
+needle kinds the scanner already knows; **§7 measures what it misses on real
+logs, and the answer is 69%.** (An earlier run scored
 opus-5 at 1/14 — read-back of random strings is near-chance, so treat the floor
 as 0–1/14, not zero-with-certainty.) `claude-fable-5` refuses the task outright
 (`stop_reason: refusal`).
@@ -170,11 +172,77 @@ and it is where the measured savings live. The autonomous "give the agent the
 tools and walk away" story needs work on the tool outputs and the loop before
 it earns a number here — so it does not get a flattering one.
 
+## 7. Sidecar coverage on real logs — `npm run coverage`   *(deterministic, and it fails)*
+
+The needle harness (§2) seeds uuid/semver/hex/digest/path — **the same kinds
+the scanner's allowlist already matches.** So its 20/20 measures *that the two
+lists agree*, not how much of a real log is protected. The miss that actually
+hurts is a high-entropy string nobody wrote a regex for, and it rides as pixels
+silently. Credit for the framing goes to a reader who spotted it; here is the
+check they proposed, run on **19.7 MB of real logs** (systemd journal, kernel,
+git history, pacman):
+
+A token is counted **at-risk** when a single-character misread would be both
+*silent* and *unrecoverable*: rare (≤2 occurrences, so repetition can't
+self-correct), ≥6 chars, high-entropy, and **not** a format recoverable from
+context (durations, ISO timestamps, versions, small ints, and words are all
+excluded). The criterion is defined independently of the scanner's patterns —
+that is the whole point — and is deliberately conservative, so this is a
+**floor** on the gap, not an inflation.
+
+| corpus | MB | at-risk ids | carried as text | partial | **riding as pixels** |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| systemd journal | 17.0 | 3,265 | 1,383 (42%) | 267 | 1,615 |
+| git history | 1.47 | 1,024 | 85 (8%) | 211 | 728 |
+| pacman | 1.04 | 391 | 37 (10%) | 189 | 165 |
+| kernel (dmesg) | 0.22 | 456 | 83 (18%) | 164 | 209 |
+| **total** | **19.7** | **5,136** | **1,588 (30.9%)** | 831 | **2,717 (52.9%)** |
+
+**The allowlist fully carries 30.9% of unrecoverable identifiers.** In
+character terms: **4,204 unprotected at-risk chars per million — 1 in 238.**
+Against a do-or-die bar of "1 in 10 million dropped," that is five orders of
+magnitude short. Published because it's true.
+
+Missed families, ranked — the "what to add next" the check is for:
+
+| missed | family |
+| ---: | --- |
+| 1,785 | mixed alnum id (pod name, build id, container id) |
+| 617 | MAC address |
+| 158 | base64 blob |
+| 82 | PCI/USB id |
+| 74 | hex run ≥6 (**git short sha**, request id — the allowlist floor is 12) |
+
+The reader's three guesses — internal id, pod name, base64 chunk — are the top
+three. A second, independent hole compounds it: `NEEDLE_CAP = 32` truncates
+per rendered block, and on 240-line pages **74% of blocks hit the cap, dropping
+31% of the needles the scanner did find** (10% at 120 lines, 2% at 60). Better
+patterns are worthless until the cap stops discarding them.
+
+Cost of closing it is not the obstacle: adding MAC / hex≥6 / PCI / base64 /
+interleaved-alnum rules lifts journal coverage 50.5% → 100% of flagged tokens
+for **~10 extra text tokens per 120-line page** — about 0.5% of that page's
+image cost. (That 100% is measured against this criterion, and the criterion
+and the new rules share family definitions — so read it as "closes the measured
+gap on this corpus," not "catches every possible id." The generic
+interleaved-alnum rule is the part that generalizes past a list.)
+
+**The honest conclusion for do-or-die logs:** don't rely on pixel accuracy at
+all — it is not, and will not be, 1-in-10-million. What *is* exact by
+construction is the **stash**: the original bytes are held under a sha256 and
+`tanuki_verify` checks any string against them without a model. For critical
+data the image should be treated as a navigation index over bytes that are
+recoverable in full, never as the source of truth.
+
 ## Reproduce
 
 ```
 # pricing (no key, deterministic)
 node dist/cli.js estimate <log> 0 --model claude-opus-4
+
+# sidecar coverage on YOUR logs (no key, runs on gigabytes) - the one to run first
+node reference/coverage-report.mjs /var/log/*.log
+journalctl --no-pager -n 200000 > /tmp/j.log && node reference/coverage-report.mjs /tmp/j.log
 
 # read-back fidelity: render sealed pages, transcribe, score by containment
 node reference/needle-report.mjs                                    # pages + answers.json
