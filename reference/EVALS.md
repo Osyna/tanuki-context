@@ -176,28 +176,43 @@ agent discipline:
 Both are fixed in 0.15: fetch joins the default surface, and every emitter
 (`render`, `fetch`, proxy) puts the sidecar **before** the pages.
 
-| task | arm | before | after (0.15) |
+A third gap survived those two. `dominant-error-unit` ("which unit logged the
+most ERROR lines") still failed, and tracing showed why: **the agent had no way
+to count.** A query fetch returns a distilled, context-padded slice, so its
+line count is not a match count — and nothing else reported one. Slices cannot
+count what they do not show. 0.16 makes a query fetch report the raw tally:
+
+```
+[query matched 18 of 1201 lines]
+```
+
+which turns "which unit dominates" into six cheap queries. Measured:
+
+| task | arm | before | after |
 | --- | --- | ---: | ---: |
 | `upstream-502-request-id` (read an id verbatim) | on | **0/1 FAIL**, 521k in-tokens | **3/3 PASS** |
 | `upstream-502-request-id` | off | 1/1 PASS | 3/3 PASS |
-| `dominant-error-unit` (count across the whole log) | on | fail | **still fails** |
+| `dominant-error-unit` (count the whole log) | on | **FAIL** | **1/1 PASS, $0.17** |
+| `dominant-error-unit` | off | PASS | 2/2 PASS, **$1.03/success** |
 
-Cost per success on the verbatim task: **$0.215 tool-on vs $0.0257 tool-off.**
-Read that with care — the off arm inlines the same log every run and is largely
-served from prompt cache, which is exactly the situation §5's router already
-routes to text.
+**On the aggregation task the tool arm is now ~6× cheaper per success**
+($0.17 vs $1.03) — the first measured case where the loop beats inlining
+rather than merely matching it. The mechanism is not compression: it is that
+one 40-token count answers a question that costs the inlining arm a full
+re-read of 1,200 lines.
 
-**What is now true, stated narrowly:** verbatim retrieval through
-stash→fetch→sidecar works reliably (3/3) where it categorically did not before.
-Whole-corpus *aggregation* ("which unit logged the most errors") still fails on
-the tool arm — slices cannot count what they do not see, and imaging does not
-help counting. And the loop is still not a cost win against inlining a log this
-size. The proven savings remain the input-side ones (§1–5) driven explicitly:
-call `estimate`, read the verdict, render when it says so.
+Read both rows with the caveats. The tool arm is **n=1** on aggregation. The
+off arm's cost is wildly unstable — $0.0255 on the verbatim task (prompt cache
+warm) to **$1.72** on a single aggregation run (the agent re-reading the
+inlined log) — so single-run deltas in either direction are weak. On the
+verbatim task the off arm is still far cheaper ($0.0257 vs $0.215), which is
+exactly the cached-content case §5's router already sends to text.
 
 The lesson worth keeping: **a token count is a symptom, not a diagnosis.** Two
 releases of narrative about agent behaviour dissolved the moment the loop was
-actually traced.
+actually traced, and all three causes turned out to be ordinary missing
+capabilities: a tool that was not advertised, a text block in the wrong order,
+and no way to count.
 
 ## 7. Sidecar coverage on real logs — `npm run coverage` / `npm run adversarial`
 
@@ -305,15 +320,41 @@ recoverable" rule was waving through **every** random alphabetic id, 0/500.
 the three weakest shapes. Structure alone cannot separate `UXASIMOWMOFRUAB`
 (47% vowels, longest consonant run 2) from a word without a dictionary.
 
-Two shape-free oracles were tried and **rejected rather than shipped**:
+Three shape-free oracles were tried and **rejected rather than shipped**.
 Shannon entropy over a token's own characters measures diversity, not
-unpredictability (it flags `ocean-sound-theme` and `DESIGN.md`), and bigram
-surprisal against the corpus scores MACs *low* because `NN:NN` pairs are
-everywhere. In-block frequency and a small word list were then costed and
-declined: the residual shape has **zero instances across 19.5 MB of real
-logs**, and since 0.13.1 a false positive can tip a block to `dense` and
-forfeit imaging entirely — so recall-bias is no longer cheap. Chasing a
-synthetic shape at that price is a bad trade; the bound is documented instead.
+unpredictability (it flags `ocean-sound-theme` and `DESIGN.md`). Bigram
+surprisal against the corpus scores MACs *low*, because `NN:NN` pairs are
+everywhere. And in-block frequency — "a long alphabetic token appearing once
+is likelier an id than vocabulary" — was measured on the real corpus rather
+than argued about:
+
+| corpus | needles now | frequency rule would ADD |
+| --- | ---: | ---: |
+| journal | 39,571 | +19,135 (19/page, worst 95) |
+| gitlog | 2,010 | +8,039 (32/page) |
+| pacman | 7,703 | +2,776 (25/page) |
+
+The additions are `DISCONNECTED`, `generated`, `configuration`, `firmware`,
+`information` — plain vocabulary. At 19–32 false needles per page the sidecar
+bloats and pages tip to `dense`, which since 0.13.1 means **imaging is refused
+outright**. The rule costs the compression win to chase a shape with *zero
+instances across 19.5 MB of real logs*. Declined, with numbers.
+
+**The residual is not unprotected data, and that is testable.** A random
+alphabetic id that rides as pixels is still covered by `tanuki_verify` against
+the stash — measured on exactly the ids the sidecar misses:
+
+| id | in sidecar | verify(exact) | verify(one char flipped) |
+| --- | :---: | --- | --- |
+| `ryvkuvrdmg` | yes | `exact` | `corrected` |
+| `UXASIMOWMOFRUAB` | **no** | `exact` | `corrected` |
+| `oazhseiengfosy` | **no** | `exact` | `corrected` |
+| `qsYfhjBOhAqAOqRRr` | **no** | `exact` | `corrected` |
+
+So the bound is: the sidecar carries 100% of at-risk ids on real logs and
+~94% of synthetic shapes; anything it misses is still recoverable from the
+stash and checkable without a model. That is the honest ceiling, not a promise
+that every conceivable string rides as text.
 
 ### What is actually exact — the lossless spine
 

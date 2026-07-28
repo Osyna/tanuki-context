@@ -279,6 +279,8 @@ const req = [
   // verbatim sidecar at all).
   { jsonrpc: "2.0", id: 18, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: fText } } },
   { jsonrpc: "2.0", id: 19, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, lines: "1-400" } } },
+  // a query fetch reports the raw match count identically in both engines
+  { jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, query: "cafebabe9f21" } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
