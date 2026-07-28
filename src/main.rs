@@ -109,7 +109,7 @@ struct PipeArgs<'a> {
     font: &'a str,
     codebook: bool,
     table: bool,
-    verbatim: bool,
+    verbatim: needles::Verbatim,
 }
 
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
@@ -123,7 +123,7 @@ fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
         font: args["font"].as_str().unwrap_or("normal"),
         codebook: args["codebook"].as_bool().unwrap_or(false),
         table: args["table"].as_bool().unwrap_or(false),
-        verbatim: args["verbatim"].as_bool().unwrap_or(true),
+        verbatim: needles::Verbatim::parse(&args["verbatim"]),
     }
 }
 
@@ -237,8 +237,17 @@ fn tool_estimate(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
-    let side = if a.verbatim { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) } else { None };
-    let side_tok = side.as_ref().map_or(0, |s| s.tokens);
+    let side = if a.verbatim == needles::Verbatim::Off { None } else { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) };
+    // `lazy` ships the pointer line instead of the strings, so price what
+    // actually ships or the verdict argues against a mode that costs ~30
+    // tokens in place of 5,611. estimate stashes nothing, so no id is named.
+    let side_tok = side.as_ref().map_or(0, |s| {
+        if a.verbatim == needles::Verbatim::Lazy {
+            text_tokens(needles::lazy_pointer(s, None).chars().count())
+        } else {
+            s.tokens
+        }
+    });
     let img_tok = est.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -270,7 +279,7 @@ fn tool_estimate(args: &Value) -> Value {
             None => json!(false),
         },
         "verbatim": match &side {
-            Some(s) => json!({ "more": s.more, "dense": s.dense, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
+            Some(s) => json!({ "more": s.more, "dense": s.dense, "needles": s.needles.len() + s.more, "tokens": side_tok }),
             None => json!(false),
         },
         "verdict": if has_creds { "TEXT cheaper (credentials)" } else if side.as_ref().is_some_and(|s| s.dense) { "TEXT cheaper (needle-dense)" } else if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
@@ -295,7 +304,7 @@ fn tool_render(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
-    let side = if a.verbatim { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) } else { None };
+    let side = if a.verbatim == needles::Verbatim::Off { None } else { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) };
     if let Some(s) = &side {
         if s.dense {
             // Same contract as the credential gate: exactness must never ride
@@ -342,12 +351,16 @@ fn tool_render(args: &Value) -> Value {
     if a.reflow {
         summary.push_str(" · ↵ = newline · engine: pxpipe");
     }
-    if let Some(s) = &side {
-        if !s.needles.is_empty() {
-            summary.push_str(&format!(
-                " · verbatim: {} exact strings follow as text - read ids from there, not from the pages",
-                s.needles.len()
-            ));
+    // Under `lazy` the strings do not follow, so the clause that promises them
+    // is dropped: the pointer line below says what happened instead.
+    if a.verbatim == needles::Verbatim::Full {
+        if let Some(s) = &side {
+            if !s.needles.is_empty() {
+                summary.push_str(&format!(
+                    " · verbatim: {} exact strings follow as text - read ids from there, not from the pages",
+                    s.needles.len()
+                ));
+            }
         }
     }
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -355,7 +368,18 @@ fn tool_render(args: &Value) -> Value {
     let mut content = vec![json!({ "type": "text", "text": summary })];
     if let Some(s) = &side {
         if !s.text.is_empty() {
-            content.push(json!({ "type": "text", "text": s.text }));
+            let block = if a.verbatim == needles::Verbatim::Lazy {
+                // Stash the original so the pointer is actionable: without an
+                // id neither tanuki_fetch nor tanuki_verify can settle a value
+                // lazy withheld. The id is content-addressed, so both engines
+                // name the same stash; an unwritable stash names none rather
+                // than inventing one.
+                let sid = stash::stash_text(a.text).ok().map(|(id, _)| id);
+                needles::lazy_pointer(s, sid.as_deref())
+            } else {
+                s.text.clone()
+            };
+            content.push(json!({ "type": "text", "text": block }));
         }
     }
     for page in r.pages.iter().take(MAX_INLINE_PAGES) {
@@ -432,12 +456,19 @@ fn tool_stash(args: &Value) -> Result<Value, String> {
 fn tool_fetch(args: &Value) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
     let query = args["query"].as_str();
+    let redact = args["redact"].as_bool().unwrap_or(true);
+    let verbatim = needles::Verbatim::parse(&args["verbatim"]);
     let slice = stash::fetch_slice(id, query, args["lines"].as_str())?;
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
     let raw_tok = text_tokens(chars);
     let side = needles::scan_needles_sized(&slice, chars);
-    let cost = r.tokens + side.tokens;
+    let side_tok = match verbatim {
+        needles::Verbatim::Off => 0,
+        needles::Verbatim::Lazy => text_tokens(needles::lazy_pointer(&side, Some(id)).chars().count()),
+        needles::Verbatim::Full => side.tokens,
+    };
+    let cost = r.tokens + side_tok;
     // A query fetch reports how many RAW lines matched: the slice is distilled
     // and context-padded, so counting it is wrong, and without a real count an
     // agent cannot answer "which unit logged the most errors" at all.
@@ -448,14 +479,24 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
         }
         None => None,
     };
+    // `lazy` withholds the strings but never the refusal: a needle-dense slice
+    // still stays text, exactly as it does under the full sidecar.
     if !stash_pages_win(cost, r.pages.len(), raw_tok)
         || !needles::scan_credentials(&slice).is_empty()
-        || side.dense
+        || (side.dense && verbatim != needles::Verbatim::Off)
     {
-        let body = match &counted {
-            Some(c) => format!("{c}\n{slice}"),
-            None => slice,
-        };
+        // The only path a credential can reach the context on: the win above
+        // already requires a credential-free slice, so an imaged fetch never
+        // carries one. Visible, never silent - a masked slice the agent cannot
+        // see was masked is one it re-fetches, or quotes the placeholder from.
+        let (text, count) = if redact { needles::redact_credentials(&slice) } else { (slice, 0) };
+        let mut body = text;
+        if count > 0 {
+            body = format!("[{count} credential(s) redacted - redact:false to include]\n{body}");
+        }
+        if let Some(c) = &counted {
+            body = format!("{c}\n{body}");
+        }
         return Ok(json!([{ "type": "text", "text": body }]));
     }
     let mut marker = format!(
@@ -465,7 +506,7 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     if let Some(c) = &counted {
         marker.push_str(&format!("; {}", &c[1..c.len() - 1]));
     }
-    if !side.needles.is_empty() {
+    if verbatim == needles::Verbatim::Full && !side.needles.is_empty() {
         marker.push_str(&format!(
             "; the \u{b7}verbatim\u{b7} block next carries {} exact strings as text - read ids from there, not from the pages",
             side.needles.len()
@@ -476,8 +517,13 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     // Sidecar BEFORE the pages. Trailing it after a 12KB image is how a traced
     // agent missed the answer it had already been handed (EVALS section 6).
     let mut content = vec![json!({ "type": "text", "text": marker })];
-    if !side.text.is_empty() {
-        content.push(json!({ "type": "text", "text": side.text }));
+    if verbatim != needles::Verbatim::Off && !side.text.is_empty() {
+        let block = if verbatim == needles::Verbatim::Lazy {
+            needles::lazy_pointer(&side, Some(id))
+        } else {
+            side.text.clone()
+        };
+        content.push(json!({ "type": "text", "text": block }));
     }
     for page in &r.pages {
         content.push(json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }));
@@ -496,18 +542,25 @@ fn level_schema() -> Value {
     json!({ "type": "integer", "minimum": 0, "maximum": 4 })
 }
 
+/// Tri-state, so the schema states the third state instead of hiding it in
+/// prose: `true` (default) ships every exact string as text, `false` opts out,
+/// `"lazy"` ships one pointer line naming the count and how to get them back.
+fn verbatim_schema() -> Value {
+    json!({ "type": ["boolean", "string"], "enum": [true, false, "lazy"] })
+}
+
 fn tools_list() -> Value {
     let text_prop = json!({ "type": "string" });
     let mut v = json!({ "tools": [
         {
             "name": "tanuki_render",
             "description": "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["text"] }
         },
         {
             "name": "tanuki_estimate",
             "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route; its 'text' sub-field prices the best stays-as-text cut (lossless whitespace, plus a distill sibling) for when imaging loses — cached, small, or credential content. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. The 'fidelity' field maps the imaged density ratio to expected read-back accuracy (DeepSeek-OCR's cliff: ~98% under 8x text/vision tokens, ~60% by 20x; the 4x6 tiny font is capped lower), a signal to keep exact-recall in the verbatim sidecar and reserve lossy tiers for comprehension. The top-level 'route' field then makes the hybrid call for you — one recommended pick (image / text / raw) weighing real cost AND the read-back fidelity band, not just token count: image only when it clears the clean band and genuinely saves, else the lossless text side (cached, credential, or past-the-cliff content). One call replaces manual knob probing.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": { "type": "boolean" }, "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": verbatim_schema(), "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
@@ -531,8 +584,8 @@ fn tools_list() -> Value {
         },
         {
             "name": "tanuki_fetch",
-            "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text.",
-            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" } }, "required": ["id"] }
+            "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text. Credential-shaped values (API keys, tokens, private-key headers) in the returned slice are replaced by a '[redacted:<kind>]' placeholder and counted in a '[N credential(s) redacted]' line - the stash keeps the original bytes, so redact:false returns them verbatim when you actually need the secret.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" }, "redact": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["id"] }
         },
         {
             "name": "tanuki_verify",
@@ -551,7 +604,7 @@ fn tools_list() -> Value {
             ("tanuki_compress", "Stage 1 alone: graded text compression, levels 0-4, code/paths/hashes protected from level 2 up."),
             ("tanuki_stats", "Session savings summary from the events log (honest denominator: input + cache reads + cache creates)."),
             ("tanuki_stash", "Park bulky text outside the context window; returns a compact map (distill stats, top repeats, id). Retrieval pattern, tanuki pricing on the way back."),
-            ("tanuki_fetch", "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically."),
+            ("tanuki_fetch", "Pull a slice of stashed text by id + query regex or lines 'a-b'. Big slices return as dense PNG pages automatically. Credential-shaped values are redacted in the returned slice; redact:false returns them verbatim."),
             ("tanuki_verify", "Disk-grounded check of a value read off a page vs the stashed original: exact/corrected/ambiguous/absent + line. No model. Use before trusting a transcribed id/hash/version."),
         ];
         if let Some(tools) = v["tools"].as_array_mut() {
@@ -807,12 +860,14 @@ fn main() {
             println!("{overview}");
         }
         Some("fetch") => {
-            // tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]
+            // tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]
             let id = args
                 .get(2)
-                .expect("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b]");
+                .expect("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]");
             let mut outdir: Option<&str> = None;
             let (mut query, mut lines) = (None, None);
+            let mut redact = true;
+            let mut vflag: Option<&str> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
@@ -822,6 +877,14 @@ fn main() {
                     }
                     "--lines" => {
                         lines = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    "--no-redact" => {
+                        redact = false;
+                        i += 1;
+                    }
+                    "--verbatim" => {
+                        vflag = args.get(i + 1).map(String::as_str);
                         i += 2;
                     }
                     other => {
@@ -839,9 +902,15 @@ fn main() {
             // Same gate as tool_fetch: sidecar cost counts against the win and
             // a needle-dense slice stays text.
             let side = needles::scan_needles_sized(&slice, slice.chars().count());
-            if stash_pages_win(r.tokens + side.tokens, r.pages.len(), raw_tok)
+            let verbatim = needles::Verbatim::parse(&json!(vflag));
+            let side_tok = match verbatim {
+                needles::Verbatim::Off => 0,
+                needles::Verbatim::Lazy => text_tokens(needles::lazy_pointer(&side, Some(id)).chars().count()),
+                needles::Verbatim::Full => side.tokens,
+            };
+            if stash_pages_win(r.tokens + side_tok, r.pages.len(), raw_tok)
                 && needles::scan_credentials(&slice).is_empty()
-                && !side.dense
+                && !(side.dense && verbatim != needles::Verbatim::Off)
             {
                 println!(
                     "{}",
@@ -850,8 +919,12 @@ fn main() {
                 );
                 // The sidecar rides with the pages here too, or scripting the
                 // CLI loses every exact string the slice carried.
-                if !side.text.is_empty() {
-                    println!("{}", side.text);
+                if verbatim != needles::Verbatim::Off && !side.text.is_empty() {
+                    if verbatim == needles::Verbatim::Lazy {
+                        println!("{}", needles::lazy_pointer(&side, Some(id)));
+                    } else {
+                        println!("{}", side.text);
+                    }
                 }
                 if let Some(dir) = outdir {
                     std::fs::create_dir_all(dir).expect("mkdir");
@@ -860,8 +933,16 @@ fn main() {
                     }
                 }
             } else {
-                println!("{}", json!({ "mode": "text" }));
-                println!("{slice}");
+                // Same contract as the tool: the text a caller pipes onward is
+                // masked unless it asks for the bytes. `--no-redact` is what
+                // the EVALS section 7 byte-identity round-trip passes.
+                let (text, count) = if redact { needles::redact_credentials(&slice) } else { (slice, 0) };
+                if count > 0 {
+                    println!("{}", json!({ "mode": "text", "redacted": count }));
+                } else {
+                    println!("{}", json!({ "mode": "text" }));
+                }
+                println!("{text}");
             }
         }
         Some("verify") => {
@@ -912,6 +993,8 @@ fn main() {
                 min_save: num("--min-save", d.min_save as f64) as i64,
                 max_pages: num("--max-pages", d.max_pages as f64) as usize,
                 recency_window: num("--recency", env_recency) as usize,
+                cache: !args.iter().any(|a| a == "--no-cache"),
+                verbatim: needles::Verbatim::parse(&json!(sval("--verbatim").map(String::as_str))),
             });
         }
         Some("run") => {
@@ -1099,6 +1182,32 @@ mod tests {
         })
     }
 
+    /// The credential gate only ever refused to IMAGE a secret; fetch handed
+    /// one straight back as text. The stash still stores raw bytes - the
+    /// `redact:false` arm proves it - but the default outgoing slice is masked
+    /// and says so. Byte-parity with `test/stash.test.ts`.
+    #[test]
+    fn stash_fetch_redacts_credentials_by_default() {
+        stash::with_test_dir("gate-redact", || {
+            let secret = "sk-ant-api03-SECRETSECRETSECRETSECRETdeadbeef";
+            let raw = format!("svc boot ok\napi_key=\"{secret}\"\nAKIAIOSFODNN7EXAMPLE trailing\n");
+            let (id, _) = stash::stash_text(&raw).unwrap();
+            let content = tool_fetch(&json!({ "id": id, "lines": "1-3" })).unwrap();
+            let text = content[0]["text"].as_str().unwrap();
+            assert!(!text.contains(secret));
+            assert!(!text.contains("AKIAIOSFODNN7EXAMPLE"));
+            assert!(text.starts_with("[2 credential(s) redacted - redact:false to include]\n"), "{text}");
+            assert!(text.contains("api_key=\"[redacted:api-key]\""), "{text}");
+            assert!(text.contains("[redacted:aws-key] trailing"), "{text}");
+
+            // opt-out returns the stashed bytes, with no notice line
+            let plain = tool_fetch(&json!({ "id": id, "lines": "1-3", "redact": false })).unwrap();
+            let slice = stash::fetch_slice(&id, None, Some("1-3")).unwrap();
+            assert_eq!(plain, json!([{ "type": "text", "text": slice }]));
+            assert!(slice.contains(secret));
+        })
+    }
+
     #[test]
     fn stash_fetch_big_slice_returns_pages_with_marker() {
         stash::with_test_dir("gate-pages", || {
@@ -1128,6 +1237,49 @@ mod tests {
                 assert_eq!(img["mimeType"], "image/png");
                 assert!(img["data"].as_str().unwrap().len() > 100);
             }
+        })
+    }
+
+    /// Measured on a 1200-line service log: the sidecar was 5,611 of 13,213
+    /// rendered tokens (42%), and 1,199 of its 1,239 strings were irreducible
+    /// random hex - compressing it recovers 68 tokens. The only lever left is
+    /// not shipping it eagerly, so lazy ships the count and the way back.
+    /// Byte-parity with `test/results.test.ts`.
+    #[test]
+    fn verbatim_lazy_withholds_the_strings_behind_one_pointer() {
+        stash::with_test_dir("lazy-pointer", || {
+            let noisy = [
+                "2026-07-27T09:30:00Z relay ERROR request failed session=3451bd1b-13c4-4558-aa67-a62bc042905e",
+                "2026-07-27T09:30:07Z relay INFO upgraded runtime to 1.15.8-rc.3",
+                "2026-07-27T09:30:14Z relay ERROR upstream 502 request-id=b83839621bf0 peer=10.2.30.4:8443",
+                "2026-07-27T09:30:21Z relay INFO image digest sha256:26e7f9e3971a538a verified at 0xdeadbeef01",
+                "    at handler (lib/relay/frame.ts:927:35)",
+                "2026-07-27T09:30:28Z relay INFO poll ok latency=14ms conn=3",
+            ]
+            .join("\n");
+            let found = needles::scan_needles(&noisy);
+            let content = tool_render(&json!({ "text": noisy, "level": 0, "verbatim": "lazy" }));
+            let arr = content.as_array().unwrap();
+            let line = arr
+                .iter()
+                .find_map(|c| c["text"].as_str().filter(|t| t.starts_with('\u{b7}')))
+                .unwrap();
+            assert!(!line.contains('\n'), "{line}");
+            assert!(!found.needles.is_empty(), "premise: the corpus carries needles");
+            assert!(line.contains(&format!("{} exact strings withheld (lazy)", found.needles.len() + found.more)), "{line}");
+            for n in &found.needles {
+                assert!(!line.contains(&n.value), "leaked {}", n.value);
+            }
+            // Actionable, not a dead end: the id names the stash of the
+            // original, so every withheld value is one fetch/verify away.
+            let (id, _) = stash::stash_text(&noisy).unwrap();
+            assert!(line.contains(&format!("id={id}")), "{line}");
+            assert!(arr.iter().any(|c| c["type"] == "image"));
+            // The refusal outranks lazy: a dense block is not imaged either way.
+            let ids: Vec<String> = (0..40).map(|i| format!("id={i:04}deadbeef4f3a")).collect();
+            let refused = tool_render(&json!({ "text": ids.join("\n"), "level": 0, "verbatim": "lazy" }));
+            assert_eq!(refused.as_array().unwrap().len(), 1);
+            assert!(refused[0]["text"].as_str().unwrap().contains("refused to render"));
         })
     }
 

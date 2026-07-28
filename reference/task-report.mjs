@@ -16,6 +16,7 @@
 //   node reference/task-report.mjs                       # no key: plan + fixtures, exit 0
 //   ANTHROPIC_API_KEY=... node reference/task-report.mjs # run both arms, score
 //   TASK_MODEL=claude-haiku-4-5 TASK_SEEDS=11,23,37 ...  # override model / seeds
+//   TASK_MODELS=a,b TASK_FONTS=default,tiny ...          # per-model density cliff
 //
 // Reproducible by construction: corpus, root-cause token and answers.json all
 // come from a seeded LCG, so every rerun writes byte-identical fixtures.
@@ -31,6 +32,15 @@ const CMD = (process.env.TANUKI_BIN ||
 const OUT = path.join(HERE, "task");
 const MODEL = process.env.TASK_MODEL || "claude-haiku-4-5"; // one named public model, both arms
 const SEEDS = (process.env.TASK_SEEDS || "11,23,37").split(",").map((s) => Number(s.trim()));
+// Density cliff sweep: the image arm is rendered and scored once per font.
+// `tiny` is a 4x6 cell against the default 5x8, i.e. 1.67x denser, so a reader
+// that survives it costs ~40% fewer image tokens for the same content - which
+// is the whole reason to care which readers survive it. Measured n=8 already:
+// sonnet-4-5 and haiku-4-5 score 100% as text and 0% as images at the DEFAULT
+// font, so they are expected to floor at every font, tiny included.
+// "default" means "pass no --font flag"; anything else is passed through.
+const FONTS = (process.env.TASK_FONTS || "default").split(",").map((s) => s.trim()).filter(Boolean);
+const BASE_FONT = FONTS[0];
 
 // ---- seeded corpus (same LCG discipline as needle/paired reports) ----------
 function lcg(seed) {
@@ -85,24 +95,33 @@ for (const seed of SEEDS) {
   const { text, token } = corpus(seed);
   const logFile = path.join(OUT, `seed-${seed}.log`);
   writeFileSync(logFile, text);
-  const dir = path.join(OUT, `seed-${seed}`);
-  mkdirSync(dir, { recursive: true });
   // mirror needle-report's render call; verbatim.txt sidecar = the TEXT arm,
-  // page*.png = the IMAGE arm.
-  execFileSync(CMD[0], [...CMD.slice(1), "render", logFile, "0", dir], { cwd: ROOT });
-  const pages = readdirSync(dir).filter((p) => p.endsWith(".png")).sort();
-  const sidecarPath = path.join(dir, "verbatim.txt");
-  const textArm = existsSync(sidecarPath) ? readFileSync(sidecarPath, "utf8") : text;
+  // page*.png = the IMAGE arm. One render per font: the pages differ, the
+  // sidecar does not, so the text arm is taken from the baseline font's dir.
+  const pages = {};
+  let textArm = text;
+  for (const font of FONTS) {
+    const dir = path.join(OUT, `seed-${seed}-${font}`);
+    mkdirSync(dir, { recursive: true });
+    const fontFlag = font === "default" ? [] : ["--font", font];
+    execFileSync(CMD[0], [...CMD.slice(1), "render", logFile, "0", dir, ...fontFlag], { cwd: ROOT });
+    pages[font] = readdirSync(dir).filter((p) => p.endsWith(".png")).sort().map((p) => path.join(dir, p));
+    const sidecarPath = path.join(dir, "verbatim.txt");
+    if (font === BASE_FONT && existsSync(sidecarPath)) textArm = readFileSync(sidecarPath, "utf8");
+    console.log(`seed ${seed} font ${font}: ${pages[font].length} page(s) -> ${dir}`);
+  }
   answers[seed] = { question: QUESTION, expected: token };
-  cases.push({ seed, token, textArm, pages: pages.map((p) => path.join(dir, p)) });
-  console.log(`seed ${seed}: ${pages.length} page(s) -> ${dir} · root cause = ${token}`);
+  cases.push({ seed, token, textArm, pages });
+  console.log(`seed ${seed}: root cause = ${token}`);
 }
 writeFileSync(path.join(OUT, "answers.json"), JSON.stringify(answers, null, 2));
 
 // ---- CRITICAL GUARD: no key -> print plan + fixtures, exit 0, no model call --
 if (!process.env.ANTHROPIC_API_KEY) {
-  console.log(`\ntask-report: ${cases.length} seed(s) x 2 arms (text | image) on ${MODEL}`);
-  console.log(`corpus:   ${OUT}/seed-<seed>.log  (+ verbatim.txt + page*.png per seed)`);
+  console.log(
+    `\ntask-report: ${cases.length} seed(s) x ${1 + FONTS.length} arm(s) (text | image at ${FONTS.join(", ")}) on ${MODEL}`,
+  );
+  console.log(`corpus:   ${OUT}/seed-<seed>.log  (+ seed-<seed>-<font>/ with verbatim.txt + page*.png)`);
   console.log(`answers:  ${path.join(OUT, "answers.json")}`);
   console.log(`question: ${QUESTION}`);
   for (const c of cases) console.log(`  seed ${c.seed} expected: ${c.token}`);
@@ -132,10 +151,10 @@ async function ask(content, model) {
 }
 
 const askText = (c, model) => ask([{ type: "text", text: `${c.textArm}\n\n${QUESTION}` }], model);
-const askImage = (c, model) =>
+const askImage = (c, model, font) =>
   ask(
     [
-      ...c.pages.map((p) => ({
+      ...c.pages[font].map((p) => ({
         type: "image",
         source: { type: "base64", media_type: "image/png", data: readFileSync(p).toString("base64") },
       })),
@@ -151,37 +170,83 @@ const askImage = (c, model) =>
 const MODELS = (process.env.TASK_MODELS || MODEL).split(",").map((s) => s.trim()).filter(Boolean);
 const profile = [];
 for (const model of MODELS) {
-  const stats = { text: { n: 0, correct: 0, exact: 0 }, image: { n: 0, correct: 0, exact: 0 } };
+  // `errors` is transport, not comprehension. Scoring a 401 as a wrong answer
+  // is how a dead API key renders as "every model is a weak reader" - which is
+  // exactly the table that gets wired into the router. Keep them apart.
+  const text = { n: 0, correct: 0, exact: 0, errors: 0 };
+  const image = Object.fromEntries(FONTS.map((f) => [f, { n: 0, correct: 0, exact: 0, errors: 0 }]));
+  const score = (bucket, answer, c, label) => {
+    const correct = answer.includes(c.token);
+    bucket.n++;
+    bucket.correct += correct ? 1 : 0;
+    bucket.exact += answer === c.token ? 1 : 0;
+    console.log(
+      `  seed ${c.seed} ${label}: ${correct ? "PASS" : "FAIL"}${answer === c.token ? " (exact)" : ""} <- ${answer.slice(0, 60)}`,
+    );
+  };
   console.log(`\n== ${model} ==`);
   for (const c of cases) {
-    for (const [arm, askFn] of [["text", askText], ["image", askImage]]) {
+    const arms = [["text", text, () => askText(c, model)]];
+    for (const font of FONTS) arms.push([`image/${font}`, image[font], () => askImage(c, model, font)]);
+    for (const [label, bucket, askFn] of arms) {
       let answer = "";
       try {
-        answer = await askFn(c, model);
+        answer = await askFn();
       } catch (e) {
-        console.error(`  seed ${c.seed} ${arm}: ERROR ${e.message}`);
+        bucket.errors++;
+        console.error(`  seed ${c.seed} ${label}: ERROR ${e.message}`);
+        continue; // not a measurement - never scored
       }
-      const correct = answer.includes(c.token);
-      const exact = answer === c.token;
-      stats[arm].n++;
-      stats[arm].correct += correct ? 1 : 0;
-      stats[arm].exact += exact ? 1 : 0;
-      console.log(`  seed ${c.seed} ${arm}: ${correct ? "PASS" : "FAIL"}${exact ? " (exact)" : ""} <- ${answer.slice(0, 60)}`);
+      score(bucket, answer, c, label);
     }
   }
-  profile.push({ model, ...stats });
+  profile.push({ model, text, image });
 }
 
 const pct = (a) => (a.n ? Math.round((100 * a.correct) / a.n) : 0);
-console.log("\n| model | n | text | image | image exact | reader |");
+console.log(`\n| model | n | text | image (${BASE_FONT}) | image exact | reader |`);
 console.log("| --- | ---: | ---: | ---: | ---: | --- |");
 for (const p of profile) {
   // "capable" is the band's own premise: the page kept the task as solvable as
-  // the text did. Anything materially below its own text arm is not.
-  const gap = pct(p.text) - pct(p.image);
-  const verdict = p.image.n === 0 ? "n/a" : pct(p.image) >= 80 && gap <= 20 ? "capable" : pct(p.image) === 0 ? "cannot read pages" : "degraded";
-  console.log(`| ${p.model} | ${p.text.n} | ${pct(p.text)}% | ${pct(p.image)}% | ${p.image.exact} | ${verdict} |`);
+  // the text did. Anything materially below its own text arm is not. Judged at
+  // the baseline font; the cliff table below shows what denser fonts cost.
+  const base = p.image[BASE_FONT];
+  const gap = pct(p.text) - pct(base);
+  const verdict =
+    base.n === 0
+      ? `unrun (${base.errors} error(s))`
+      : pct(base) >= 80 && gap <= 20
+        ? "capable"
+        : pct(base) === 0
+          ? "cannot read pages"
+          : "degraded";
+  const cell = (b) => (b.n === 0 ? "unrun" : `${pct(b)}%`);
+  console.log(`| ${p.model} | ${p.text.n} | ${cell(p.text)} | ${cell(base)} | ${base.exact} | ${verdict} |`);
+}
+
+// Density cliff: image-arm accuracy per font, one row per model. Reading left
+// to right is reading the model off the cliff - the column where it stops
+// tracking its own text arm is the densest font you may render for it.
+console.log(`\n| model | text | ${FONTS.map((f) => `image ${f}`).join(" | ")} |`);
+console.log(`| --- | ---: |${FONTS.map(() => " ---: |").join("")}`);
+for (const p of profile) {
+  const errs = FONTS.reduce((a, f) => a + p.image[f].errors, 0) + p.text.errors;
+  const cells = FONTS.map((f) => (p.image[f].n === 0 ? "unrun" : `${pct(p.image[f])}%`)).join(" | ");
+  console.log(`| ${p.model} | ${p.text.n === 0 ? "unrun" : `${pct(p.text)}%`} | ${cells} |${errs ? ` <- ${errs} error(s)` : ""}`);
 }
 console.log(
   "\nThe number that matters is image accuracy vs text accuracy on the SAME model: if image ~ text, the page render kept the task solvable. A model whose image arm collapses while its text arm holds is not the 'capable reader' the fidelity band assumes - keep its context as text or raise the font.",
 );
+
+// A run that could not reach the API is not a measurement of anything. Saying
+// so loudly matters more here than elsewhere: this table decides which models
+// the router refuses to send pages to, so a dead key must never be able to
+// read out as "every model is a weak reader".
+const errors = profile.reduce((a, p) => a + p.text.errors + FONTS.reduce((b, f) => b + p.image[f].errors, 0), 0);
+if (errors > 0) {
+  console.error(
+    `\nNOT A MEASUREMENT: ${errors} call(s) failed in transport. Percentages above cover only calls that returned; ` +
+      "cells with no successful call read 'unrun'. Fix the key/quota and rerun before believing any verdict.",
+  );
+  process.exit(1);
+}

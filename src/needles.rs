@@ -7,6 +7,7 @@
 //! only on ASCII bytes, so every slice lands on a char boundary.
 
 use regex::Regex;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -21,6 +22,46 @@ pub struct Sidecar {
     pub dense: bool, // more > 0: too many exact strings to carry - keep as text
     pub text: String,
     pub tokens: u64,
+}
+
+/// The sidecar is tri-state on the wire. Measured on a 1200-line service log:
+/// the sidecar is 5,611 tokens of a 13,213-token render (42%), and 1,199 of
+/// its 1,239 strings are irreducible random hex - compressing it recovers 68
+/// tokens, so the only lever is not shipping it eagerly. `Lazy` ships one
+/// pointer line instead, for callers that read the bulk and never quote an id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Verbatim {
+    Full,
+    Lazy,
+    Off,
+}
+
+impl Verbatim {
+    /// `false` opts out, `"lazy"` withholds, anything else (absent included)
+    /// is the full sidecar.
+    pub fn parse(v: &Value) -> Verbatim {
+        match v {
+            Value::Bool(false) => Verbatim::Off,
+            Value::String(s) if s.eq_ignore_ascii_case("lazy") => Verbatim::Lazy,
+            _ => Verbatim::Full,
+        }
+    }
+}
+
+/// The lazy sidecar: what was withheld and how to get it back. `id` is the
+/// stash the strings can be fetched from; the proxy path has no stash, so it
+/// passes None and the `id=` clause is omitted rather than invented.
+/// Counts what was FOUND, not what a full sidecar would have carried - lazy
+/// withholds the overflow too.
+pub fn lazy_pointer(side: &Sidecar, id: Option<&str>) -> String {
+    format!(
+        "\u{b7}verbatim\u{b7} {} exact strings withheld (lazy) - tanuki_fetch {}query=<substring>, or tanuki_verify to settle one value",
+        side.needles.len() + side.more,
+        match id {
+            Some(i) => format!("id={i} "),
+            None => String::new(),
+        }
+    )
 }
 
 /// The sidecar must not erase the compression win it protects: budget its
@@ -337,6 +378,23 @@ static CREDENTIALS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
         ("api-key", r"(?-u)\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b"),
         ("private-key", r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
         ("jwt", r"(?-u)\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        // Structure, not signature. Every rule above matches a value by its own
+        // shape, which only works for vendors who prefix their tokens. An AWS
+        // SECRET access key is 40 chars of base64 with no marker at all, and it
+        // leaked straight through until this rule existed. Same inversion the
+        // sidecar classifier needed: when the LEFT side of an assignment names
+        // a secret, the right side is one whatever it looks like.
+        //
+        // Tightened against 19.7 MB of real logs (journal, dmesg, git log,
+        // pacman), which is the only reason the bounds look arbitrary:
+        //   - the secret word must END the key, or a systemd status line matches (8 hits);
+        //   - singular only, or `imageTokens: rev.tokens` matches source code (84);
+        //   - values exclude backticks, or a template literal matches (2).
+        // Residual is 2 hits in 166,985 lines, and both are real secrets.
+        (
+            "named-secret",
+            r#"(?i)\b[A-Za-z0-9_.-]*(?:secret|password|passwd|token|credential|auth[_-]?key|api[_-]?key|access[_-]?key|private[_-]?key)"?\s*[=:]\s*"?([^\s"',;`\[]{8,})"?"#,
+        ),
     ]
     .iter()
     .map(|(k, p)| (*k, Regex::new(p).unwrap()))
@@ -352,6 +410,50 @@ pub fn scan_credentials(text: &str) -> Vec<String> {
         .collect();
     kinds.sort();
     kinds
+}
+
+/// Fetch-side counterpart to `scan_credentials`, over the SAME pattern table -
+/// byte-parity with `src/needles.ts` `redactCredentials`. The gate stops a
+/// secret from becoming pixels; it never stopped `tanuki_fetch` from handing
+/// one back as text. The stash is untouched (raw bytes, byte-exact
+/// round-trip); only what leaves for the context window is masked, and
+/// `redact:false` still returns the original.
+///
+/// Count is values replaced, not kinds - the caller says so out loud, because
+/// a silently altered slice gets re-fetched or quoted as fact.
+///
+/// ponytail: `private-key` matches the BEGIN header only, so a PEM body still
+/// ships as text below a redacted header. Widen that one pattern in BOTH
+/// engines if a real key corpus justifies it; a second heuristic here would
+/// let the gate and the mask disagree about what a secret is.
+pub fn redact_credentials(text: &str) -> (String, usize) {
+    let mut out = text.to_string();
+    let mut count = 0usize;
+    for (kind, pat) in CREDENTIALS.iter() {
+        let n = pat.find_iter(&out).count();
+        if n == 0 {
+            continue;
+        }
+        let placeholder = format!("[redacted:{kind}]");
+        out = pat
+            .replace_all(&out, |c: &regex::Captures| match c.get(1) {
+                // shape rules match the secret itself
+                None => placeholder.clone(),
+                // the named rule matches `NAME=value` and captures only the
+                // value, so the key stays readable. Splice at the capture
+                // offset; the TS engine reaches the same index via
+                // lastIndexOf, and a parity case pins `password=password`.
+                Some(v) => {
+                    let m = c.get(0).unwrap();
+                    let s = m.as_str();
+                    let rel = v.start() - m.start();
+                    format!("{}{placeholder}{}", &s[..rel], &s[rel + v.as_str().len()..])
+                }
+            })
+            .into_owned();
+        count += n;
+    }
+    (out, count)
 }
 
 #[cfg(test)]
@@ -449,5 +551,61 @@ mod honesty_tests {
         let sc = scan_needles("relay dest=86:2b:11:51:58:03 down");
         assert!(!sc.dense);
         assert!(sc.text.lines().next().unwrap().starts_with("\u{b7}verbatim\u{b7} 1 exact strings"));
+    }
+}
+
+#[cfg(test)]
+mod named_secret_tests {
+    use super::redact_credentials;
+
+    /// The shape rules only catch vendors who prefix their tokens. An AWS
+    /// SECRET access key is 40 chars of base64 with no marker, and it leaked
+    /// straight through `fetch` until the named rule existed. Bounds are
+    /// measured against 19.7 MB of real logs: 2 hits in 166,985 lines.
+    #[test]
+    fn catches_assignment_shaped_secrets() {
+        for line in [
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI00K7MDENGbPxRfiCYEXAMPLEKEY",
+            "db_password: hunter2000secret",
+            r#"{"client_secret": "9f3a2b1c4d5e6f7a"}"#,
+            "DATABASE_PASSWORD=p@ssw0rd-very-long",
+        ] {
+            let (text, count) = redact_credentials(line);
+            assert_eq!(count, 1, "{line}");
+            assert!(text.contains("[redacted:named-secret]"), "{line}");
+        }
+    }
+
+    #[test]
+    fn leaves_the_key_name_readable() {
+        let (text, _) = redact_credentials("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI00K7MDENGbPxRfiCYEXAMPLEKEY");
+        assert_eq!(text, "AWS_SECRET_ACCESS_KEY=[redacted:named-secret]");
+    }
+
+    #[test]
+    fn does_not_fire_on_measured_false_positives() {
+        for line in [
+            "CACHE_KEY=abc12345678",
+            "idempotency-key: 9f3a2b1c4d5e",
+            "imageTokens: rev.tokens,",
+            "systemd-ask-password-console.path: Deactivated successfully.",
+            "const token = `frame-allocator#${hex(r, 6)}`;",
+            "token=short",
+        ] {
+            assert_eq!(redact_credentials(line).1, 0, "{line}");
+        }
+    }
+
+    #[test]
+    fn never_re_redacts_an_earlier_placeholder() {
+        let (text, count) = redact_credentials(r#"api_key="AKIAIOSFODNN7EXAMPLE""#);
+        assert_eq!(count, 1);
+        assert_eq!(text, r#"api_key="[redacted:aws-key]""#);
+    }
+
+    #[test]
+    fn splices_at_the_last_occurrence() {
+        // matches the TS engine's lastIndexOf; indexOf would mask the key
+        assert_eq!(redact_credentials("password=password").0, "password=[redacted:named-secret]");
     }
 }
