@@ -176,6 +176,25 @@ agent discipline:
 Both are fixed in 0.15: fetch joins the default surface, and every emitter
 (`render`, `fetch`, proxy) puts the sidecar **before** the pages.
 
+**The tradeoff that caused bug 1, priced.** The slim surface exists to save
+advertised-schema tokens — a real cost, and one worth measuring rather than
+assuming (the framing is borrowed from `ctxdiff`, which detects "tool schemas
+you pay for on every call but never invoke"). Measured on our own
+`tools/list`:
+
+| surface | tools | tokens/request |
+| --- | ---: | ---: |
+| default (brief descriptions) | 5 | **549** |
+| `TANUKI_ALL_TOOLS=1` | 8 | 749 |
+| `TANUKI_TOOL_VERBOSE=1` | 5 | 1,250 |
+
+Hiding three tools saves **200 tokens per request**; `tanuki_fetch` itself
+costs **74**. Hiding it burned **521,000 input tokens in a single failed run**
+— a break-even of roughly 7,000 requests, against a workflow it made
+impossible. Schema thrift is worth measuring *and* worth losing to a
+capability the documented workflow depends on.
+
+
 A third gap survived those two. `dominant-error-unit` ("which unit logged the
 most ERROR lines") still failed, and tracing showed why: **the agent had no way
 to count.** A query fetch returns a distilled, context-padded slice, so its

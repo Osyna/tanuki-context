@@ -378,8 +378,17 @@ export function startProxy(cfg: ProxyCfg): http.Server {
 
       let stats: TransformResult | null = null;
       if (isMessages) {
-        stats = transformRequestBody(bodyBuf.toString("utf8"), cfg, session);
-        if (stats) bodyBuf = Buffer.from(stats.body, "utf8");
+        // Fail open. A compression proxy sits in the request path, so it must
+        // never break the request it is optimizing: any error here forwards
+        // the original bytes untouched. This callback is async, so an escaping
+        // throw would not just drop one request - it would be an uncaught
+        // exception and take the whole proxy down with every in-flight call.
+        try {
+          stats = transformRequestBody(bodyBuf.toString("utf8"), cfg, session);
+          if (stats) bodyBuf = Buffer.from(stats.body, "utf8");
+        } catch {
+          stats = null; // bodyBuf is untouched unless the transform succeeded
+        }
       }
 
       const headers: http.OutgoingHttpHeaders = { ...req.headers };
