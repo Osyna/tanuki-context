@@ -256,6 +256,35 @@ A mean-only reading would have said "tanuki is 2.24× cheaper" ($0.392 vs
 $0.175) and been just as misleading in the other direction — the mean is one
 $2.94 run.
 
+### What that median gap is actually made of
+
+Prompt caching is doing the work on both sides, and the harness could not see
+it: `paired-report` summed `input_tokens`, `cache_read_input_tokens` and
+`cache_creation_input_tokens` into one figure. Those three are priced **$3.00 /
+$0.30 / $3.75 per Mtok** on Sonnet — a 12.5× spread between the cheapest and
+dearest — so one collapsed number cannot distinguish a cheap run from a cached
+one, and every "why" in this section was unfalsifiable. 0.18 records them
+separately and reports a cache hit rate.
+
+That reframes the goal. Losing the median to inlining is not a compression
+problem; it is that a re-read of an already-cached log costs almost nothing
+while tanuki paid full price for its pages **every turn**. Imaged pages are the
+ideal thing to cache — large, re-sent verbatim each turn, and byte-stable
+(asserted in the render tests since 0.16.1) — but the proxy priced caching
+without ever creating it. 0.18 places one `cache_control` breakpoint on the last
+imaged message:
+
+| turns re-sending a 7,530-token page set | uncached | cached | |
+| ---: | ---: | ---: | ---: |
+| 3 | $0.0678 | $0.0328 | 2.1× |
+| 5 | $0.1129 | $0.0373 | 3.0× |
+| 10 | $0.2259 | $0.0486 | **4.7×** |
+
+This is arithmetic at published rates, not an end-to-end measurement — the
+paired run that would confirm it needs a working key and is **not yet done**.
+The breakpoint counts the client's existing ones first and declines at
+Anthropic's ceiling of four, so it cannot break a request that already worked.
+
 The lesson worth keeping: **a token count is a symptom, not a diagnosis.** Two
 releases of narrative about agent behaviour dissolved the moment the loop was
 actually traced, and all three causes turned out to be ordinary missing
@@ -410,7 +439,10 @@ Pixel accuracy is not, and will never be, 1-in-10-million; §2 measures 0/14
 across five models. The **stash** is a different guarantee, exact by
 construction rather than statistically: original bytes held under a sha256,
 `tanuki_verify` checking any string against them with no model in the loop.
-Measured end to end on the same corpus — stash, fetch, compare:
+Measured end to end on the same corpus — stash, fetch `redact:false`, compare
+(the store is raw bytes either way; the default fetch masks credential-shaped
+values on the way into the context window, so byte-identity is asserted with
+the mask off):
 
 ```
 dmesg.log        218,036 bytes  BYTE-IDENTICAL
@@ -426,6 +458,56 @@ the pixels": treat the image as a navigation index over bytes that stay
 recoverable in full, keep exact strings in the sidecar, and settle anything you
 read off a page with `tanuki_verify`.
 
+## 8. Credential redaction: measured false-positive rate   *(measured)*
+
+The credential gate has always refused to *image* a secret. It never stopped
+`tanuki_fetch` from returning one as text — the same secret in the same context
+window by a shorter route. 0.18 masks them on the way out.
+
+Building it exposed that the detector had the **same flaw the sidecar
+classifier had in 0.12**: nine rules, each matching a value by its own *shape*.
+That works only for vendors who prefix their tokens (`AKIA…`, `ghp_…`,
+`sk-ant-…`). An AWS **secret** access key is 40 characters of base64 with no
+marker at all — indistinguishable from a build hash by shape — so
+`AWS_SECRET_ACCESS_KEY=wJalr…` walked straight through a feature whose whole
+job was to stop it. An allowlist of known shapes has an unbounded complement.
+
+The fix is the inversion that worked before: stop asking what the value looks
+like and ask what the **key** calls it. When the left side of an assignment
+names a secret, the right side is one regardless of shape.
+
+Name-based rules invite false positives, so the bounds were tuned against the
+same 19.7 MB real-log corpus used for sidecar coverage (journal, dmesg, git
+log, pacman — 166,985 lines). Each bound below is there because it was
+*measured*, not guessed:
+
+| rule | why | false positives removed |
+| --- | --- | ---: |
+| secret word must **end** the key | `systemd-ask-password-console.path: Deactivated` is a status line | 8 |
+| **singular only** (no `tokens`) | `imageTokens: rev.tokens` is source code | 84 |
+| value excludes **backticks** | `` const token = `frame-…` `` is a template literal | 2 |
+| value must not start with `[` | otherwise it re-redacts `[redacted:aws-key]` and double-counts | — |
+
+Residual: **2 hits in 166,985 lines (1 in 83,493)** — and both are real
+secrets, not noise: a test fixture holding an `sk-ant-` key, and
+`"x-api-key": process.env.ANTHROPIC_API_KEY`. Against a set of assignment-shaped
+secrets the shape rules all miss (`AWS_SECRET_ACCESS_KEY=`, `db_password:`,
+`{"client_secret": …}`, `DATABASE_PASSWORD=`) it is 4/4.
+
+Two boundaries stated rather than hidden:
+
+- **The mask is on `fetch`, not on the stash.** The store keeps raw bytes —
+  that is what makes the 19,722,893-character byte-identity round-trip
+  assertable at all — and `redact: false` returns them. The threat model is
+  bytes entering a context window, not bytes on your own disk.
+- **`private-key` still matches only the `BEGIN` header**, so a PEM *body*
+  ships as text under a redacted header. Widening it needs the same edit in
+  both engines; a second heuristic was deliberately not added, because then the
+  gate and the mask could disagree about what a secret is.
+
+A parity case pins `password=password`, where an `indexOf`-based splice masks
+the key instead of the value and silently diverges between engines.
+
 ## Reproduce
 
 ```
@@ -439,9 +521,10 @@ journalctl --no-pager -n 200000 > /tmp/j.log && bun reference/coverage-report.mj
 # generalisation: ids in shapes the engine never saw, injected into real lines
 bun reference/adversarial-report.mjs            # --n 200 for tighter bounds
 
-# the lossless spine: stash it, fetch it, diff it
+# the lossless spine: stash it, fetch it, diff it (--no-redact: the default
+# fetch masks credential-shaped values, so byte-identity needs the mask off)
 ID=$(node dist/cli.js stash big.log | grep -oE '[0-9a-f]{12}' | head -1)
-node dist/cli.js fetch "$ID" --lines "1-$(wc -l < big.log)" | tail -n +2 | cmp - big.log
+node dist/cli.js fetch "$ID" --lines "1-$(wc -l < big.log)" --no-redact | tail -n +2 | cmp - big.log
 
 # read-back fidelity: render sealed pages, transcribe, score by containment
 node reference/needle-report.mjs                                    # pages + answers.json

@@ -41,6 +41,8 @@ pub struct ProxyCfg {
     pub min_save: i64,    // and save at least this many tokens
     pub max_pages: usize, // give up on absurdly large single blocks
     pub recency_window: usize, // trailing messages always kept as text (default 1)
+    pub cache: bool, // place a cache breakpoint on the last imaged message (default on)
+    pub verbatim: needles::Verbatim, // sidecar next to the pages: full · lazy pointer · off
 }
 
 impl Default for ProxyCfg {
@@ -58,6 +60,8 @@ impl Default for ProxyCfg {
             min_save: 300,
             max_pages: 20,
             recency_window: 1,
+            cache: true,
+            verbatim: needles::Verbatim::Full,
         }
     }
 }
@@ -104,13 +108,21 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     let raw_tok = ((orig_chars as f64) / 4.0).round() as u64;
     let r = render::render_text(&working, true, true, cfg.font);
     let side = crate::needles::scan_needles_sized(&working, orig_chars);
-    let cost = r.tokens + side.tokens;
+    // What the sidecar costs is what it ships. There is no stash on this path,
+    // so a lazy pointer names no id: the caller sees the count and the tools,
+    // not a fabricated sha.
+    let side_tok = match cfg.verbatim {
+        needles::Verbatim::Off => 0,
+        needles::Verbatim::Lazy => ((needles::lazy_pointer(&side, None).chars().count() as f64) / 4.0).round() as u64,
+        needles::Verbatim::Full => side.tokens,
+    };
+    let cost = r.tokens + side_tok;
     if r.pages.len() > cfg.max_pages {
         return None;
     }
     // Needle-dense: the sidecar cannot carry every exact string, and this is
     // the automatic path - leaving it as text is the only honest option.
-    if side.dense {
+    if side.dense && cfg.verbatim != needles::Verbatim::Off {
         return None;
     }
     let saved = raw_tok as i64 - cost as i64;
@@ -125,7 +137,7 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     if cb_entries > 0 {
         marker.push_str(&format!("; \u{b7}legend\u{b7} line maps {cb_entries} sigils"));
     }
-    if !side.needles.is_empty() {
+    if cfg.verbatim == needles::Verbatim::Full && !side.needles.is_empty() {
         marker.push_str(&format!(
             "; the \u{b7}verbatim\u{b7} block next carries {} exact strings as text - read ids from there, not from the pages",
             side.needles.len()
@@ -137,8 +149,13 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     // Sidecar BEFORE the pages: exact strings first, bulk second.
     let mut blocks = Vec::with_capacity(2 + r.pages.len());
     blocks.push(json!({ "type": "text", "text": marker }));
-    if !side.text.is_empty() {
-        blocks.push(json!({ "type": "text", "text": side.text }));
+    if cfg.verbatim != needles::Verbatim::Off && !side.text.is_empty() {
+        let block = if cfg.verbatim == needles::Verbatim::Lazy {
+            needles::lazy_pointer(&side, None)
+        } else {
+            side.text.clone()
+        };
+        blocks.push(json!({ "type": "text", "text": block }));
     }
     for p in &r.pages {
         blocks.push(json!({
@@ -166,6 +183,8 @@ pub struct TransformResult {
     /// saved_tokens with the session's cache state priced in (can be negative:
     /// the first text->pages flip of a cached block is a real cost).
     pub saved_tokens_cache_aware: i64,
+    /// whether a cache_control breakpoint was placed on the imaged prefix.
+    pub cached: bool,
 }
 
 /// Cross-request memory, LEDGER-ONLY by construction: it never changes the
@@ -213,6 +232,25 @@ fn cache_aware_saved(
 
 /// Rewrite a /v1/messages body. Returns None when nothing changed (caller
 /// forwards the original bytes untouched).
+/// Anthropic accepts at most 4 `cache_control` breakpoints per request and
+/// 400s on a 5th, so count the ones the client already placed (system, tools
+/// and message blocks) before adding ours. Fail-open: a request that worked
+/// without the proxy must still work through it.
+const MAX_BREAKPOINTS: usize = 4;
+fn count_breakpoints(body: &Value) -> usize {
+    let scan = |v: &Value| -> usize {
+        v.as_array()
+            .map_or(0, |a| a.iter().filter(|b| b.get("cache_control").is_some()).count())
+    };
+    let mut n = scan(&body["system"]) + scan(&body["tools"]);
+    if let Some(ms) = body["messages"].as_array() {
+        for m in ms {
+            n += scan(&m["content"]);
+        }
+    }
+    n
+}
+
 pub fn transform_request_body(
     raw: &str,
     cfg: &ProxyCfg,
@@ -231,6 +269,11 @@ pub fn transform_request_body(
     // Exact-repeat dedupe: block text -> page count, recorded only when a
     // block is actually imaged in THIS request. A later byte-identical block
     // that reaches the funnel becomes one short marker, no repeated pages.
+    // index of the last message we imaged into; where the cache breakpoint
+    // goes. Cell because `funnel` already holds a mutable borrow of the
+    // counters, so the loop cannot read them directly.
+    let cur_msg = std::cell::Cell::new(0usize);
+    let last_imaged_msg = std::cell::Cell::new(-1i64);
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut funnel = |text: &str| -> Option<Vec<Value>> {
         let tok = |chars: usize| ((chars as f64) / 4.0).round() as i64;
@@ -253,6 +296,7 @@ pub fn transform_request_body(
             done
         };
         imaged_blocks += 1;
+        last_imaged_msg.set(cur_msg.get() as i64);
         orig_chars += done.orig_chars as u64;
         image_count += done.pages as u64;
         saved_tokens += done.saved_tokens;
@@ -289,7 +333,8 @@ pub fn transform_request_body(
     // recent turns reasoned over precisely, distant bulk imaged). Default 1.
     let keep = cfg.recency_window.max(1);
     let messages = body["messages"].as_array_mut()?;
-    for m in messages.iter_mut().take(msg_count.saturating_sub(keep)) {
+    for (i, m) in messages.iter_mut().enumerate().take(msg_count.saturating_sub(keep)) {
+        cur_msg.set(i);
         // Anthropic accepts image blocks only in user-role content.
         if m["role"].as_str() != Some("user") {
             continue;
@@ -356,6 +401,31 @@ pub fn transform_request_body(
     if imaged_blocks == 0 {
         return None;
     }
+
+    // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
+    // the render tests) and re-sent verbatim on every later turn. The proxy has
+    // always PRICED caching (cache_aware_saved) but never CREATED it. Measured
+    // at Sonnet rates on a 7530-token page set, re-sending it costs $0.226 over
+    // 10 turns uncached vs $0.0486 cached - 4.7x, 3.0x over 5 turns, 2.1x over
+    // 3. The breakpoint goes on the last block of the last message we imaged:
+    // it is before the recency window, so everything it covers is settled
+    // history.
+    // ponytail: no minimum-prefix check - Anthropic silently declines to cache
+    // a prefix under the model's floor rather than erroring, so a size test
+    // would only duplicate a rule the API already enforces.
+    let mut cached = false;
+    let last = last_imaged_msg.get();
+    if cfg.cache && last >= 0 && count_breakpoints(&body) < MAX_BREAKPOINTS {
+        if let Some(tail) = body["messages"][last as usize]["content"]
+            .as_array_mut()
+            .and_then(|c| c.last_mut())
+        {
+            if tail.is_object() && tail.get("cache_control").is_none() {
+                tail["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                cached = true;
+            }
+        }
+    }
     Some(TransformResult {
         body: body.to_string(),
         imaged_blocks,
@@ -363,6 +433,7 @@ pub fn transform_request_body(
         image_count,
         saved_tokens,
         saved_tokens_cache_aware,
+        cached,
     })
 }
 
@@ -569,6 +640,9 @@ fn handle(
             // charged the cache-write premium). Can be negative.
             "saved_tokens_cache_aware": tstats.as_ref().map_or(0, |s| s.saved_tokens_cache_aware),
             "caching_seen": caching_seen,
+            // whether WE placed the breakpoint (as opposed to the client
+            // already caching): separates our win from theirs in the ledger
+            "cache_breakpoint": tstats.as_ref().is_some_and(|s| s.cached),
             "input_tokens": input,
             "cache_read_tokens": cache_read,
             "cache_create_tokens": cache_create,
@@ -614,9 +688,10 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
         cfg.min_save,
     );
     eprint!(
-        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
+        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once{}\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
         cfg.upstream,
         cfg.recency_window.max(1),
+        if cfg.cache { " \u{b7} imaged prefix marked cacheable" } else { "" },
     );
     server
 }
@@ -783,6 +858,59 @@ mod tests {
             "[tanuki-context: {} chars, byte-identical to a block imaged above ({pages} PNG page(s)); not repeated]",
             text.chars().count(),
         )
+    }
+
+    // The proxy has always PRICED caching but never CREATED it. Imaged pages
+    // are the ideal cache payload: byte-stable and re-sent every turn. Measured
+    // at Sonnet rates on a 7530-token page set: 2.1x cheaper over 3 turns,
+    // 4.7x over 10.
+    fn cache_body(extra: Option<(&str, Value)>) -> String {
+        let mut b = json!({ "messages": [
+            msg("user", json!([{ "type": "text", "text": big() }, { "type": "text", "text": "tail" }])),
+            msg("user", json!("latest")),
+        ] });
+        if let Some((k, v)) = extra {
+            b[k] = v;
+        }
+        b.to_string()
+    }
+
+    #[test]
+    fn marks_last_block_of_last_imaged_message() {
+        let r = transform_request_body(&cache_body(None), &cfg(), None).expect("must transform");
+        assert!(r.cached);
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+        let c = out["messages"][0]["content"].as_array().unwrap();
+        // breakpoint sits at the END of the imaged message, so the whole prefix
+        // (system, tools, pages) is covered by one boundary
+        assert_eq!(c.last().unwrap()["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(c.iter().filter(|b| b.get("cache_control").is_some()).count(), 1);
+        // and the volatile trailing message is NOT part of the cached prefix
+        assert_eq!(out["messages"][1]["content"], json!("latest"));
+    }
+
+    #[test]
+    fn never_exceeds_the_four_breakpoint_ceiling() {
+        // client already spent all four; a fifth is a 400, so we must decline
+        let four: Vec<Value> = (0..4)
+            .map(|_| json!({ "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } }))
+            .collect();
+        let r = transform_request_body(&cache_body(Some(("system", json!(four)))), &cfg(), None)
+            .expect("must still image");
+        assert!(!r.cached);
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+        let c = out["messages"][0]["content"].as_array().unwrap();
+        assert!(c.iter().all(|b| b.get("cache_control").is_none()));
+    }
+
+    #[test]
+    fn opt_out_leaves_body_free_of_breakpoints() {
+        let no_cache = ProxyCfg { cache: false, ..cfg() };
+        let r = transform_request_body(&cache_body(None), &no_cache, None).expect("must transform");
+        assert!(!r.cached);
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+        let c = out["messages"][0]["content"].as_array().unwrap();
+        assert!(c.iter().all(|b| b.get("cache_control").is_none()));
     }
 
     #[test]
