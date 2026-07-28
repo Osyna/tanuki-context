@@ -115,9 +115,11 @@ export function coverage(text) {
 
 const args = process.argv.slice(2);
 const json = args.includes("--json");
-const files = args.filter((a) => !a.startsWith("--"));
+const minIdx = args.indexOf("--min");
+const MIN = minIdx >= 0 ? Number(args[minIdx + 1]) : null;
+const files = args.filter((a) => !a.startsWith("--") && a !== args[minIdx + 1]);
 if (files.length === 0) {
-  console.error("usage: bun reference/coverage-report.mjs [--json] <log>...");
+  console.error("usage: bun reference/coverage-report.mjs [--json] [--min PCT] <log>...");
   process.exit(2);
 }
 
@@ -171,4 +173,11 @@ if (json) {
     console.log("\nstill missed (what to add next):");
     for (const [k, v] of Object.entries(out.missedFamilies)) console.log(`  ${String(v).padStart(6)}  ${k}`);
   }
+}
+if (MIN !== null) {
+  if (out.coveredPct < MIN) {
+    console.error(`FAIL: coverage ${out.coveredPct}% is below the required ${MIN}%`);
+    process.exit(1);
+  }
+  console.log(`OK: coverage ${out.coveredPct}% >= ${MIN}%`);
 }

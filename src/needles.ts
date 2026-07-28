@@ -14,9 +14,11 @@
 //! numbers match the rendered pages, and codebook ·legend· lines are
 //! scanned too - a sigil's expansion is otherwise pixel-only.
 //!
-//! ponytail: the list is capped, but the cap scales with the block - a flat
-//! 32 truncated ordinary pages instead of only hash-dense ones. Overflow
-//! sets `dense`, which is the honest signal: keep that content as text.
+//! ponytail: the list is budgeted, not counted - the sidecar may grow until
+//! its text costs a quarter of the raw text it protects. Overflow sets
+//! `dense`, and `route` refuses to image a dense block: a capped sidecar
+//! stays cheap while dropping the very ids it exists to carry, so the cost
+//! math alone can never catch that.
 
 import { charCount, textTokens } from "./serde.ts";
 
@@ -26,23 +28,30 @@ export interface Needle {
 }
 
 export interface Sidecar {
-  needles: Needle[]; // first occurrence per distinct value, capped
-  more: number; // distinct values past the cap
+  needles: Needle[]; // first occurrence per distinct value, within budget
+  more: number; // distinct values that did not fit
   dense: boolean; // more > 0: too many exact strings to carry - keep as text
   text: string; // "" when no needles: the block to ship as text
   tokens: number; // textTokens(text)
 }
 
-export const NEEDLE_CAP_MIN = 32;
-export const NEEDLE_CAP_MAX = 512;
+/// The sidecar exists to protect the compression win, so it must not erase
+/// it. Budget its text at half the RAW characters it is an alternative to:
+/// under that, carry every exact string; over it, the sidecar approaches the
+/// size of just shipping the text, so stop and set `dense` — `route` then
+/// refuses to image, because a budgeted sidecar stays cheap while dropping
+/// the very ids it exists to carry and the cost math cannot see that.
+///
+/// The baseline is RAW, not the compressed text handed to the scanner: a
+/// codebook/tiny run shrinks the compressed text while the legend still
+/// carries the ids, and budgeting against it would refuse exactly the content
+/// compressing best.
+export const SIDECAR_SHARE = 2;
+export const SIDECAR_MIN_CHARS = 256; // small blocks still get their needles
 
-/// The cap stops a hash-dense block from drowning the compression win; it is
-/// not meant to truncate an ordinary page. A flat 32 did the latter - on
-/// 240-line pages it dropped 31% of the needles already found (EVALS §7). So
-/// scale with the block, floor it so a one-line blob still caps, ceiling it
-/// so nothing pathological runs away.
-export function needleCap(lines: number): number {
-  return lines < NEEDLE_CAP_MIN ? NEEDLE_CAP_MIN : lines > NEEDLE_CAP_MAX ? NEEDLE_CAP_MAX : lines;
+export function sidecarBudget(rawChars: number): number {
+  const b = Math.floor(rawChars / SIDECAR_SHARE);
+  return b < SIDECAR_MIN_CHARS ? SIDECAR_MIN_CHARS : b;
 }
 
 /// Priority-ordered: earlier patterns claim their span, later ones cannot
@@ -195,12 +204,16 @@ function riskyTokens(line: string): Array<[number, number]> {
   return out;
 }
 
-export function scanNeedles(text: string): Sidecar {
+/// `rawChars` is the size of the ORIGINAL text this sidecar accompanies; it
+/// defaults to `text` for callers that scan raw input directly.
+export function scanNeedles(text: string, rawChars?: number): Sidecar {
   const seen = new Set<string>();
   const kept: Needle[] = [];
   let more = 0;
+  let used = 0;
+  let full = false;
   const lines = text.split("\n");
-  const cap = needleCap(lines.length);
+  const budget = sidecarBudget(rawChars ?? charCount(text));
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const claimed: Array<[number, number]> = [];
@@ -208,8 +221,14 @@ export function scanNeedles(text: string): Sidecar {
       claimed.push([at, end]);
       if (seen.has(v)) return;
       seen.add(v);
-      if (kept.length < cap) kept.push({ line: i + 1, value: v });
-      else more += 1;
+      const cost = 3 + String(i + 1).length + v.length; // "\nL<line> <value>"
+      if (full || used + cost > budget) {
+        full = true; // latch, so the carried list never ends ragged
+        more += 1;
+        return;
+      }
+      used += cost;
+      kept.push({ line: i + 1, value: v });
     };
     // Whole-token pass first: an at-risk token ships entire, so a pattern that
     // matches only its middle cannot ship a fragment that reads as protected.

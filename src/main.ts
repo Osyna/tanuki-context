@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.13.0";
+export const VERSION = "0.13.1";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -191,6 +191,7 @@ function routeFor(
   sideTok: number,
   creds: number,
   costCheaper: string | null,
+  dense: boolean,
 ): Record<string, unknown> {
   const recImg = rec.imageTokens as number;
   const text = rec.text as { transform: string; tokens: number };
@@ -205,6 +206,12 @@ function routeFor(
   if (creds > 0) {
     pick = textPick; tokens = text.tokens; fid = "exact";
     reason = "credential content is never imaged - stay text";
+  } else if (dense) {
+    // The sidecar hit its budget, so some exact strings are NOT carried. The
+    // cost math cannot catch this on its own - a capped sidecar stays cheap
+    // while dropping the very ids it exists to protect.
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "needle-dense: more exact strings than the sidecar can carry, so imaging would drop some of them unverifiably - stay text";
   } else if (costCheaper === "TEXT") {
     pick = textPick; tokens = text.tokens; fid = "exact";
     reason = "priced in dollars the text side wins (cached content loses as pixels)";
@@ -226,7 +233,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
-  const side = a.verbatim ? scanNeedles(p.compressed) : null;
+  const side = a.verbatim ? scanNeedles(p.compressed, charCount(a.text)) : null;
   const sideTok = side === null ? 0 : side.tokens;
   const imgTok = est.tokens;
   const origChars = charCount(a.text);
@@ -256,7 +263,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
     verbatim: side === null ? false : { more: side.more, dense: side.dense, needles: side.needles.length + side.more, tokens: side.tokens },
-    verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
+    verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : side !== null && side.dense ? "TEXT cheaper (needle-dense)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     credentials: creds.length > 0 ? creds : false,
     recommend: rec,
   };
@@ -268,7 +275,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     out.cost = cost;
     costCheaper = cost.cheaper;
   }
-  out.route = routeFor(rawTok, rec, sideTok, creds.length, costCheaper);
+  out.route = routeFor(rawTok, rec, sideTok, creds.length, costCheaper, side !== null && side.dense);
   return out;
 }
 
@@ -290,7 +297,7 @@ export function toolRender(args: unknown): unknown[] {
   const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
-  const side = a.verbatim ? scanNeedles(p.compressed) : null;
+  const side = a.verbatim ? scanNeedles(p.compressed, charCount(a.text)) : null;
   const imgTok = r.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
@@ -698,7 +705,7 @@ export function main(): void {
       }
       const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
-      const side = argv.includes("--no-verbatim") ? null : scanNeedles(p.compressed);
+      const side = argv.includes("--no-verbatim") ? null : scanNeedles(p.compressed, charCount(text));
       const tok = r.tokens;
       process.stdout.write(
         jstring(

@@ -235,6 +235,24 @@ const req = [
       },
     },
   },
+  // needle-dense gate parity: the sidecar budget overflows, so both engines
+  // must refuse to image and say so identically (0.13.1 fix - a budgeted
+  // sidecar stays cheap while dropping the ids it exists to carry).
+  {
+    jsonrpc: "2.0",
+    id: 16,
+    method: "tools/call",
+    params: {
+      name: "tanuki_estimate",
+      arguments: {
+        text: Array.from(
+          { length: 40 },
+          (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a token=${String(i).padStart(4, "0")}cafebabe9f21`,
+        ).join("\n"),
+        level: 0,
+      },
+    },
+  },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
