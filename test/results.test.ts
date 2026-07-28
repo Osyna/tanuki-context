@@ -715,10 +715,12 @@ describe("visibleTools: slim default surface, all tools behind a flag", () => {
     delete process.env.TANUKI_ALL_TOOLS;
   });
 });
+
 // ------------------------------------------- prompt-cache safety / fail-open
-// Two properties borrowed from ctxdiff's problem framing: a rendered block
-// must be byte-stable or every re-image silently breaks the caller's prompt
-// cache, and a proxy in the request path must never break the request.
+// Two properties ctxdiff (github.com/salmanzafar949/ctxdiff) audits by design,
+// asserted here: a rendered block must be byte-stable or every re-image
+// silently re-bills the caller's cached prefix, and a proxy in the request
+// path must never break the request it is optimizing.
 describe("cache safety and fail-open", () => {
   test("rendering the same text twice is byte-identical", () => {
     const text = Array.from(

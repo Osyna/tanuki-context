@@ -178,8 +178,9 @@ Both are fixed in 0.15: fetch joins the default surface, and every emitter
 
 **The tradeoff that caused bug 1, priced.** The slim surface exists to save
 advertised-schema tokens — a real cost, and one worth measuring rather than
-assuming (the framing is borrowed from `ctxdiff`, which detects "tool schemas
-you pay for on every call but never invoke"). Measured on our own
+assuming. Dead-schema accounting ("tool schemas you pay for on every call but
+never invoke") is a first-class check in
+[ctxdiff](https://github.com/salmanzafar949/ctxdiff); measured on our own
 `tools/list`:
 
 | surface | tools | tokens/request |

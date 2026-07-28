@@ -82,7 +82,7 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 - **Render output is byte-stable, now enforced.** Rendering the same text twice produces identical PNG bytes — if it ever drifts, every re-image silently re-bills the caller's whole cached prefix. That's a cost regression no other test here would catch, so it has its own.
 - **The slim tool surface is priced, not assumed** — 549 tok/request for 5 tools vs 749 for 8. Hiding `tanuki_fetch` saved 74 tok/request and cost 521,000 tokens in one failed run ([EVALS §6](reference/EVALS.md)).
 
-*Prompted by reading [ctxdiff](https://github.com/salmanzafar949/ctxdiff), whose fail-open guarantee, cache-break attribution and schema-bloat detection are the framing behind all three.*
+Fail-open capture, prompt-cache break attribution and dead tool-schema detection are properties [ctxdiff](https://github.com/salmanzafar949/ctxdiff) audits by design — see [Prior art](#more). All three were unasserted here; now they are tested.
 
 ## New in 0.16
 
@@ -153,6 +153,16 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 - **[Design notes](DESIGN.md)** — why each pipeline stage exists.
 - **[Evals](reference/EVALS.md)** — we publish the harness, not a number: `needles` (read-back fidelity, results published), `paired` (cost per successful task), `taskqual` (task success on pages vs text).
 - **[Research roadmap](docs/research-roadmap-2026-07.md)** — how tanuki maps onto DeepSeek-OCR, Glyph, and VIST.
+
+**Prior art.** [ctxdiff](https://github.com/salmanzafar949/ctxdiff) by
+[@salmanzafar949](https://github.com/salmanzafar949) (Apache-2.0) — a
+local-first debugger for the agent context window: content-hashed block
+capture, git-style turn diffs, prompt-cache break attribution, and detection
+of tool schemas you pay for on every call but never invoke. It answers *what
+did the model see and what changed*; tanuki decides *what it sees at all*, so
+the two compose rather than compete — run ctxdiff around an agent using tanuki
+and the imaged blocks show up as ordinary diffs. Its fail-open guarantee and
+schema-bloat framing are the source of the three properties audited in 0.16.1.
 
 Rust: `cargo install --git https://github.com/Osyna/tanuki-context --branch rust`
 — the same engine as one static binary, held byte/pixel-exact with the npm
