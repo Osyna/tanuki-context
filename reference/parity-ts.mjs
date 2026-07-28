@@ -197,6 +197,10 @@ const text = readFileSync(logFile, "utf8");
 // same id (sha256 first 12 hex, per stash) and verify byte-identically.
 const vText = "alpha\nid 3451bd1b-13c4-4558-aa67-a62bc042905e beta\ngamma cafe1234 delta\n";
 const vId = createHash("sha256").update(vText, "utf8").digest("hex").slice(0, 12);
+// fetch parity: a needle-dense stash, so `tanuki_fetch` must decline to image
+// and return the slice as text identically in both engines (0.14).
+const fText = `${Array.from({ length: 400 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a token=${String(i).padStart(4, "0")}cafebabe9f21`).join("\n")}\n`;
+const fId = createHash("sha256").update(fText, "utf8").digest("hex").slice(0, 12);
 const req = [
   { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
   { jsonrpc: "2.0", method: "notifications/initialized" },
@@ -270,6 +274,11 @@ const req = [
       },
     },
   },
+  // stash a needle-dense text, then fetch it: both engines must decline to
+  // image and hand back the slice as text (0.14 - fetch used to image with no
+  // verbatim sidecar at all).
+  { jsonrpc: "2.0", id: 18, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: fText } } },
+  { jsonrpc: "2.0", id: 19, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, lines: "1-400" } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

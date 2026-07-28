@@ -146,6 +146,7 @@ pub fn at_risk(v: &str) -> bool {
         let mut e = s;
         let mut seg_digits = 0usize;
         let mut seg_alpha = 0usize;
+        let mut seg_hex_alpha = 0usize;
         let mut vowels = 0usize;
         let mut run = 0usize;
         let mut max_run = 0usize;
@@ -155,7 +156,11 @@ pub fn at_risk(v: &str) -> bool {
                 seg_digits += 1;
             } else {
                 seg_alpha += 1;
-                match c.to_ascii_lowercase() {
+                let f = c.to_ascii_lowercase();
+                if matches!(f, 'a'..='f') {
+                    seg_hex_alpha += 1;
+                }
+                match f {
                     'a' | 'e' | 'i' | 'o' | 'u' | 'y' => {
                         vowels += 1;
                         run = 0;
@@ -171,6 +176,15 @@ pub fn at_risk(v: &str) -> bool {
             e += 1;
         }
         let len = e - s;
+        // A bare 7-hex sha is at risk, so one inside `ee70833..0c331b6` is too -
+        // segments must mirror the whole-token hex and numeric rules, or a git
+        // sha range slips through on length alone.
+        if len >= 6 && seg_hex_alpha > 0 && seg_alpha == seg_hex_alpha {
+            return true;
+        }
+        if len >= 9 && seg_alpha == 0 {
+            return true;
+        }
         if len >= 8 && seg_digits > 0 && seg_alpha > 0 {
             return true;
         }

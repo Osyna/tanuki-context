@@ -417,24 +417,42 @@ fn tool_stash(args: &Value) -> Result<Value, String> {
     Ok(json!([{ "type": "text", "text": overview }]))
 }
 
+/// The slice ships its verbatim sidecar exactly like render does. Imaging a
+/// fetched slice without one left every id in it unprotected, on the path the
+/// manual recommends for large references. Sidecar tokens count against the
+/// win, and a needle-dense slice stays text.
 fn tool_fetch(args: &Value) -> Result<Value, String> {
     let id = args["id"].as_str().unwrap_or("");
     let slice = stash::fetch_slice(id, args["query"].as_str(), args["lines"].as_str())?;
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
     let raw_tok = text_tokens(chars);
-    if !stash_pages_win(r.tokens, r.pages.len(), raw_tok) || !needles::scan_credentials(&slice).is_empty() {
+    let side = needles::scan_needles_sized(&slice, chars);
+    let cost = r.tokens + side.tokens;
+    if !stash_pages_win(cost, r.pages.len(), raw_tok)
+        || !needles::scan_credentials(&slice).is_empty()
+        || side.dense
+    {
         return Ok(json!([{ "type": "text", "text": slice }]));
     }
-    let marker = format!(
-        "[tanuki-context stash {id}: slice of {chars} chars imaged as {} PNG page(s), ~{} vs ~{raw_tok} text tokens. ↵=newline →=tab ⇥N=indent]",
+    let mut marker = format!(
+        "[tanuki-context stash {id}: slice of {chars} chars imaged as {} PNG page(s), ~{cost} vs ~{raw_tok} text tokens. ↵=newline →=tab ⇥N=indent",
         r.pages.len(),
-        r.tokens,
     );
+    if !side.needles.is_empty() {
+        marker.push_str(&format!(
+            "; \u{b7}verbatim\u{b7} below carries {} exact strings as text",
+            side.needles.len()
+        ));
+    }
+    marker.push(']');
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut content = vec![json!({ "type": "text", "text": marker })];
     for page in &r.pages {
         content.push(json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }));
+    }
+    if !side.text.is_empty() {
+        content.push(json!({ "type": "text", "text": side.text }));
     }
     Ok(json!(content))
 }
@@ -786,7 +804,13 @@ fn main() {
             });
             let r = render::render_text(&slice, true, true, render::Font::Normal);
             let raw_tok = text_tokens(slice.chars().count());
-            if stash_pages_win(r.tokens, r.pages.len(), raw_tok) && needles::scan_credentials(&slice).is_empty() {
+            // Same gate as tool_fetch: sidecar cost counts against the win and
+            // a needle-dense slice stays text.
+            let side = needles::scan_needles_sized(&slice, slice.chars().count());
+            if stash_pages_win(r.tokens + side.tokens, r.pages.len(), raw_tok)
+                && needles::scan_credentials(&slice).is_empty()
+                && !side.dense
+            {
                 println!(
                     "{}",
                     json!({ "mode": "pages", "pages": r.pages.len(),
