@@ -583,6 +583,35 @@ describe("verbatim: exact strings ride as text, never pixels", () => {
     expect(e.verdict).toBe("TEXT cheaper (needle-dense)");
   });
 
+  // 0.13.1 gated the advisory path (estimate) and left the ACTION paths open:
+  // render imaged a dense block anyway, and its summary claimed every found
+  // string rode below when only the carried ones did.
+  test("render refuses a needle-dense block instead of imaging it", async () => {
+    let s = 7;
+    const rnd = (): number => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const hex = (n: number): string => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+    const dense = Array.from({ length: 120 }, (_, i) =>
+      `2026-07-27T09:${String(i % 60).padStart(2, "0")}:00Z relay INFO request ${Array.from({ length: 6 }, () => `id=${hex(16)}`).join(" ")} ok`).join("\n");
+    const out = toolRender({ text: dense, level: 0 }) as Array<{ type: string; text?: string }>;
+    expect(out.some((c) => c.type === "image")).toBe(false);
+    expect(out[0].text).toContain("refused to render");
+    expect(out[0].text).toContain("unverifiable pixels");
+    // opting out knowingly is still allowed - the refusal is about silence
+    const off = toolRender({ text: dense, level: 0, verbatim: false }) as Array<{ type: string }>;
+    expect(off.some((c) => c.type === "image")).toBe(true);
+  });
+
+  test("the sidecar and summary count what is carried, not what was found", async () => {
+    const ids = Array.from({ length: 40 }, (_, i) => `id=${String(i).padStart(4, "0")}deadbeef4f3a`);
+    const sc = scanNeedles(ids.join("\n"));
+    expect(sc.dense).toBe(true);
+    // header states carried-of-found, never bare found
+    expect(sc.text.split("\n")[0]).toBe(`·verbatim· ${sc.needles.length} of ${sc.needles.length + sc.more} exact strings (read them here, not from pixels)`);
+    // and every listed value really is present
+    const listed = sc.text.split("\n").filter((l) => l.startsWith("L")).length;
+    expect(listed).toBe(sc.needles.length);
+  });
+
   // EVALS §7: the allowlist carried 30.9% of unrecoverable ids on 19.7 MB of
   // real logs. These are the families it missed - they must not regress.
   test("ids that match no named format still ride as text", async () => {
