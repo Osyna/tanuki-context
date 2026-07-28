@@ -292,6 +292,13 @@ fn tool_render(args: &Value) -> Value {
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
     let side = if a.verbatim { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) } else { None };
+    if let Some(s) = &side {
+        if s.dense {
+            // Same contract as the credential gate: exactness must never ride
+            // on pixels silently.
+            return json!([{ "type": "text", "text": format!("[tanuki-context: refused to render — {} of {} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:false to opt out knowingly]", s.more, s.needles.len() + s.more) }]);
+        }
+    }
     let img_tok = r.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -333,7 +340,7 @@ fn tool_render(args: &Value) -> Value {
     }
     if let Some(s) = &side {
         if !s.needles.is_empty() {
-            summary.push_str(&format!(" · verbatim: {} exact strings ride below as text", s.needles.len() + s.more));
+            summary.push_str(&format!(" · verbatim: {} exact strings ride below as text", s.needles.len()));
         }
     }
     let b64 = base64::engine::general_purpose::STANDARD;

@@ -283,10 +283,20 @@ pub fn scan_needles_sized(text: &str, raw_chars: usize) -> Sidecar {
         return Sidecar { needles: Vec::new(), more: 0, dense: false, text: String::new(), tokens: 0 };
     }
     kept.sort_by_key(|n| n.line); // stable, mirrors JS Array.sort
-    let mut out = format!(
-        "\u{b7}verbatim\u{b7} {} exact strings (read them here, not from pixels)",
-        kept.len() + more
-    );
+    // Say what is CARRIED, not what was found: "read them here" is false for
+    // anything past the budget, and the footer alone is easy to miss.
+    let mut out = if more > 0 {
+        format!(
+            "\u{b7}verbatim\u{b7} {} of {} exact strings (read them here, not from pixels)",
+            kept.len(),
+            kept.len() + more
+        )
+    } else {
+        format!(
+            "\u{b7}verbatim\u{b7} {} exact strings (read them here, not from pixels)",
+            kept.len()
+        )
+    };
     for n in &kept {
         out.push_str(&format!("\nL{} {}", n.line, n.value));
     }
@@ -393,5 +403,37 @@ mod tests {
     fn budget_scales_with_raw_size() {
         assert_eq!(sidecar_budget(0), SIDECAR_MIN_CHARS);
         assert_eq!(sidecar_budget(40_000), 20_000);
+    }
+}
+
+#[cfg(test)]
+mod honesty_tests {
+    use super::*;
+
+    /// The header must state what is CARRIED - "read them here" is false for
+    /// anything past the budget.
+    #[test]
+    fn header_counts_carried_not_found() {
+        let ids: Vec<String> = (0..40).map(|i| format!("id={i:04}deadbeef4f3a")).collect();
+        let sc = scan_needles(&ids.join("\n"));
+        assert!(sc.dense);
+        let head = sc.text.lines().next().unwrap();
+        assert_eq!(
+            head,
+            format!(
+                "\u{b7}verbatim\u{b7} {} of {} exact strings (read them here, not from pixels)",
+                sc.needles.len(),
+                sc.needles.len() + sc.more
+            )
+        );
+        let listed = sc.text.lines().filter(|l| l.starts_with('L')).count();
+        assert_eq!(listed, sc.needles.len());
+    }
+
+    #[test]
+    fn header_is_plain_when_everything_fits() {
+        let sc = scan_needles("relay dest=86:2b:11:51:58:03 down");
+        assert!(!sc.dense);
+        assert!(sc.text.lines().next().unwrap().starts_with("\u{b7}verbatim\u{b7} 1 exact strings"));
     }
 }
