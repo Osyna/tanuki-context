@@ -281,6 +281,9 @@ const req = [
   { jsonrpc: "2.0", id: 19, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, lines: "1-400" } } },
   // a query fetch reports the raw match count identically in both engines
   { jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: fId, query: "cafebabe9f21" } } },
+  // measured weak reader: both engines must floor the band and refuse to image
+  { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text, level: 0, model: "claude-haiku-4-5" } } },
+  { jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text, level: 0, model: "claude-opus-5" } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
