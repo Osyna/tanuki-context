@@ -340,11 +340,20 @@ fn tool_render(args: &Value) -> Value {
     }
     if let Some(s) = &side {
         if !s.needles.is_empty() {
-            summary.push_str(&format!(" · verbatim: {} exact strings ride below as text", s.needles.len()));
+            summary.push_str(&format!(
+                " · verbatim: {} exact strings follow as text - read ids from there, not from the pages",
+                s.needles.len()
+            ));
         }
     }
     let b64 = base64::engine::general_purpose::STANDARD;
+    // Sidecar BEFORE the pages: exact strings first, bulk second.
     let mut content = vec![json!({ "type": "text", "text": summary })];
+    if let Some(s) = &side {
+        if !s.text.is_empty() {
+            content.push(json!({ "type": "text", "text": s.text }));
+        }
+    }
     for page in r.pages.iter().take(MAX_INLINE_PAGES) {
         content.push(
             json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }),
@@ -352,11 +361,6 @@ fn tool_render(args: &Value) -> Value {
     }
     if r.pages.len() > MAX_INLINE_PAGES {
         content.push(json!({ "type": "text", "text": format!("(+{} more page(s))", r.pages.len() - MAX_INLINE_PAGES) }));
-    }
-    if let Some(s) = &side {
-        if !s.text.is_empty() {
-            content.push(json!({ "type": "text", "text": s.text }));
-        }
     }
     json!(content)
 }
@@ -441,18 +445,20 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     );
     if !side.needles.is_empty() {
         marker.push_str(&format!(
-            "; \u{b7}verbatim\u{b7} below carries {} exact strings as text",
+            "; the \u{b7}verbatim\u{b7} block next carries {} exact strings as text - read ids from there, not from the pages",
             side.needles.len()
         ));
     }
     marker.push(']');
     let b64 = base64::engine::general_purpose::STANDARD;
+    // Sidecar BEFORE the pages. Trailing it after a 12KB image is how a traced
+    // agent missed the answer it had already been handed (EVALS section 6).
     let mut content = vec![json!({ "type": "text", "text": marker })];
-    for page in &r.pages {
-        content.push(json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }));
-    }
     if !side.text.is_empty() {
         content.push(json!({ "type": "text", "text": side.text }));
+    }
+    for page in &r.pages {
+        content.push(json!({ "type": "image", "data": b64.encode(&page.png), "mimeType": "image/png" }));
     }
     Ok(json!(content))
 }
@@ -537,7 +543,11 @@ fn tools_list() -> Value {
     // Slim default surface: advertise only the 4 workflow tools unless
     // TANUKI_ALL_TOOLS=1. The other four stay callable by name.
     if std::env::var("TANUKI_ALL_TOOLS").as_deref() != Ok("1") {
-        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_verify"];
+        // `tanuki_fetch` is not optional: stash parks text outside the context
+        // and fetch is the ONLY way back. Advertising stash without it let the
+        // model park data it could never retrieve and burn every turn on
+        // ToolSearch hunting a tool that was not there (EVALS section 6).
+        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_fetch", "tanuki_verify"];
         if let Some(tools) = v["tools"].as_array_mut() {
             tools.retain(|t| keep.contains(&t["name"].as_str().unwrap_or("")));
         }
