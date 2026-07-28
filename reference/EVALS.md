@@ -151,26 +151,53 @@ bytes as text. Every alternative is priced in `recommend` for override. The
 decision is a transparent policy over measured signals, byte-identical across
 the TS and Rust engines (see `reference/parity-ts.mjs`).
 
-## 6. End-to-end: cost per successful task — `npm run paired`   *(the open frontier)*
+## 6. End-to-end: cost per successful task — `npm run paired` / `npm run trace`
 
 The honest end number is cost per *successful* task, tool-off (log inlined) vs
-tool-on (the log stashed; the agent gets a ~300-token map plus the tanuki tools
-and fetches what it needs). We ran it on a 1,200-line log, `claude-sonnet-5`.
-It did not go well for the autonomous arm:
+tool-on (the log stashed; the agent gets a ~700-token map plus the tanuki tools
+and fetches what it needs), on a 1,200-line log with `claude-sonnet-5`.
 
-| arm | result |
-| --- | --- |
-| off (log inlined) | passes, but cost swings wildly ($0.02 → $1.81/run as the agent re-reads) |
-| on (autonomous tanuki tools) | **fails** — the agent over-fetches/images, never converges, hits the turn cap (450k–760k input tokens/run) |
+**This section previously reported that "the fully-autonomous loop is not a win
+— handed the tools, a capable agent thrashes: fetching, imaging, re-fetching."
+That diagnosis was wrong.** It was inferred from token counts. Tracing the loop
+call-by-call (`npm run trace`) showed two ordinary bugs, neither of them about
+agent discipline:
 
-This is a real finding, not a stub: **the fully-autonomous loop is not a win
-yet.** Handed the tools with no discipline, a capable agent still thrashes —
-fetching, imaging, re-fetching. What is *proven* is the input-side compression
-(§1–5) driven **explicitly**: call `estimate`, read the verdict, render when it
-says so. That is the documented default (model in charge, one step at a time),
-and it is where the measured savings live. The autonomous "give the agent the
-tools and walk away" story needs work on the tool outputs and the loop before
-it earns a number here — so it does not get a flattering one.
+1. **`tanuki_fetch` was not in the advertised tool surface.** `tanuki_stash`
+   was, and fetch is the only way to read a stash back — so the model parked
+   text it could never retrieve. The trace is unambiguous: five `ToolSearch`
+   calls, then *"No `tanuki_fetch` tool exists in my toolset — I searched
+   exhaustively."* Every "over-fetch" token was a tool hunt.
+2. **The verbatim sidecar shipped *after* the image blocks.** With fetch
+   exposed, the answer was handed to the agent in the sidecar on turn 4 —
+   `L21 42440ce06042` — and it re-queried six more times before finding it.
+   Exact strings trailing a 12 KB PNG are easy to skip past.
+
+Both are fixed in 0.15: fetch joins the default surface, and every emitter
+(`render`, `fetch`, proxy) puts the sidecar **before** the pages.
+
+| task | arm | before | after (0.15) |
+| --- | --- | ---: | ---: |
+| `upstream-502-request-id` (read an id verbatim) | on | **0/1 FAIL**, 521k in-tokens | **3/3 PASS** |
+| `upstream-502-request-id` | off | 1/1 PASS | 3/3 PASS |
+| `dominant-error-unit` (count across the whole log) | on | fail | **still fails** |
+
+Cost per success on the verbatim task: **$0.215 tool-on vs $0.0257 tool-off.**
+Read that with care — the off arm inlines the same log every run and is largely
+served from prompt cache, which is exactly the situation §5's router already
+routes to text.
+
+**What is now true, stated narrowly:** verbatim retrieval through
+stash→fetch→sidecar works reliably (3/3) where it categorically did not before.
+Whole-corpus *aggregation* ("which unit logged the most errors") still fails on
+the tool arm — slices cannot count what they do not see, and imaging does not
+help counting. And the loop is still not a cost win against inlining a log this
+size. The proven savings remain the input-side ones (§1–5) driven explicitly:
+call `estimate`, read the verdict, render when it says so.
+
+The lesson worth keeping: **a token count is a symptom, not a diagnosis.** Two
+releases of narrative about agent behaviour dissolved the moment the loop was
+actually traced.
 
 ## 7. Sidecar coverage on real logs — `npm run coverage` / `npm run adversarial`
 

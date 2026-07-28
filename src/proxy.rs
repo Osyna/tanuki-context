@@ -127,23 +127,24 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     }
     if !side.needles.is_empty() {
         marker.push_str(&format!(
-            "; \u{b7}verbatim\u{b7} below carries {} exact strings as text",
+            "; the \u{b7}verbatim\u{b7} block next carries {} exact strings as text - read ids from there, not from the pages",
             side.needles.len()
         ));
     }
     marker.push(']');
 
     let b64 = base64::engine::general_purpose::STANDARD;
-    let mut blocks = Vec::with_capacity(1 + r.pages.len());
+    // Sidecar BEFORE the pages: exact strings first, bulk second.
+    let mut blocks = Vec::with_capacity(2 + r.pages.len());
     blocks.push(json!({ "type": "text", "text": marker }));
+    if !side.text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": side.text }));
+    }
     for p in &r.pages {
         blocks.push(json!({
             "type": "image",
             "source": { "type": "base64", "media_type": "image/png", "data": b64.encode(&p.png) },
         }));
-    }
-    if !side.text.is_empty() {
-        blocks.push(json!({ "type": "text", "text": side.text }));
     }
     Some(ImagedBlock {
         blocks,
