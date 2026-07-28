@@ -103,7 +103,7 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
 
     let raw_tok = ((orig_chars as f64) / 4.0).round() as u64;
     let r = render::render_text(&working, true, true, cfg.font);
-    let side = crate::needles::scan_needles(&working);
+    let side = crate::needles::scan_needles_sized(&working, orig_chars);
     let cost = r.tokens + side.tokens;
     if r.pages.len() > cfg.max_pages {
         return None;

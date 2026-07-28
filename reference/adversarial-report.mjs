@@ -55,9 +55,13 @@ const args = process.argv.slice(2);
 const json = args.includes("--json");
 const nIdx = args.indexOf("--n");
 const N = nIdx >= 0 ? Number(args[nIdx + 1]) : 60;
+const minIdx = args.indexOf("--min");
+const MIN = minIdx >= 0 ? Number(args[minIdx + 1]) : null;
 
 // Real log lines as the host, so the scan runs against realistic surroundings.
-const hostFile = args.find((a) => !a.startsWith("--") && a !== String(N));
+// Positional = host file; skip the values that belong to --n / --min.
+const flagValues = new Set([nIdx, minIdx].filter((i) => i >= 0).map((i) => args[i + 1]));
+const hostFile = args.find((a) => !a.startsWith("--") && !flagValues.has(a));
 let host;
 try {
   host = readFileSync(hostFile ?? "reference/needles/normal.log", "utf8").split("\n").slice(0, 120);
@@ -90,4 +94,11 @@ if (json) {
   console.table(rows);
   console.log(`${rows.length} novel shapes x ${N} draws | mean catch rate ${mean.toFixed(1)}%`);
   console.log(`weakest: ${worst.map((w) => `${w.shape} ${w.pct}%`).join(", ")}`);
+}
+if (MIN !== null) {
+  if (mean < MIN) {
+    console.error(`FAIL: mean catch rate ${mean.toFixed(1)}% is below the required ${MIN}%`);
+    process.exit(1);
+  }
+  console.log(`OK: mean catch rate ${mean.toFixed(1)}% >= ${MIN}%`);
 }
