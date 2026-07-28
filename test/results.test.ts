@@ -475,7 +475,10 @@ describe("dist/cli.js MCP session", () => {
 
     expect(r.get(1)?.result?.serverInfo?.name).toBe("tanuki-context");
     const tools = (r.get(2)?.result?.tools ?? []).map((t) => t.name);
-    expect(tools).toEqual(["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_verify"]);
+    // fetch is in the default surface: stash parks text and fetch is the only
+    // way back. Advertising one without the other made the documented stash
+    // workflow impossible (EVALS §6).
+    expect(tools).toEqual(["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_fetch", "tanuki_verify"]);
 
     // estimate JSON from our own server; fields asserted below
     const stacked = JSON.parse(r.get(3)?.result?.content?.[0]?.text ?? "{}") as EstimateOut;
@@ -695,10 +698,13 @@ describe("credential gate: secrets are never rendered to pixels", () => {
 
 // ------------------------------------------- slim default tools/list surface
 describe("visibleTools: slim default surface, all tools behind a flag", () => {
-  test("default advertises the four workflow tools; all 8 stay callable", () => {
+  test("default advertises the five workflow tools; all 8 stay callable", () => {
     delete process.env.TANUKI_ALL_TOOLS;
     expect(visibleTools().map((t) => t.name)).toEqual([...DEFAULT_TOOL_NAMES]);
-    expect(visibleTools().length).toBe(4);
+    // stash without fetch is a one-way door: the model parks text it can never
+    // read back, and burns its turns hunting a tool that was never advertised.
+    expect(visibleTools().map((t) => t.name)).toContain("tanuki_fetch");
+    expect(visibleTools().length).toBe(5);
     expect(TOOLS.length).toBe(8);
   });
 
