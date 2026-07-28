@@ -261,7 +261,7 @@ fn tool_estimate(args: &Value) -> Value {
             None => json!(false),
         },
         "verbatim": match &side {
-            Some(s) => json!({ "more": s.more, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
+            Some(s) => json!({ "more": s.more, "dense": s.dense, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
             None => json!(false),
         },
         "verdict": if has_creds { "TEXT cheaper (credentials)" } else if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
