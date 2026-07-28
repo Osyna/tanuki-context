@@ -213,6 +213,28 @@ const req = [
   { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "3451bd1b-13c4-4558-aa67-a62bc042905f" } } },
   { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "cafe1234" } } },
   { jsonrpc: "2.0", id: 14, method: "tools/call", params: { name: "tanuki_verify", arguments: { id: vId, value: "3451bd1b-13c4-4558-aa67-a62bc04290e5" } } },
+  // sidecar classifier parity: every family the allowlist could not name
+  // (MAC, git short sha, PCI id, pod name, base64, random alpha ids) must be
+  // picked identically by both engines - see EVALS §7.
+  {
+    jsonrpc: "2.0",
+    id: 15,
+    method: "tools/call",
+    params: {
+      name: "tanuki_estimate",
+      arguments: {
+        text: [
+          "relay dest=86:2b:11:51:58:03 unreachable after 34m51s",
+          "merged 6c9224c into main; device 1022:14e5 bound to amdgpu",
+          "pod api-worker-7d9f8b6c4-x2ktp evicted, node ip-10-2-30-4",
+          "body aGVsbG8gd29ybGQxMjM0NTY3 sent ref=ryvkuvrdmg tag=YHFJNKGNSMTQBWC",
+          "order ORD-5171-JRUBJMGB shipped; installed ocean-sound-theme lib32-libunistring",
+          "2026-07-27T09:30:00Z worker INFO poll ok latency=14ms conn=3",
+        ].join("\n"),
+        level: 0,
+      },
+    },
+  },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

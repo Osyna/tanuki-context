@@ -72,9 +72,16 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 ## When not to reach for it
 
 - **Your model can't read dense pages.** Imaging for comprehension needs a capable reader: Opus and the newest Sonnet solve the task off pixels (5/5 in [evals](reference/EVALS.md)), but Sonnet-4-5 and Haiku drop to 0/5. Measure yours with `npm run taskqual`, or keep it text / raise the font.
-- **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**. Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships uuids/hashes/ids as text; edit-targets should stay text. Read a value off a page anyway? `tanuki_verify` checks it against the stashed original — exact, a corrected near-miss, or absent — no model.
+- **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**. Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships ids, hashes, MACs, pod names and base64 as text beside the pages: **97%** of unrecoverable identifiers across 19.7 MB of real logs, **92.9%** against id shapes it was never designed for (`npm run coverage`, `npm run adversarial`). Exactness itself never rides on pixels at all — the stash holds the original bytes under a sha256, **19,722,893 / 19,722,893 characters recovered byte-identical** on that corpus, and `tanuki_verify` settles any value you read off a page — exact, a corrected near-miss, or absent — no model.
 - **The content is small, or your bill is output-dominated.** `tanuki_stats` reports the output share so you can tell.
 - **You're not on Anthropic pricing.** Pass `model` to `tanuki_estimate` for provider-correct `cost` (OpenAI tiles, Gemini tiles), overridable via `TANUKI_RATES`.
+
+## New in 0.13
+
+- **The sidecar stopped being an allowlist.** It matched 7 named id formats and carried **30.9%** of unrecoverable identifiers on 19.7 MB of real logs — pod names, MACs, base64 and git short shas rode as pixels silently. "Is this a known format?" has an unbounded complement; "is this token *recoverable* if one character flips?" does not. Inverting that question takes coverage to **97%**, for ~10 extra text tokens per page (~0.5% of its image cost).
+- **Two new harnesses, because a coverage number you wrote the criterion for proves nothing.** `npm run coverage` scores the real engine on your own logs; `npm run adversarial` injects ids in shapes the engine was never designed around — **62.8% → 92.9%** mean catch rate. That test found the worst bug: a blanket "words are recoverable" rule was waving through *every* random alphabetic id, 0/60.
+- **The cap no longer truncates silently.** A flat 32 needles per block dropped 31% of what the scanner found on 240-line pages; it now scales with the block (32…512) and overflow sets `dense` — the signal to keep that content as text.
+- **The lossless spine, measured:** stash → fetch → diff over the same corpus, **19,722,893 / 19,722,893 characters byte-identical**. Pixel accuracy is not 1-in-10-million and never will be; the stash is exact by construction, so treat pages as a navigation index and settle exact values with `tanuki_verify`.
 
 ## New in 0.12
 

@@ -172,38 +172,32 @@ and it is where the measured savings live. The autonomous "give the agent the
 tools and walk away" story needs work on the tool outputs and the loop before
 it earns a number here — so it does not get a flattering one.
 
-## 7. Sidecar coverage on real logs — `npm run coverage`   *(deterministic, and it fails)*
+## 7. Sidecar coverage on real logs — `npm run coverage` / `npm run adversarial`
 
 The needle harness (§2) seeds uuid/semver/hex/digest/path — **the same kinds
-the scanner's allowlist already matches.** So its 20/20 measures *that the two
+the scanner's allowlist already matches.** So its 20/20 measured *that the two
 lists agree*, not how much of a real log is protected. The miss that actually
-hurts is a high-entropy string nobody wrote a regex for, and it rides as pixels
+hurt was a high-entropy string nobody wrote a regex for, riding as pixels
 silently. Credit for the framing goes to a reader who spotted it; here is the
 check they proposed, run on **19.7 MB of real logs** (systemd journal, kernel,
-git history, pacman):
+git history, pacman), plus the fix it forced.
 
-A token is counted **at-risk** when a single-character misread would be both
+A token counts as **at-risk** when a single-character misread would be both
 *silent* and *unrecoverable*: rare (≤2 occurrences, so repetition can't
-self-correct), ≥6 chars, high-entropy, and **not** a format recoverable from
-context (durations, ISO timestamps, versions, small ints, and words are all
-excluded). The criterion is defined independently of the scanner's patterns —
-that is the whole point — and is deliberately conservative, so this is a
-**floor** on the gap, not an inflation.
+self-correct), ≥6 chars, and **not** a format recoverable from context
+(durations, ISO timestamps, versions, small ints, words are all excluded).
 
-| corpus | MB | at-risk ids | carried as text | partial | **riding as pixels** |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| systemd journal | 17.0 | 3,265 | 1,383 (42%) | 267 | 1,615 |
-| git history | 1.47 | 1,024 | 85 (8%) | 211 | 728 |
-| pacman | 1.04 | 391 | 37 (10%) | 189 | 165 |
-| kernel (dmesg) | 0.22 | 456 | 83 (18%) | 164 | 209 |
-| **total** | **19.7** | **5,136** | **1,588 (30.9%)** | 831 | **2,717 (52.9%)** |
+### What the allowlist actually covered
 
-**The allowlist fully carries 30.9% of unrecoverable identifiers.** In
-character terms: **4,204 unprotected at-risk chars per million — 1 in 238.**
-Against a do-or-die bar of "1 in 10 million dropped," that is five orders of
-magnitude short. Published because it's true.
+| | before (0.12) | after (0.13) |
+| --- | ---: | ---: |
+| at-risk ids carried as text | **1,588 / 5,136 (30.9%)** | **4,982 / 5,136 (97.0%)** |
+| unprotected at-risk chars | 4,204/million = **1 in 238** | 164/million = **1 in 6,101** |
+| needle-dense pages flagged | (silently truncated) | 21 / 1,393 |
 
-Missed families, ranked — the "what to add next" the check is for:
+The families the allowlist could not name, ranked by misses before the fix —
+the reader's three guesses (internal id, pod name, base64 chunk) were the top
+three:
 
 | missed | family |
 | ---: | --- |
@@ -211,28 +205,70 @@ Missed families, ranked — the "what to add next" the check is for:
 | 617 | MAC address |
 | 158 | base64 blob |
 | 82 | PCI/USB id |
-| 74 | hex run ≥6 (**git short sha**, request id — the allowlist floor is 12) |
+| 74 | hex run ≥6 (**git short sha** — the allowlist floor was 12) |
 
-The reader's three guesses — internal id, pod name, base64 chunk — are the top
-three. A second, independent hole compounds it: `NEEDLE_CAP = 32` truncates
-per rendered block, and on 240-line pages **74% of blocks hit the cap, dropping
-31% of the needles the scanner did find** (10% at 120 lines, 2% at 60). Better
-patterns are worthless until the cap stops discarding them.
+### The fix: ask the answerable question
 
-Cost of closing it is not the obstacle: adding MAC / hex≥6 / PCI / base64 /
-interleaved-alnum rules lifts journal coverage 50.5% → 100% of flagged tokens
-for **~10 extra text tokens per 120-line page** — about 0.5% of that page's
-image cost. (That 100% is measured against this criterion, and the criterion
-and the new rules share family definitions — so read it as "closes the measured
-gap on this corpus," not "catches every possible id." The generic
-interleaved-alnum rule is the part that generalizes past a list.)
+"Is this a known id format?" has an unbounded complement — every id format
+anyone will ever invent. "Is this token *recoverable* if one character flips?"
+has a small, enumerable one. 0.13 inverts the classifier: ship a token unless
+it is provably recoverable, using structure rather than a format list —
+a long alnum run mixing letters and digits, or a long alphabetic run that is
+not a word (words alternate vowels and consonants; random letters pile up).
+Bias is to recall: a false positive costs a few tokens and is never wrong.
 
-**The honest conclusion for do-or-die logs:** don't rely on pixel accuracy at
-all — it is not, and will not be, 1-in-10-million. What *is* exact by
-construction is the **stash**: the original bytes are held under a sha256 and
-`tanuki_verify` checks any string against them without a model. For critical
-data the image should be treated as a navigation index over bytes that are
-recoverable in full, never as the source of truth.
+A second, independent hole compounded the first: `NEEDLE_CAP` was a flat 32
+per rendered block, so **74% of 240-line pages hit it and dropped 31% of the
+needles the scanner had already found** (10% at 120 lines). Better patterns
+are worthless while the cap discards them, so the cap now scales with the
+block (32…512) and overflow sets a `dense` flag — the honest signal that the
+content should stay text. Cost of all this: **~10 extra text tokens per
+120-line page**, about 0.5% of that page's image cost.
+
+### The check that cannot be a tautology — `npm run adversarial`
+
+Coverage scored against a hand-written risk criterion still compares two lists
+from the same head. So the engine is also tested against **synthetic ids in
+shapes it was never designed around**, injected into real log lines:
+
+| | before | after |
+| --- | ---: | ---: |
+| mean catch rate, 16 novel shapes × 60 draws | **62.8%** | **92.9%** |
+| pure-alphabetic random (`ryvkuvrdmg`) | **0/60** | 44/60 |
+| pod-style, slash-path, colon-quad, ulid | 68–100% | 98–100% |
+
+This is what found the worst bug: a blanket `^[A-Za-z]+$` "words are
+recoverable" rule was waving through **every** random alphabetic id, 0/60.
+
+**Residual, stated plainly:** random strings that happen to look pronounceable
+(`avenl-7qjwa-cdbod`) still escape — 73–83% on the weakest shapes. Structure
+alone cannot separate those from words without a dictionary, and two shape-free
+oracles were tried and rejected rather than shipped: Shannon entropy over a
+token's own characters measures diversity, not unpredictability (it flags
+`ocean-sound-theme`), and bigram surprisal against the corpus scores MACs
+*low* because `NN:NN` pairs are everywhere.
+
+### What is actually exact — the lossless spine
+
+Pixel accuracy is not, and will never be, 1-in-10-million; §2 measures 0/14
+across five models. The **stash** is a different guarantee, exact by
+construction rather than statistically: original bytes held under a sha256,
+`tanuki_verify` checking any string against them with no model in the loop.
+Measured end to end on the same corpus — stash, fetch, compare:
+
+```
+dmesg.log        218,036 bytes  BYTE-IDENTICAL
+pacman.log     1,036,967 bytes  BYTE-IDENTICAL
+gitlog.log     1,469,888 bytes  BYTE-IDENTICAL
+journal.log   16,998,002 bytes  BYTE-IDENTICAL
+== recovered byte-exact: 19,722,893 / 19,722,893 characters
+```
+
+**Zero characters dropped in 19.7 million**, and it is not a sampling result —
+the bytes are addressed by hash. So for do-or-die logs the answer is not "trust
+the pixels": treat the image as a navigation index over bytes that stay
+recoverable in full, keep exact strings in the sidecar, and settle anything you
+read off a page with `tanuki_verify`.
 
 ## Reproduce
 
@@ -241,8 +277,15 @@ recoverable in full, never as the source of truth.
 node dist/cli.js estimate <log> 0 --model claude-opus-4
 
 # sidecar coverage on YOUR logs (no key, runs on gigabytes) - the one to run first
-node reference/coverage-report.mjs /var/log/*.log
-journalctl --no-pager -n 200000 > /tmp/j.log && node reference/coverage-report.mjs /tmp/j.log
+bun reference/coverage-report.mjs /var/log/*.log
+journalctl --no-pager -n 200000 > /tmp/j.log && bun reference/coverage-report.mjs /tmp/j.log
+
+# generalisation: ids in shapes the engine never saw, injected into real lines
+bun reference/adversarial-report.mjs            # --n 200 for tighter bounds
+
+# the lossless spine: stash it, fetch it, diff it
+ID=$(node dist/cli.js stash big.log | grep -oE '[0-9a-f]{12}' | head -1)
+node dist/cli.js fetch "$ID" --lines "1-$(wc -l < big.log)" | tail -n +2 | cmp - big.log
 
 # read-back fidelity: render sealed pages, transcribe, score by containment
 node reference/needle-report.mjs                                    # pages + answers.json

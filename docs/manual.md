@@ -587,13 +587,17 @@ Sonnet name the root cause from pixels, smaller models under-read) is in
 [reference/EVALS.md](../reference/EVALS.md). The fix is
 the `verbatim` sidecar (default on): the same needle kinds are scanned
 out of the exact text the pages carry and shipped as a `·verbatim·` text
-block next to the images - `L<line> <value>`, deduped, capped at 32.
-Coverage on the needle corpus is 20/20 **by construction** — the harness
-seeds the kinds the scanner matches, so that number proves the two lists
-agree, not that a real log is protected. Measured against an independent
-risk criterion on 19.7 MB of real logs, the allowlist fully carries only
-**30.9%** of unrecoverable identifiers (`npm run coverage`; misses are pod
-names, MACs, base64, git short shas — [EVALS §7](../reference/EVALS.md)).
+block next to the images - `L<line> <value>`, deduped, capped per block
+(32…512, scaling with the block; overflow sets `dense`, meaning keep the
+content as text). Coverage on the needle corpus is 20/20 **by construction**
+— the harness seeds the kinds the scanner matches, so that number proves the
+two lists agree, not that a real log is protected. Measured instead against
+an independent risk criterion on 19.7 MB of real logs, the scanner carries
+**97%** of unrecoverable identifiers (it was 30.9% in 0.12, before the
+classifier was inverted to ask what is *recoverable* rather than what is a
+known format). Against ids in shapes it was never designed for it catches
+**92.9%** (`npm run coverage`, `npm run adversarial`; residual is random
+strings that look pronounceable — [EVALS §7](../reference/EVALS.md)).
 The estimate verdict prices the extra text honestly, and
 `--no-verbatim` / `verbatim:false` turns it off. Two rules survive the
 fix: secrets should never be imaged at all, and `recommend` prices
