@@ -24,7 +24,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.18.0";
+export const VERSION = "0.19.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -157,8 +157,8 @@ function recommendFor(text: string): Record<string, unknown> {
   // for code) is the headline; distill is the lossy-but-error-preserving log
   // sibling, priced as text - the same distilled bytes withDistill counts as
   // pages. Tier 0/1 of the density note: delete waste before you reach to image.
-  const rawTextTok = textTokens(charCount(text));
-  const wsTok = textTokens(charCount(compressText(text, 1).compressed));
+  const rawTextTok = textTokens(text);
+  const wsTok = textTokens(compressText(text, 1).compressed);
   const wsWins = wsTok < rawTextTok;
   const textTok = wsWins ? wsTok : rawTextTok;
   return {
@@ -172,7 +172,7 @@ function recommendFor(text: string): Record<string, unknown> {
       transform: wsWins ? "whitespace" : "none",
       tokens: textTok,
       savedPct: pct(rawTextTok, textTok),
-      withDistill: textTokens(charCount(disDistilled)),
+      withDistill: textTokens(disDistilled),
     },
   };
 }
@@ -245,11 +245,11 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
   // actually ships or the verdict argues against a mode that costs ~30 tokens
   // in place of 5,611. estimate stashes nothing, so its pointer names no id.
   const sideTok =
-    side === null ? 0 : a.verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, null))) : side.tokens;
+    side === null ? 0 : a.verbatim === "lazy" ? textTokens(lazyPointer(side, null)) : side.tokens;
   const imgTok = est.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
-  const rawTok = textTokens(origChars);
+  const rawTok = textTokens(a.text);
   const [name, loss] = LEVELS[p.level];
   const model = asStr(jget(args, "model"));
   const cached = asBool(jget(args, "cached")) ?? false;
@@ -323,7 +323,7 @@ export function toolRender(args: unknown): unknown[] {
   const imgTok = r.tokens;
   const origChars = charCount(a.text);
   const stage1Chars = charCount(p.compressed);
-  const rawTok = textTokens(origChars);
+  const rawTok = textTokens(a.text);
   const [name, loss] = LEVELS[p.level];
   let summary = "";
   if (p.table !== null) {
@@ -416,8 +416,8 @@ export function toolCompress(args: unknown): unknown[] {
   const [name, loss, desc] = LEVELS[c.level];
   const origChars = charCount(text);
   const outChars = charCount(c.compressed);
-  const oTok = textTokens(origChars);
-  const nTok = textTokens(outChars);
+  const oTok = textTokens(text);
+  const nTok = textTokens(c.compressed);
   const stats = {
     level: `${c.level} ${name}`,
     loss,
@@ -461,11 +461,11 @@ interface FetchResult {
 /// Sidecar tokens count against the win, and a needle-dense slice stays text.
 function fetchRendered(id: string, query: string | null, lines: string | null, verbatim: Verbatim): FetchResult {
   const slice = fetchSlice(id, query, lines);
-  const rawTok = textTokens(charCount(slice));
+  const rawTok = textTokens(slice);
   const r = renderText(slice, true, true, "normal");
   const side = scanNeedles(slice, charCount(slice));
   const sideTok =
-    verbatim === "off" ? 0 : verbatim === "lazy" ? textTokens(charCount(lazyPointer(side, id))) : side.tokens;
+    verbatim === "off" ? 0 : verbatim === "lazy" ? textTokens(lazyPointer(side, id)) : side.tokens;
   const cost = r.tokens + sideTok;
   // `lazy` withholds the strings but never the refusal: a needle-dense slice
   // still stays text, exactly as it does under the full sidecar.
@@ -577,7 +577,7 @@ function toolsCall(
       // carries (they ride the prompt cache after the first write, but they
       // are never free). No other tool in this category reports its own furniture.
       const s = pxStats() as Record<string, unknown>;
-      s.toolFurnitureTokens = textTokens(charCount(jstring(toolsList(), false)));
+      s.toolFurnitureTokens = textTokens(jstring(toolsList(), false));
       content = [{ type: "text", text: jstring(s, true) }];
       break;
     }
@@ -801,7 +801,7 @@ export function main(): void {
             pages: r.pages.length,
             imageTokens: tok,
             dropped: r.dropped,
-            rawTextTokens: textTokens(charCount(text)),
+            rawTextTokens: textTokens(text),
             verbatimTokens: side === null ? 0 : side.tokens,
           },
           false,

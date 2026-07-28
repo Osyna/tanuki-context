@@ -5,6 +5,7 @@
 import http from "node:http";
 import { inflateSync } from "node:zlib";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 const BIG = Array.from(
   { length: 300 },
@@ -61,7 +62,13 @@ async function runEngine(label, cmd, args) {
 }
 
 const ts = await runEngine("ts", "node", [process.env.TANUKI_TS_CLI ?? "dist/cli.js", "proxy"]);
-const rs = await runEngine("rust", process.env.TANUKI_BIN ?? "/tmp/tanuki-rust/target/release/tanuki-context", ["proxy"]);
+// The Rust engine is a sibling worktree, not a dependency, so it is absent in
+// a plain CI checkout. Compare cross-engine when it is there; otherwise still
+// assert the single-engine invariants (breakpoint placement, recency window
+// untouched, system prompt untouched) rather than silently passing on nothing.
+const RS_BIN = process.env.TANUKI_BIN ?? "/tmp/tanuki-rust/target/release/tanuki-context";
+const haveRust = existsSync(RS_BIN);
+const rs = haveRust ? await runEngine("rust", RS_BIN, ["proxy"]) : null;
 upstream.close();
 
 const jt = JSON.parse(ts);
@@ -100,13 +107,18 @@ function pngPixels(buf) {
   return { w, h, px };
 }
 const imgs = (s) => JSON.parse(s).messages[0].content.filter((b) => b.type === "image").map((b) => pngPixels(Buffer.from(b.source.data, "base64")));
-const [it, ir] = [imgs(ts), imgs(rs)];
-const imgSame = it.length === ir.length && it.every((d, i) => d.w === ir[i].w && d.h === ir[i].h && d.px.equals(ir[i].px));
-console.log(`\nimage pages: ${it.length} vs ${ir.length}, geometry ${it[0]?.w}x${it[0]?.h}, pixel-equal: ${imgSame}`);
+const it = imgs(ts);
+const ir = haveRust ? imgs(rs) : null;
+const imgSame = !haveRust || (it.length === ir.length && it.every((d, i) => d.w === ir[i].w && d.h === ir[i].h && d.px.equals(ir[i].px)));
+console.log(
+  haveRust
+    ? `\nimage pages: ${it.length} vs ${ir.length}, geometry ${it[0]?.w}x${it[0]?.h}, pixel-equal: ${imgSame}`
+    : `\nimage pages: ${it.length}, geometry ${it[0]?.w}x${it[0]?.h} (cross-engine compare SKIPPED: no Rust binary at ${RS_BIN})`,
+);
 
 const strip = (v) => JSON.parse(JSON.stringify(v, (k, x) => (k === "data" ? "<png>" : x)));
-const same = JSON.stringify(canon(strip(JSON.parse(ts)))) === JSON.stringify(canon(strip(JSON.parse(rs))));
-console.log(`canonical bodies: ${same ? "IDENTICAL" : "DIFFER"}`);
+const same = !haveRust || JSON.stringify(canon(strip(JSON.parse(ts)))) === JSON.stringify(canon(strip(JSON.parse(rs))));
+console.log(`canonical bodies: ${!haveRust ? "n/a (single engine - nothing was compared)" : same ? "IDENTICAL" : "DIFFER"}`);
 if (!same) {
   const walk = (a, b, path) => {
     if (JSON.stringify(a) === JSON.stringify(b)) return;

@@ -118,6 +118,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 
 // ---- arms -------------------------------------------------------------------
+const ARMS = (process.env.PAIRED_ARMS || "off,on").split(",").map((a) => a.trim()).filter(Boolean);
 const tmp = mkdtempSync(path.join(os.tmpdir(), "tanuki-paired-"));
 process.env.TANUKI_STASH = path.join(tmp, "stash"); // hermetic; inherited by the MCP server
 const logFile = path.join(tmp, "service.log");
@@ -138,6 +139,13 @@ async function runOne(arm, task) {
       ? `Here is a service log:\n\n${LOG}\n\n${task.q}`
       : `A service log was parked with tanuki_stash. Its map:\n\n${stashMap}\n\n` +
         `Use the tanuki tools (tanuki_fetch with a query or line range; estimate/render if useful) to read only what you need, then answer.\n${task.q}`;
+  // The `lazy` arm is the `on` arm with TANUKI_VERBATIM=lazy: the sidecar
+  // becomes a one-line pointer instead of the carried strings. It is the same
+  // agent, same tools, same prompt - only the sidecar policy differs, which is
+  // the whole question (42% of a render's tokens, but does the agent then have
+  // to make an extra round trip to get an exact id?).
+  if (arm === "lazy") process.env.TANUKI_VERBATIM = "lazy";
+  else delete process.env.TANUKI_VERBATIM;
   const options = arm === "off" ? base : withTanuki(base);
   let text = "";
   let usd = 0;
@@ -180,7 +188,7 @@ const rows = [];
 let spent = 0;
 outer: for (const task of PLAN) {
   for (let i = 0; i < RUNS; i++) {
-    for (const arm of ["off", "on"]) {
+    for (const arm of ARMS) {
       const r = await runOne(arm, task);
       rows.push({ task: task.name, arm, run: i + 1, ...r });
       console.log(
@@ -222,6 +230,7 @@ console.log(
 console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 console.log(`| off (raw text) ${fmt(off)}`);
 console.log(`| on (tanuki) ${fmt(on)}`);
+for (const a of ARMS) if (a !== "off" && a !== "on") console.log(`| ${a} ${fmt(armStats(a))}`);
 console.log(
   "\nRead cost-per-success, not the token column: a cheap failure is not a saving. Rerun with PAIRED_RUNS=5+ before believing any single delta.",
 );
