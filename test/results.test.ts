@@ -18,6 +18,7 @@ import { apply as codebookApply } from "../src/codebook.ts";
 import { SIDECAR_MIN_CHARS, scanCredentials, scanNeedles, sidecarBudget } from "../src/needles.ts";
 import { toolEstimate, toolRender } from "../src/main.ts";
 import { DEFAULT_TOOL_NAMES, TOOLS, visibleTools } from "../src/tools.ts";
+import { PROXY_DEFAULTS, transformRequestBody } from "../src/proxy.ts";
 
 // ------------------------------------------------------------------ corpora
 
@@ -712,5 +713,45 @@ describe("visibleTools: slim default surface, all tools behind a flag", () => {
     process.env.TANUKI_ALL_TOOLS = "1";
     expect(visibleTools().length).toBe(8);
     delete process.env.TANUKI_ALL_TOOLS;
+  });
+});
+// ------------------------------------------- prompt-cache safety / fail-open
+// Two properties borrowed from ctxdiff's problem framing: a rendered block
+// must be byte-stable or every re-image silently breaks the caller's prompt
+// cache, and a proxy in the request path must never break the request.
+describe("cache safety and fail-open", () => {
+  test("rendering the same text twice is byte-identical", () => {
+    const text = Array.from(
+      { length: 200 },
+      (_, i) => `2026-07-27T08:00:0${i % 10}Z worker INFO poll ok latency=${i % 40}ms conn=${i % 9}`,
+    ).join("\n");
+    const a = renderText(text, true, true, "normal");
+    const b = renderText(text, true, true, "normal");
+    expect(a.pages.length).toBe(b.pages.length);
+    // Non-deterministic PNG bytes would re-bill the whole imaged prefix on
+    // every turn - a cost regression invisible to every other test here.
+    for (let i = 0; i < a.pages.length; i++) {
+      expect(Buffer.from(a.pages[i].png).equals(Buffer.from(b.pages[i].png))).toBe(true);
+    }
+  });
+
+  test("the proxy transform never throws, whatever the body", () => {
+    const cfg = { ...PROXY_DEFAULTS };
+    const big = "x".repeat(20000);
+    for (const raw of [
+      "not json",
+      "",
+      "null",
+      "[]",
+      '{"messages":"not-an-array"}',
+      '{"messages":[{"role":"user"}]}',
+      '{"messages":[{"role":"user","content":null}]}',
+      '{"messages":[{"role":"user","content":[{"type":"text"}]}]}',
+      `{"messages":[{"role":"user","content":${JSON.stringify(big)}}]}`,
+      `{"messages":[{"role":"user","content":${JSON.stringify("\u0000\uFFFD\u200B".repeat(4000))}}]}`,
+      `{"messages":[{"role":"user","content":${JSON.stringify("😀🧪".repeat(6000))}}]}`,
+    ]) {
+      expect(() => transformRequestBody(raw, cfg)).not.toThrow();
+    }
   });
 });
