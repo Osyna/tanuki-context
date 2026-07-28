@@ -107,9 +107,13 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
     `[tanuki-context: ${origChars} chars imaged in place as ${r.pages.length} PNG page(s), ` +
     `~${cost} vs ~${rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
     (cbEntries > 0 ? `; ·legend· line maps ${cbEntries} sigils` : "") +
-    (side.needles.length > 0 ? `; ·verbatim· below carries ${side.needles.length} exact strings as text` : "") +
+    (side.needles.length > 0 ? `; the ·verbatim· block next carries ${side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
     `]`;
+  // Sidecar BEFORE the pages: exact strings first, bulk second.
   const blocks: unknown[] = [{ type: "text", text: marker }];
+  if (side.text !== "") {
+    blocks.push({ type: "text", text: side.text });
+  }
   for (const p of r.pages) {
     blocks.push({
       type: "image",
@@ -119,9 +123,6 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
         data: Buffer.from(p.png.buffer, p.png.byteOffset, p.png.byteLength).toString("base64"),
       },
     });
-  }
-  if (side.text !== "") {
-    blocks.push({ type: "text", text: side.text });
   }
   return {
     blocks,

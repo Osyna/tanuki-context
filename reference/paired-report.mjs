@@ -29,6 +29,13 @@ const ROOT = path.join(HERE, "..");
 const CLI = path.join(ROOT, "dist", "cli.js");
 const RUNS = Number(process.env.PAIRED_RUNS ?? 3);
 const MODEL = process.env.PAIRED_MODEL; // undefined = SDK default, same for both arms
+const MAX_TURNS = Number(process.env.PAIRED_MAXTURNS ?? 12);
+// Comma-separated task names; default = all. Running one task is how you make
+// this arm affordable enough to iterate on.
+const ONLY = (process.env.PAIRED_TASKS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+// Hard spend ceiling. The agent loop can thrash (EVALS §6) and an unattended
+// run has already burned $4+ before anyone could stop it.
+const BUDGET = Number(process.env.PAIRED_BUDGET ?? 0); // 0 = no ceiling
 const DRY = process.argv.includes("--dry");
 const JSON_OUT = process.argv.includes("--json")
   ? process.argv[process.argv.indexOf("--json") + 1]
@@ -88,9 +95,19 @@ const TASKS = [
 ];
 
 // ---- plan / dry run ---------------------------------------------------------
-console.log(`paired-report: ${TASKS.length} tasks x 2 arms x ${RUNS} run(s)` + (MODEL ? ` on ${MODEL}` : " on the SDK default model"));
+const PLAN = ONLY.length > 0 ? TASKS.filter((t) => ONLY.includes(t.name)) : TASKS;
+if (PLAN.length === 0) {
+  console.error(`no task matched PAIRED_TASKS=${ONLY.join(",")}; known: ${TASKS.map((t) => t.name).join(", ")}`);
+  process.exit(2);
+}
+console.log(
+  `paired-report: ${PLAN.length} task(s) x 2 arms x ${RUNS} run(s)` +
+    (MODEL ? ` on ${MODEL}` : " on the SDK default model") +
+    ` | maxTurns ${MAX_TURNS}` +
+    (BUDGET > 0 ? ` | budget $${BUDGET.toFixed(2)}` : ""),
+);
 if (DRY) {
-  for (const t of TASKS) console.log(`  task ${t.name}: ${t.q}`);
+  for (const t of PLAN) console.log(`  task ${t.name}: ${t.q}`);
   console.log("dry run: no API calls made. Set ANTHROPIC_API_KEY and rerun without --dry.");
   process.exit(0);
 }
@@ -115,7 +132,7 @@ const { query } = await import("@anthropic-ai/claude-agent-sdk").catch(() => {
 const { withTanuki } = await import(path.join(ROOT, "dist", "agent.js"));
 
 async function runOne(arm, task) {
-  const base = { maxTurns: 12, ...(MODEL ? { model: MODEL } : {}), allowedTools: [] };
+  const base = { maxTurns: MAX_TURNS, ...(MODEL ? { model: MODEL } : {}), allowedTools: [] };
   const prompt =
     arm === "off"
       ? `Here is a service log:\n\n${LOG}\n\n${task.q}`
@@ -144,13 +161,19 @@ async function runOne(arm, task) {
 
 // ---- paired runs, task-major so arms interleave under identical conditions --
 const rows = [];
-for (const task of TASKS) {
+let spent = 0;
+outer: for (const task of PLAN) {
   for (let i = 0; i < RUNS; i++) {
     for (const arm of ["off", "on"]) {
       const r = await runOne(arm, task);
       rows.push({ task: task.name, arm, run: i + 1, ...r });
       console.log(`  ${task.name} ${arm} #${i + 1}: ${r.ok ? "PASS" : "FAIL"} $${r.usd.toFixed(4)} in=${r.inputSide}`);
       if (JSON_OUT) appendFileSync(JSON_OUT, JSON.stringify(rows.at(-1)) + "\n");
+      spent += r.usd;
+      if (BUDGET > 0 && spent >= BUDGET) {
+        console.log(`\n[stopped: spent $${spent.toFixed(4)} >= budget $${BUDGET.toFixed(2)}; the table below covers completed runs only]`);
+        break outer;
+      }
     }
   }
 }

@@ -77,7 +77,9 @@ describe("stash", () => {
     expect(side).toBeDefined();
     expect(side?.text).toContain("86:2b:11:51:58:03");
     expect(side?.text).toContain("6c9224c");
-    expect(out[0].text).toContain("·verbatim· below carries");
+    expect(out[0].text).toContain("·verbatim· block next carries");
+    // exact strings must precede the pixels, not trail them
+    expect(out.findIndex((c) => (c.text ?? "").startsWith("·verbatim·"))).toBeLessThan(out.findIndex((c) => c.type === "image"));
   });
 
   test("a needle-dense slice is never imaged", () => {

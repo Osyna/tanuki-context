@@ -149,14 +149,21 @@ export const TOOLS: readonly ToolMeta[] = [
   },
 ];
 
-/// The MCP tools/list advertises a slim default surface - the four tools that
-/// cover the documented workflow. The other four stay callable by name but out
-/// of tools/list unless TANUKI_ALL_TOOLS=1, because every advertised schema is
+/// The MCP tools/list advertises a slim default surface - the tools that cover
+/// the documented workflow. The rest stay callable by name but out of
+/// tools/list unless TANUKI_ALL_TOOLS=1, because every advertised schema is
 /// context the model pays for on every request.
+///
+/// `tanuki_fetch` is not optional here: `tanuki_stash` parks text outside the
+/// context and hands back a map, and fetch is the ONLY way to read it again.
+/// Advertising stash without fetch let the model park data it could never
+/// retrieve - it burned every turn on ToolSearch looking for a tool that was
+/// not there, which is the whole of the "agent loop thrash" in EVALS §6.
 export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "tanuki_render",
   "tanuki_estimate",
   "tanuki_stash",
+  "tanuki_fetch",
   "tanuki_verify",
 ];
 

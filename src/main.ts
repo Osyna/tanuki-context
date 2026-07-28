@@ -24,7 +24,7 @@ import { fetchSlice, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.14.1";
+export const VERSION = "0.15.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -348,15 +348,17 @@ export function toolRender(args: unknown): unknown[] {
     summary += " · ↵ = newline · engine: pxpipe";
   }
   if (side !== null && side.needles.length > 0) {
-    summary += ` · verbatim: ${side.needles.length} exact strings ride below as text`;
+    summary += ` · verbatim: ${side.needles.length} exact strings follow as text - read ids from there, not from the pages`;
   }
+  // Sidecar BEFORE the pages: exact strings first, bulk second. Trailing it
+  // after the images is how a traced agent missed an id it already had.
   const content: unknown[] = [{ type: "text", text: summary }];
+  if (side !== null && side.text !== "") {
+    content.push({ type: "text", text: side.text });
+  }
   content.push(...imageBlocks(r.pages.slice(0, MAX_INLINE_PAGES)));
   if (r.pages.length > MAX_INLINE_PAGES) {
     content.push({ type: "text", text: `(+${r.pages.length - MAX_INLINE_PAGES} more page(s))` });
-  }
-  if (side !== null && side.text !== "") {
-    content.push({ type: "text", text: side.text });
   }
   return content;
 }
@@ -454,10 +456,14 @@ export function toolFetch(args: unknown): unknown[] {
   const marker =
     `[tanuki-context stash ${id}: slice of ${charCount(f.slice)} chars imaged as ${f.r.pages.length} PNG page(s), ` +
     `~${f.r.tokens + f.side.tokens} vs ~${f.rawTok} text tokens. ↵=newline →=tab ⇥N=indent` +
-    (f.side.needles.length > 0 ? `; ·verbatim· below carries ${f.side.needles.length} exact strings as text` : "") +
+    (f.side.needles.length > 0 ? `; the ·verbatim· block next carries ${f.side.needles.length} exact strings as text - read ids from there, not from the pages` : "") +
     `]`;
-  const out: unknown[] = [{ type: "text", text: marker }, ...imageBlocks(f.r.pages)];
+  // Sidecar BEFORE the pages. Trailing it after a 12KB image is how a traced
+  // agent missed the answer it had already been handed and re-queried six
+  // times (EVALS §6). Exact strings first, bulk second.
+  const out: unknown[] = [{ type: "text", text: marker }];
   if (f.side.text !== "") out.push({ type: "text", text: f.side.text });
+  out.push(...imageBlocks(f.r.pages));
   return out;
 }
 
