@@ -115,7 +115,7 @@ const { query } = await import("@anthropic-ai/claude-agent-sdk").catch(() => {
 const { withTanuki } = await import(path.join(ROOT, "dist", "agent.js"));
 
 async function runOne(arm, task) {
-  const base = { maxTurns: 8, ...(MODEL ? { model: MODEL } : {}), allowedTools: [] };
+  const base = { maxTurns: 12, ...(MODEL ? { model: MODEL } : {}), allowedTools: [] };
   const prompt =
     arm === "off"
       ? `Here is a service log:\n\n${LOG}\n\n${task.q}`
@@ -125,15 +125,21 @@ async function runOne(arm, task) {
   let text = "";
   let usd = 0;
   let inputSide = 0;
-  for await (const m of query({ prompt, options })) {
-    if (m.type === "result") {
-      text = m.subtype === "success" ? m.result : "";
-      usd = m.total_cost_usd ?? 0;
-      const u = m.usage ?? {};
-      inputSide = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+  let err = null;
+  try {
+    for await (const m of query({ prompt, options })) {
+      if (m.type === "result") {
+        text = m.subtype === "success" ? m.result : "";
+        usd = m.total_cost_usd ?? 0;
+        const u = m.usage ?? {};
+        inputSide = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      }
     }
+  } catch (e) {
+    // A hit turn-cap or SDK error is a FAILED task, not a crashed harness.
+    err = e?.message ? String(e.message) : String(e);
   }
-  return { ok: task.check(text), usd, inputSide, text: text.slice(0, 200) };
+  return { ok: err === null && task.check(text), usd, inputSide, text: err ? `[error: ${err.slice(0, 80)}]` : text.slice(0, 200) };
 }
 
 // ---- paired runs, task-major so arms interleave under identical conditions --
