@@ -582,8 +582,9 @@ hard, lands 1/14; the misses are confident single-character misreads
 (`8`->`3`, `5`->`9`, `a`->`8`), not blanks, and Fable refuses the task.
 Regenerate with `node reference/needle-report.mjs` and score any model
 (`reference/needle-call.mjs`, or the `score` subcommand); the
-task-comprehension arm (image ≈ text — the model still names the root cause
-from pixels) is in [reference/EVALS.md](../reference/EVALS.md). The fix is
+task-comprehension arm (image ≈ text on a capable reader — Opus / newest
+Sonnet name the root cause from pixels, smaller models under-read) is in
+[reference/EVALS.md](../reference/EVALS.md). The fix is
 the `verbatim` sidecar (default on): the same needle kinds are scanned
 out of the exact text the pages carry and shipped as a `·verbatim·` text
 block next to the images - `L<line> <value>`, deduped, capped at 32.
