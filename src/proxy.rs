@@ -105,7 +105,7 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
         working = ladder::compress_text(&working, cfg.level).compressed;
     }
 
-    let raw_tok = ((orig_chars as f64) / 4.0).round() as u64;
+    let raw_tok = crate::text_tokens(text);
     let r = render::render_text(&working, true, true, cfg.font);
     let side = crate::needles::scan_needles_sized(&working, orig_chars);
     // What the sidecar costs is what it ships. There is no stash on this path,
@@ -113,7 +113,7 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     // not a fabricated sha.
     let side_tok = match cfg.verbatim {
         needles::Verbatim::Off => 0,
-        needles::Verbatim::Lazy => ((needles::lazy_pointer(&side, None).chars().count() as f64) / 4.0).round() as u64,
+        needles::Verbatim::Lazy => crate::text_tokens(&needles::lazy_pointer(&side, None)),
         needles::Verbatim::Full => side.tokens,
     };
     let cost = r.tokens + side_tok;
@@ -276,7 +276,6 @@ pub fn transform_request_body(
     let last_imaged_msg = std::cell::Cell::new(-1i64);
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut funnel = |text: &str| -> Option<Vec<Value>> {
-        let tok = |chars: usize| ((chars as f64) / 4.0).round() as i64;
         let done: ImagedBlock = if let Some(&pages) = seen.get(text) {
             let chars = text.chars().count();
             let marker = format!(
@@ -286,9 +285,9 @@ pub fn transform_request_body(
                 blocks: vec![json!({ "type": "text", "text": marker })],
                 orig_chars: chars,
                 pages: 0,
-                saved_tokens: tok(chars) - tok(marker.chars().count()),
-                raw_tok: ((chars as f64) / 4.0).round() as u64,
-                cost_tok: ((marker.chars().count() as f64) / 4.0).round() as u64,
+                saved_tokens: crate::text_tokens(text) as i64 - crate::text_tokens(&marker) as i64,
+                raw_tok: crate::text_tokens(text),
+                cost_tok: crate::text_tokens(&marker),
             }
         } else {
             let done = maybe_image(text, cfg)?;
@@ -753,7 +752,7 @@ mod tests {
     fn expected_marker(text: &str) -> String {
         let r = render::render_text(text, true, true, Font::Normal);
         let chars = text.chars().count();
-        let raw_tok = ((chars as f64) / 4.0).round() as u64;
+        let raw_tok = crate::text_tokens(text);
         format!(
             "[tanuki-context: {chars} chars imaged in place as {} PNG page(s), ~{} vs ~{raw_tok} text tokens. \u{21b5}=newline \u{2192}=tab \u{21e5}N=indent]",
             r.pages.len(),
@@ -945,7 +944,7 @@ mod tests {
         // accounting: dupe counts as a block + chars, adds no images, and
         // saves round(chars/4) - round(marker_chars/4)
         let chars = b.chars().count();
-        let tok = |c: usize| ((c as f64) / 4.0).round() as i64;
+        let tok = |t: &str| crate::text_tokens(t) as i64;
         let imaged = render::render_text(&b, true, true, Font::Normal);
         assert_eq!(r.imaged_blocks, 2);
         assert_eq!(r.image_count, pages as u64);
@@ -953,7 +952,7 @@ mod tests {
         let dupe_marker = expected_dupe_marker(&b, pages);
         assert_eq!(
             r.saved_tokens,
-            (tok(chars) - imaged.tokens as i64) + (tok(chars) - tok(dupe_marker.chars().count()))
+            (tok(&b) - imaged.tokens as i64) + (tok(&b) - tok(&dupe_marker))
         );
     }
 
