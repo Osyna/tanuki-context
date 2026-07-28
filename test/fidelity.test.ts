@@ -4,7 +4,7 @@
 // to our own tier-sweep outcomes; the guard proves no sigil is more confusable
 // with a content char than 0 and O already are, at the production 5x8 cell.
 import { describe, expect, test } from "bun:test";
-import { fidelity } from "../src/fidelity.ts";
+import { fidelity, weakReader } from "../src/fidelity.ts";
 import { SIGILS } from "../src/codebook.ts";
 import { CELL_H, CELL_W, coverage, isWide, rank } from "../src/atlas.ts";
 
@@ -100,5 +100,32 @@ describe("codebook sigils: OCR-B/UTS-39 confusability guard", () => {
         }
       }
     }
+  });
+});
+// EVALS §3 (n=8): sonnet-4-5 and haiku-4-5 score 100% on the task as text and
+// 0% on the same task as imaged pages. The band is calibrated to a capable
+// reader, so for these it is not optimistic - it is wrong.
+describe("measured weak readers", () => {
+  test("a weak reader floors the band regardless of density", () => {
+    const clean = fidelity(3733, 896, false, false);
+    expect(clean.level).toBe("high");
+    const weak = fidelity(3733, 896, false, true);
+    expect(weak.level).toBe("unreliable");
+    expect(weak.approxAccuracy).toContain("0%");
+    expect(weak.note).toContain("cannot read dense pages");
+    // the ratio is still reported: the density is fine, the reader is not
+    expect(weak.ratio.value).toBe(clean.ratio.value);
+  });
+
+  test("only measured ids are weak; unknown models stay capable", () => {
+    expect(weakReader(null)).toBe(false);
+    expect(weakReader("claude-opus-5")).toBe(false);
+    expect(weakReader("claude-sonnet-5")).toBe(false);
+    expect(weakReader("some-future-model")).toBe(false);
+    expect(weakReader("claude-haiku-4-5")).toBe(true);
+    expect(weakReader("claude-sonnet-4-5")).toBe(true);
+    // dated snapshots of the same pinned model
+    expect(weakReader("claude-haiku-4-5-20251001")).toBe(true);
+    expect(weakReader("claude-sonnet-4-5-20250929")).toBe(true);
   });
 });

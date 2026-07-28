@@ -71,10 +71,16 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 
 ## When not to reach for it
 
-- **Your model can't read dense pages.** Imaging for comprehension needs a capable reader: Opus and the newest Sonnet solve the task off pixels (5/5 in [evals](reference/EVALS.md)), but Sonnet-4-5 and Haiku drop to 0/5. Measure yours with `npm run taskqual`, or keep it text / raise the font.
+- **Your model can't read dense pages.** Measured at n=8: Opus-4-8/Opus-5/Sonnet-5 match their own text score off pixels (88–100%), while Sonnet-4-5 and Haiku-4-5 score **100% as text and 0% as pages** ([evals](reference/EVALS.md)). Pass `model` to `tanuki_estimate` and it refuses to route those to images; profile your own with `TASK_MODELS=… npm run taskqual`.
 - **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**. Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships ids, hashes, MACs, pod names and base64 as text beside the pages: **97%** of unrecoverable identifiers across 19.7 MB of real logs, **92.9%** against id shapes it was never designed for (`npm run coverage`, `npm run adversarial`). Exactness itself never rides on pixels at all — the stash holds the original bytes under a sha256, **19,722,893 / 19,722,893 characters recovered byte-identical** on that corpus, and `tanuki_verify` settles any value you read off a page — exact, a corrected near-miss, or absent — no model.
 - **The content is small, or your bill is output-dominated.** `tanuki_stats` reports the output share so you can tell.
 - **You're not on Anthropic pricing.** Pass `model` to `tanuki_estimate` for provider-correct `cost` (OpenAI tiles, Gemini tiles), overridable via `TANUKI_RATES`.
+
+## New in 0.17
+
+- **`estimate` now refuses to recommend pages to a model that can't read them.** Measured at n=8: `claude-sonnet-4-5` and `claude-haiku-4-5` score **100% on a task as text and 0% on the same task as imaged pages**. The fidelity band is calibrated to a capable reader, so for those two it wasn't optimistic — it was wrong, and tanuki was answering `fidelity: high, route: image` to callers whose real task success was zero. Pass `model` and the band floors to `unreliable` and the route stays text. An unmeasured model is still treated as capable, so nothing regresses.
+- **A per-model reader profile, not a caveat** — `TASK_MODELS=a,b,c npm run taskqual` profiles several readers in one run ([EVALS §3](reference/EVALS.md)). Model ids are immutable snapshots, so unlike a model→context-window table this one can't go stale.
+- **The end-to-end cost claim is corrected — twice wrong before.** At n=1 tanuki looked 6× cheaper; at n=3 warm it looked like parity. At **n=9 per arm** the truth is neither: inlining wins the **median** ($0.049 vs $0.173) because prompt caching makes re-reads nearly free, but its cost has a long tail — one run hit **$2.94**, a 73× spread. Tanuki's runs land in **$0.124–$0.225**, a 2× spread. The honest claim is *predictable*, not *cheaper*: worst case 13× better. Full distribution in [EVALS §6](reference/EVALS.md).
 
 ## New in 0.16.1
 
