@@ -12,7 +12,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { costVerdict } from "./cost.ts";
-import { fidelity } from "./fidelity.ts";
+import { fidelity, weakReader } from "./fidelity.ts";
 import { tableEncode } from "./table.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
@@ -24,7 +24,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.16.1";
+export const VERSION = "0.17.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -192,11 +192,12 @@ function routeFor(
   creds: number,
   costCheaper: string | null,
   dense: boolean,
+  weak: boolean,
 ): Record<string, unknown> {
   const recImg = rec.imageTokens as number;
   const text = rec.text as { transform: string; tokens: number };
   const imageTok = recImg + sideTok; // imaging always ships the verbatim sidecar
-  const level = fidelity(rawTok, recImg, false).level;
+  const level = fidelity(rawTok, recImg, false, weak).level;
   const imageClean = level === "high" || level === "good";
   const textPick = text.transform === "none" ? "raw" : "text";
   let pick: string;
@@ -212,6 +213,12 @@ function routeFor(
     // while dropping the very ids it exists to protect.
     pick = textPick; tokens = text.tokens; fid = "exact";
     reason = "needle-dense: more exact strings than the sidecar can carry, so imaging would drop some of them unverifiably - stay text";
+  } else if (weak) {
+    // The band is calibrated to a capable reader. This one is measured at 0%
+    // on pages while scoring 100% on the same task as text, so no density is
+    // safe for it - reporting "high" here would be actively wrong.
+    pick = textPick; tokens = text.tokens; fid = "exact";
+    reason = "this model reads dense pages at 0% task success while scoring 100% on the same task as text (EVALS §3) - stay text";
   } else if (costCheaper === "TEXT") {
     pick = textPick; tokens = text.tokens; fid = "exact";
     reason = "priced in dollars the text side wins (cached content loses as pixels)";
@@ -256,7 +263,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     imageTokens: imgTok,
     rawTextTokens: rawTok,
     totalSavedPct: pct(rawTok, imgTok + sideTok),
-    fidelity: fidelity(rawTok, imgTok, font === "tiny"),
+    fidelity: fidelity(rawTok, imgTok, font === "tiny", weakReader(model)),
     protectedLines: p.protectedLines,
     pack: a.pack,
     font: font === "tiny" ? "tiny" : "normal",
@@ -275,7 +282,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     out.cost = cost;
     costCheaper = cost.cheaper;
   }
-  out.route = routeFor(rawTok, rec, sideTok, creds.length, costCheaper, side !== null && side.dense);
+  out.route = routeFor(rawTok, rec, sideTok, creds.length, costCheaper, side !== null && side.dense, weakReader(model));
   return out;
 }
 

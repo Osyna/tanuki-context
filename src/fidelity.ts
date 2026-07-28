@@ -38,11 +38,30 @@ const CLIFF =
 const TINY_CAP =
   " The 4x6 tiny font is past the legibility cliff (measured 3/10 needle recall) - reserve it for lossy bulk.";
 
+/// Models measured as unable to read dense pages at all: their TEXT arm holds
+/// at 100% while their IMAGE arm collapses to 0% on the same task and corpus
+/// (EVALS §3, n=8, `npm run taskqual`). The band below is calibrated to a
+/// capable reader, so for these it is not merely optimistic - it is wrong.
+///
+/// Safe to pin, unlike a model->context-window table: a model id names an
+/// immutable snapshot, so a measurement of one never goes stale. The list only
+/// grows, and an unmeasured model is treated as capable - today's behaviour,
+/// so nothing regresses for a reader we have not tested.
+const WEAK_READERS: readonly string[] = ["claude-haiku-4-5", "claude-sonnet-4-5"];
+
+export function weakReader(model: string | null): boolean {
+  return model !== null && WEAK_READERS.some((m) => model.startsWith(m));
+}
+
+const WEAK_NOTE =
+  "this model is measured at 0% task success on imaged pages while scoring 100% on the same task as text (EVALS §3) - it cannot read dense pages; keep this content as text";
+
 /**
- * Map the imaged-config token ratio (+ tiny-font floor) to a read-back band.
- * Pure and engine-parity: same rounding, same thresholds as the Rust port.
+ * Map the imaged-config token ratio (+ tiny-font floor, + reader capability)
+ * to a read-back band. Pure and engine-parity: same rounding, same thresholds
+ * as the Rust port.
  */
-export function fidelity(textTokens: number, imageTokens: number, tiny: boolean): Fidelity {
+export function fidelity(textTokens: number, imageTokens: number, tiny: boolean, weak = false): Fidelity {
   if (imageTokens <= 0) {
     return {
       ratio: new Float(0.0),
@@ -76,6 +95,11 @@ export function fidelity(textTokens: number, imageTokens: number, tiny: boolean)
   if (capped) {
     level = "low";
     acc = "~60-75%";
+  }
+  // A reader measured at 0% on pages makes the density band moot: no ratio is
+  // "clean" for a model that cannot read the page at all.
+  if (weak) {
+    return { ratio: new Float(r), level: "unreliable", approxAccuracy: "0% (measured, this model)", note: WEAK_NOTE };
   }
   const clean = level === "high" || level === "good";
   const note = clean ? CLEAN : CLIFF + (capped ? TINY_CAP : "");

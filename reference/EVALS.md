@@ -80,27 +80,37 @@ false-positive across normal logs — so they ride font fidelity alone.
 
 The claim that matters: can the model still **do the job** from image pages?
 Find the FATAL root-cause component in a 120-line log, TEXT arm vs IMAGE-pages
-arm, same model, **n=5 seeds**:
+arm, same model, same corpus, **n=8 seeds**
+(`TASK_MODELS=… npm run taskqual`):
 
-| model | text | image | image reads pages? |
-| --- | ---: | ---: | :---: |
-| claude-opus-4-8 | 5/5 | 5/5 | ✅ |
-| claude-opus-5 | 4/5 | 5/5 | ✅ |
-| claude-sonnet-5 | 5/5 | 5/5 | ✅ |
-| claude-sonnet-4-5 | 5/5 | **0/5** | ❌ |
-| claude-haiku-4-5 | 3/5 | **0/5** | ❌ |
+| model | n | text | image | reader |
+| --- | ---: | ---: | ---: | --- |
+| claude-opus-4-8 | 8 | 88% | 88% | capable |
+| claude-opus-5 | 8 | 100% | 100% | capable |
+| claude-sonnet-5 | 8 | 100% | 88% | capable |
+| claude-sonnet-4-5 | 8 | 100% | **0%** | **cannot read pages** |
+| claude-haiku-4-5 | 8 | 100% | **0%** | **cannot read pages** |
 
-**Image comprehension tracks model capability.** The three capable readers
-match their text score off the pixels — the whole thesis, measured: *prose and
-structure survive imaging.* But sonnet-4-5 and haiku-4-5, strong on the text
-arm, drop to **0/5** on image — they cannot reliably read one line out of a
-dense page. They misread the panic line as a nearby word (`worker`,
-`LatenciesMs`), not blanks.
+**Image comprehension tracks model capability, and the split is binary.** The
+three capable readers match their own text score off the pixels — the whole
+thesis, measured: *prose and structure survive imaging.* sonnet-4-5 and
+haiku-4-5 score **100% on the text arm and 0% on the image arm** of the same
+task. Not degraded — zero. They misread the panic line as a nearby word
+(`worker`, `LatenciesMs`), confidently, rather than reporting failure.
 
-This is the honest caveat behind the `fidelity` band: the DeepSeek-OCR curve it
-maps to assumes a *capable* OCR reader. A smaller model underperforms the band,
-so the band is an upper bound, not a promise — run this harness on the model
-you actually use before trusting imaged pages for comprehension. The knob that
+**This is no longer just a caveat; it is wired into the product.** The
+`fidelity` band maps a density ratio to a DeepSeek-OCR read-back curve that
+assumes a capable reader — so for these two models the band was not optimistic,
+it was *wrong*: tanuki would answer `fidelity: high, route: image` to a caller
+whose measured task success is 0%. Passing `model` to `tanuki_estimate` now
+floors the band to `unreliable` and routes to text for any measured weak
+reader.
+
+That table is safe to pin where a model→context-window table would not be: a
+model id names an **immutable snapshot**, so a measurement of one never goes
+stale. The list only ever grows, and an unmeasured model is treated as capable
+— today's behaviour, so nothing regresses for a reader we have not tested. Run
+the harness on yours before trusting pages for comprehension; the knob that
 recovers a weak reader is **a larger font / lower density**, not a lossier
 tier.
 
@@ -210,23 +220,41 @@ which turns "which unit dominates" into six cheap queries. Measured:
 
 | task | arm | before | after |
 | --- | --- | ---: | ---: |
-| `upstream-502-request-id` (read an id verbatim) | on | **0/1 FAIL**, 521k in-tokens | **3/3 PASS** |
-| `upstream-502-request-id` | off | 1/1 PASS | 3/3 PASS |
-| `dominant-error-unit` (count the whole log) | on | **FAIL** | **1/1 PASS, $0.17** |
-| `dominant-error-unit` | off | PASS | 2/2 PASS, **$1.03/success** |
+| `upstream-502-request-id` (read an id verbatim) | on | **0/1 FAIL**, 521k in-tokens | **PASS** |
+| `dominant-error-unit` (count the whole log) | on | **FAIL** | **PASS** |
 
-**On the aggregation task the tool arm is now ~6× cheaper per success**
-($0.17 vs $1.03) — the first measured case where the loop beats inlining
-rather than merely matching it. The mechanism is not compression: it is that
-one 40-token count answers a question that costs the inlining arm a full
-re-read of 1,200 lines.
+Both arms now solve both tasks. **The cost comparison is where this gets
+interesting, and where an earlier version of this section was wrong twice.**
 
-Read both rows with the caveats. The tool arm is **n=1** on aggregation. The
-off arm's cost is wildly unstable — $0.0255 on the verbatim task (prompt cache
-warm) to **$1.72** on a single aggregation run (the agent re-reading the
-inlined log) — so single-run deltas in either direction are weak. On the
-verbatim task the off arm is still far cheaper ($0.0257 vs $0.215), which is
-exactly the cached-content case §5's router already sends to text.
+At n=1 the tool arm looked ~6× cheaper ($0.17 vs $1.03) and this section
+called it "the first measured case where the loop beats inlining." At n=3 with
+a warm cache the same comparison came out at parity ($0.171 vs $0.148). Both
+were artifacts. Here is n=9 per arm, `claude-sonnet-5`, both tasks pooled:
+
+| | inlining (off) | tanuki (on) |
+| --- | ---: | ---: |
+| success | 9/9 | 9/9 |
+| **median cost/run** | **$0.049** | $0.173 |
+| mean cost/run | $0.392 | $0.175 |
+| worst run | **$2.94** | **$0.225** |
+| spread (max/min) | 10–73× | **1–2×** |
+
+**Inlining is usually cheaper, and occasionally catastrophic.** By median it
+beats tanuki 3.5×: prompt caching makes re-reading an inlined log nearly free,
+which is exactly the cached-content case §5's router already sends to text. But
+its cost distribution has a long right tail — one `dominant-error-unit` run hit
+**$2.94**, a 73× spread within a single task — because nothing bounds how often
+the agent re-reads.
+
+The tool arm's distribution is flat: **$0.124–$0.225 across nine runs**, a 2×
+spread, because it ships a ~700-token map and a 40-token count instead of the
+log. So the honest claim is not "cheaper" — it is **predictable**, with a worst
+case 13× better ($0.225 vs $2.94). Whether that trade is worth it depends on
+whether you are optimising the median bill or the tail.
+
+A mean-only reading would have said "tanuki is 2.24× cheaper" ($0.392 vs
+$0.175) and been just as misleading in the other direction — the mean is one
+$2.94 run.
 
 The lesson worth keeping: **a token count is a symptom, not a diagnosis.** Two
 releases of narrative about agent behaviour dissolved the moment the loop was
