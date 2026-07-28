@@ -108,6 +108,11 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     if r.pages.len() > cfg.max_pages {
         return None;
     }
+    // Needle-dense: the sidecar cannot carry every exact string, and this is
+    // the automatic path - leaving it as text is the only honest option.
+    if side.dense {
+        return None;
+    }
     let saved = raw_tok as i64 - cost as i64;
     if cost as f64 > raw_tok as f64 * cfg.ratio || saved < cfg.min_save {
         return None;
@@ -123,7 +128,7 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     if !side.needles.is_empty() {
         marker.push_str(&format!(
             "; \u{b7}verbatim\u{b7} below carries {} exact strings as text",
-            side.needles.len() + side.more
+            side.needles.len()
         ));
     }
     marker.push(']');

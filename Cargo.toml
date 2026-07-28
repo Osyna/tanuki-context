@@ -1,6 +1,6 @@
 [package]
 name = "tanuki-context"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 description = "tanuki-context: token-cutting context MCP (distill -> ladder -> pxpipe imaging), all Rust."
 license = "MIT"
