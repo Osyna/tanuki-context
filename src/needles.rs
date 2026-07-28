@@ -23,18 +23,24 @@ pub struct Sidecar {
     pub tokens: u64,
 }
 
-pub const NEEDLE_CAP_MIN: usize = 32;
-pub const NEEDLE_CAP_MAX: usize = 512;
+/// The sidecar must not erase the compression win it protects: budget its
+/// text at half the RAW characters it is an alternative to. Over that, the
+/// sidecar approaches the cost of just shipping the text, so stop and set
+/// `dense`; `route` then refuses to image, because a budgeted sidecar stays
+/// cheap while dropping the very ids it exists to carry.
+///
+/// The baseline is RAW, not the compressed text handed to the scanner - a
+/// codebook/tiny run shrinks the compressed text while the legend still
+/// carries the ids (EVALS section 7).
+pub const SIDECAR_SHARE: usize = 2;
+pub const SIDECAR_MIN_CHARS: usize = 256;
 
-/// Scales with the block: a flat 32 truncated ordinary pages instead of only
-/// hash-dense ones (EVALS section 7). Overflow sets `dense`.
-pub fn needle_cap(lines: usize) -> usize {
-    if lines < NEEDLE_CAP_MIN {
-        NEEDLE_CAP_MIN
-    } else if lines > NEEDLE_CAP_MAX {
-        NEEDLE_CAP_MAX
+pub fn sidecar_budget(raw_chars: usize) -> usize {
+    let b = raw_chars / SIDECAR_SHARE;
+    if b < SIDECAR_MIN_CHARS {
+        SIDECAR_MIN_CHARS
     } else {
-        lines
+        b
     }
 }
 
@@ -221,12 +227,16 @@ fn risky_tokens(line: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Scans raw input directly; `raw_chars` defaults to the text's own size.
 pub fn scan_needles(text: &str) -> Sidecar {
+    scan_needles_sized(text, text.chars().count())
+}
+
+/// `raw_chars` is the size of the ORIGINAL text this sidecar accompanies.
+pub fn scan_needles_sized(text: &str, raw_chars: usize) -> Sidecar {
     let mut seen: HashSet<&str> = HashSet::new();
-    let mut kept: Vec<Needle> = Vec::new();
-    let mut more = 0usize;
+    let mut order: Vec<(usize, &str)> = Vec::new(); // (1-based line, value), encounter order
     let lines: Vec<&str> = text.split('\n').collect();
-    let cap = needle_cap(lines.len());
     for (i, line) in lines.iter().enumerate() {
         let line: &str = line;
         let mut claimed: Vec<(usize, usize)> = Vec::new();
@@ -235,14 +245,8 @@ pub fn scan_needles(text: &str) -> Sidecar {
         for (at, end) in risky_tokens(line) {
             claimed.push((at, end));
             let v = &line[at..end];
-            if seen.contains(v) {
-                continue;
-            }
-            seen.insert(v);
-            if kept.len() < cap {
-                kept.push(Needle { line: i + 1, value: v.to_string() });
-            } else {
-                more += 1;
+            if seen.insert(v) {
+                order.push((i + 1, v));
             }
         }
         // Then the named-format allowlist, for matches inside ordinary tokens.
@@ -253,17 +257,27 @@ pub fn scan_needles(text: &str) -> Sidecar {
                     continue;
                 }
                 claimed.push((at, end));
-                if seen.contains(m.as_str()) {
-                    continue;
-                }
-                seen.insert(m.as_str());
-                if kept.len() < cap {
-                    kept.push(Needle { line: i + 1, value: m.as_str().to_string() });
-                } else {
-                    more += 1;
+                if seen.insert(m.as_str()) {
+                    order.push((i + 1, m.as_str()));
                 }
             }
         }
+    }
+    // Budget pass, sequential over the same encounter order the TS engine uses.
+    let budget = sidecar_budget(raw_chars);
+    let mut kept: Vec<Needle> = Vec::new();
+    let mut more = 0usize;
+    let mut used = 0usize;
+    let mut full = false;
+    for (line_no, v) in order {
+        let cost = 3 + line_no.to_string().len() + v.chars().count(); // "\nL<line> <value>"
+        if full || used + cost > budget {
+            full = true; // latch, so the carried list never ends ragged
+            more += 1;
+            continue;
+        }
+        used += cost;
+        kept.push(Needle { line: line_no, value: v.to_string() });
     }
     if kept.is_empty() {
         return Sidecar { needles: Vec::new(), more: 0, dense: false, text: String::new(), tokens: 0 };
@@ -351,18 +365,33 @@ mod tests {
         }
     }
 
+    /// The budget carries every id in ordinary content and refuses only when
+    /// the sidecar would eat the win it protects.
     #[test]
-    fn cap_scales_with_block_and_density_announces_itself() {
-        let ids: Vec<String> = (0..NEEDLE_CAP_MIN + 8)
-            .map(|i| format!("id={:04}deadbeef4f3a", i))
+    fn budget_carries_real_logs_and_flags_id_dense_blocks() {
+        let prose: Vec<String> = (0..40)
+            .map(|i| format!("2026-07-27T09:30:00Z relay INFO worker heartbeat seq {i} ok latency=14ms"))
             .collect();
-        let per_line = scan_needles(&ids.join("\n"));
-        assert_eq!(per_line.needles.len(), NEEDLE_CAP_MIN + 8);
-        assert_eq!(per_line.more, 0);
-        assert!(!per_line.dense);
-        let crammed = scan_needles(&ids.join(" "));
-        assert_eq!(crammed.needles.len(), NEEDLE_CAP_MIN);
-        assert_eq!(crammed.more, 8);
+        let mut mixed = prose.clone();
+        mixed.push("relay dest=86:2b:11:51:58:03 down".to_string());
+        mixed.push("merged 6c9224c into main".to_string());
+        let ok = scan_needles(&mixed.join("\n"));
+        assert_eq!(ok.more, 0, "ordinary content must not truncate");
+        assert!(!ok.dense);
+        assert!(ok.text.contains("86:2b:11:51:58:03") && ok.text.contains("6c9224c"));
+
+        // A block that is nothing but ids cannot be protected by a sidecar
+        // smaller than itself - it must say so rather than image silently.
+        let ids: Vec<String> = (0..40).map(|i| format!("id={i:04}deadbeef4f3a")).collect();
+        let crammed = scan_needles(&ids.join("\n"));
         assert!(crammed.dense);
+        assert!(crammed.more > 0);
+        assert!(crammed.text.contains("more (needle-dense"));
+    }
+
+    #[test]
+    fn budget_scales_with_raw_size() {
+        assert_eq!(sidecar_budget(0), SIDECAR_MIN_CHARS);
+        assert_eq!(sidecar_budget(40_000), 20_000);
     }
 }

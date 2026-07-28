@@ -200,7 +200,7 @@ fn recommend_for(text: &str) -> Value {
 /// credentials it routes to the lossless text side. Every alternative stays
 /// priced in `recommend` for the caller to override - the historic image/text
 /// call widened to hybrid. Byte-identical decision with the TS engine.
-fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper: Option<&str>) -> Value {
+fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper: Option<&str>, dense: bool) -> Value {
     let rec_img = rec["imageTokens"].as_u64().unwrap();
     let text_tok = rec["text"]["tokens"].as_u64().unwrap();
     let transform = rec["text"]["transform"].as_str().unwrap();
@@ -211,6 +211,11 @@ fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper
     let text_pick = if transform == "none" { "raw" } else { "text" };
     let (pick, tokens, fidelity_s, reason): (&str, u64, &str, &str) = if creds {
         (text_pick, text_tok, "exact", "credential content is never imaged - stay text")
+    } else if dense {
+        // The sidecar hit its budget, so some exact strings are NOT carried.
+        // The cost math cannot catch this alone - a capped sidecar stays cheap
+        // while dropping the very ids it exists to protect.
+        (text_pick, text_tok, "exact", "needle-dense: more exact strings than the sidecar can carry, so imaging would drop some of them unverifiably - stay text")
     } else if cost_cheaper == Some("TEXT") {
         (text_pick, text_tok, "exact", "priced in dollars the text side wins (cached content loses as pixels)")
     } else if image_clean && image_tok < text_tok {
@@ -228,7 +233,7 @@ fn tool_estimate(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
-    let side = if a.verbatim { Some(needles::scan_needles(&p.compressed)) } else { None };
+    let side = if a.verbatim { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) } else { None };
     let side_tok = side.as_ref().map_or(0, |s| s.tokens);
     let img_tok = est.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
@@ -264,7 +269,7 @@ fn tool_estimate(args: &Value) -> Value {
             Some(s) => json!({ "more": s.more, "dense": s.dense, "needles": s.needles.len() + s.more, "tokens": s.tokens }),
             None => json!(false),
         },
-        "verdict": if has_creds { "TEXT cheaper (credentials)" } else if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
+        "verdict": if has_creds { "TEXT cheaper (credentials)" } else if side.as_ref().is_some_and(|s| s.dense) { "TEXT cheaper (needle-dense)" } else if img_tok + side_tok < raw_tok { "PIPELINE cheaper" } else { "TEXT cheaper" },
         "credentials": if has_creds { json!(creds) } else { json!(false) },
     });
     // Situation-aware real cost: only when a model or cache state is supplied,
@@ -273,7 +278,7 @@ fn tool_estimate(args: &Value) -> Value {
         out["cost"] = cost::cost_verdict(raw_tok, img_tok, model, cached, Some(&est.dims));
     }
     let cost_cheaper = out.get("cost").and_then(|c| c["cheaper"].as_str()).map(str::to_string);
-    out["route"] = route_for(raw_tok, &rec, side_tok, has_creds, cost_cheaper.as_deref());
+    out["route"] = route_for(raw_tok, &rec, side_tok, has_creds, cost_cheaper.as_deref(), side.as_ref().is_some_and(|s| s.dense));
     out
 }
 
@@ -286,7 +291,7 @@ fn tool_render(args: &Value) -> Value {
     let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
     let font = render::Font::parse(a.font);
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
-    let side = if a.verbatim { Some(needles::scan_needles(&p.compressed)) } else { None };
+    let side = if a.verbatim { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) } else { None };
     let img_tok = r.tokens;
     let raw_tok = text_tokens(a.text.chars().count());
     let (name, loss, _) = ladder::LEVELS[p.level as usize];
@@ -676,7 +681,7 @@ fn main() {
                 args.iter().any(|a| a == "--table"),
             );
             let r = render::render_text(&p.compressed, true, pack, font);
-            let side = if flag("--no-verbatim") { None } else { Some(needles::scan_needles(&p.compressed)) };
+            let side = if flag("--no-verbatim") { None } else { Some(needles::scan_needles_sized(&p.compressed, text.chars().count())) };
             let tok = r.tokens;
             println!(
                 "{}",
