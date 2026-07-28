@@ -189,11 +189,19 @@ self-correct), ≥6 chars, and **not** a format recoverable from context
 
 ### What the allowlist actually covered
 
-| | before (0.12) | after (0.13.1) |
+| | before (0.12) | after (0.14) |
 | --- | ---: | ---: |
-| at-risk ids carried as text | **1,588 / 5,136 (30.9%)** | **5,012 / 5,136 (97.6%)** |
-| unprotected at-risk chars | 4,204/million = **1 in 238** | 132/million = **1 in 7,561** |
-| needle-dense pages flagged | (silently truncated) | 2 / 1,393 |
+| at-risk ids protected | **1,588 / 5,136 (30.9%)** | **4,568 / 4,568 (100%)** |
+| unprotected at-risk chars | 4,204/million = **1 in 238** | **0** |
+| needle-dense pages (refused, kept as text) | (silently truncated) | 2 / 1,374 |
+
+Two corrections to the *measurement* were needed to state that honestly, and
+both had been understating the engine: the criterion scored paths
+(`dev/input/event5`) and UTC timestamps as unrecoverable ids, because `/` is in
+the base64 alphabet and the ISO pattern's character class omitted `Z`; and a
+**refused** block counted as a miss when a refused block stays text and is
+therefore fully readable. The at-risk population changed (5,136 → 4,568) for
+the first reason.
 
 The families the allowlist could not name, ranked by misses before the fix —
 the reader's three guesses (internal id, pod name, base64 chunk) were the top
@@ -255,22 +263,30 @@ Coverage scored against a hand-written risk criterion still compares two lists
 from the same head. So the engine is also tested against **synthetic ids in
 shapes it was never designed around**, injected into real log lines:
 
-| | before | after |
+| | 0.12 | 0.14 |
 | --- | ---: | ---: |
-| mean catch rate, 16 novel shapes × 60 draws | **62.8%** | **92.9%** |
-| pure-alphabetic random (`ryvkuvrdmg`) | **0/60** | 44/60 |
-| pod-style, slash-path, colon-quad, ulid | 68–100% | 98–100% |
+| mean catch rate, **26 shapes × 500 draws** | **62.8%** | **94.4%** |
+| pure-alphabetic random (`ryvkuvrdmg`) | **0/500** | 349/500 |
+| KSUID, snowflake, ARN, JWT, dash-less UUID, IPv6, docker id, traceparent | — | **100%** |
+| S3 version id, URL-safe base64, pod-style, ulid, slash-path | — | 93–100% |
 
 This is what found the worst bug: a blanket `^[A-Za-z]+$` "words are
-recoverable" rule was waving through **every** random alphabetic id, 0/60.
+recoverable" rule was waving through **every** random alphabetic id, 0/500.
+**Every named real-world format now scores 93–100%.**
 
-**Residual, stated plainly:** random strings that happen to look pronounceable
-(`avenl-7qjwa-cdbod`) still escape — 73–83% on the weakest shapes. Structure
-alone cannot separate those from words without a dictionary, and two shape-free
-oracles were tried and rejected rather than shipped: Shannon entropy over a
-token's own characters measures diversity, not unpredictability (it flags
-`ocean-sound-theme`), and bigram surprisal against the corpus scores MACs
-*low* because `NN:NN` pairs are everywhere.
+**Residual, stated plainly:** pure-random alphabets still escape — 70–76% on
+the three weakest shapes. Structure alone cannot separate `UXASIMOWMOFRUAB`
+(47% vowels, longest consonant run 2) from a word without a dictionary.
+
+Two shape-free oracles were tried and **rejected rather than shipped**:
+Shannon entropy over a token's own characters measures diversity, not
+unpredictability (it flags `ocean-sound-theme` and `DESIGN.md`), and bigram
+surprisal against the corpus scores MACs *low* because `NN:NN` pairs are
+everywhere. In-block frequency and a small word list were then costed and
+declined: the residual shape has **zero instances across 19.5 MB of real
+logs**, and since 0.13.1 a false positive can tip a block to `dense` and
+forfeit imaging entirely — so recall-bias is no longer cheap. Chasing a
+synthetic shape at that price is a bad trade; the bound is documented instead.
 
 ### What is actually exact — the lossless spine
 
