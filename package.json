@@ -1,7 +1,7 @@
 {
   "name": "tanuki-context",
-  "version": "0.19.3",
-  "description": "Token-cutting context pipeline as an MCP server: distill logs, compress text, render dense PNG pages (pxpipe imaging engine). Zero dependencies.",
+  "version": "0.19.4",
+  "description": "Cut 79-91% of the input tokens your logs and command output cost. MCP server or drop-in proxy: park bytes outside the conversation, fetch exact slices, draw a slice as dense PNG pages when that is cheaper - and it says when plain text is cheaper instead. Zero dependencies.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -73,9 +73,18 @@
     "mcp",
     "model-context-protocol",
     "context",
+    "context-window",
     "compression",
     "tokens",
+    "token-savings",
+    "cost-optimization",
     "llm",
+    "proxy",
+    "logs",
+    "anthropic",
+    "claude",
+    "openai",
+    "gemini",
     "pxpipe"
   ]
 }

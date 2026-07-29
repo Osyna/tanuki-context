@@ -4,7 +4,7 @@
 
 # tanuki-context
 
-**A content-addressed store for the bulky parts of a conversation: park bytes, fetch precise slices, settle exact values — and image a slice when imaging is measured to win.**
+**The bulky parts of a conversation — logs, dumps, command output — are what you actually pay for. tanuki-context cuts those input tokens by 79–91%, keeps every byte exactly recoverable, and tells you when plain text is the cheaper call.**
 
 [![npm](https://img.shields.io/npm/v/tanuki-context?style=for-the-badge&logo=npm&logoColor=white&color=cb3837)](https://www.npmjs.com/package/tanuki-context)
 [![CI](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml/badge.svg)](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml)
@@ -13,16 +13,22 @@
 
 **[Install](#install) · [Which model?](#which-model-should-you-use) · [What's new](CHANGELOG.md) · [Evals](reference/EVALS.md) · [Manual](docs/manual.md) · [Design notes](DESIGN.md)**
 
-</div>
+One 200 KB log pasted into a conversation costs about **51,200 input tokens**,
+and you pay for it again on every turn that follows. Drawn as image pages
+instead it costs **10,752** — the same log, **79% off** — and with the repeated
+noise dropped first, **5,264**.
 
-AI models charge for every token they read. tanuki-context parks the bulky parts
-of a conversation — logs, command output, long documents — in a
-content-addressed stash, hands the model a small map, and lets it fetch only the
-slices it needs. Anything it reads back is checkable against the original bytes
-with **no model in the loop**. When a slice is genuinely cheaper as pixels, it
-draws it as an image page instead.
+tanuki-context does that automatically and safely. Bulky text is parked in a
+content-addressed stash outside the conversation; the model gets a small map and
+fetches only the slices it needs; anything it reads back is checkable against the
+original bytes with **no model in the loop**. Secrets are never drawn to pixels,
+exact identifiers always travel as text, and the router **refuses to image when
+plain text is cheaper** — which it says out loud, rather than billing you for a
+conversion that never paid.
 
-**Node ≥ 18 or a static Rust binary. Zero dependencies either way.**
+Runs as an **MCP server** the model drives itself, or as a **drop-in proxy** for
+clients you cannot change. Node ≥ 18 or a static Rust binary, zero dependencies
+either way.
 
 ## Install
 
