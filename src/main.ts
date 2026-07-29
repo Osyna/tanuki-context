@@ -262,6 +262,11 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     distill: p.stage0,
     origChars,
     stage1Chars,
+    // Tokens of the stage-1 text, priced by the same estimator as everything
+    // else. Reported so callers comparing text tiers never re-derive it: the
+    // tier report did, with `chars/4`, and silently claimed a lossless stage
+    // saved 49% once the real estimator landed.
+    stage1Tokens: textTokens(p.compressed),
     stage1SavedPct: pct(origChars, stage1Chars),
     pages: est.pages,
     imageTokens: imgTok,

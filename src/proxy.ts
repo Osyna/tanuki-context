@@ -163,6 +163,18 @@ export interface TransformResult {
 /// input — the counterfactual-accounting hole the rakuen post names.
 export interface ProxySession {
   /// sha256 of block texts imaged in EARLIER requests this session.
+  ///
+  /// Ledger-only is a decision, not an oversight. Swapping a block seen in an
+  /// earlier request for a short pointer — the way an in-request repeat is
+  /// swapped — looks like it would avoid re-imaging and re-caching those pages.
+  /// It does the opposite. The same block sits at the same position in every
+  /// later request of the conversation, so a pointer CHANGES THE PREFIX and
+  /// invalidates the cache entry for everything from that block onward: the
+  /// exact prefix the cache_control breakpoint exists to hold stable.
+  /// Cross-request substitution does not avoid cache writes, it causes them.
+  /// In-request dedupe is safe only because the pointer replaces a SECOND
+  /// occurrence while the first still carries the pages. Guarded by the proxy
+  /// test "session never changes the emitted bytes".
   seenBlocks: Set<string>;
   /// a prior response showed cache traffic (cache_read/cache_creation > 0).
   cachingSeen: boolean;
@@ -240,7 +252,9 @@ export function transformRequestBody(
   // ponytail rung 2, applied to the wire: a byte-identical repeat of a block
   // we already imaged in THIS request (agents re-read files constantly) gets
   // a one-line pointer instead of the same pages again. Exact repeats only;
-  // near-dupes still image independently.
+  // near-dupes still image independently. Deliberately in-request only — see
+  // the ProxySession comment for why the cross-request version is a cache
+  // pessimisation, not an optimisation.
   const seen = new Map<string, number>(); // exact block text -> page count
 
   const imageBlock = (text: string): ImagedBlock | null => {

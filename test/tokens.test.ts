@@ -8,6 +8,7 @@
 // formula would have passed happily throughout.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { textTokens } from "../src/serde.ts";
 
 const svcLog = Array.from(
@@ -75,5 +76,50 @@ describe("textTokens tracks the real tokenizer", () => {
   test("a word-like run is far cheaper per char than a random one", () => {
     // the split the whole model rests on: same length, different tokenisation
     expect(textTokens("consideration")).toBeLessThan(textTokens("f3a9c2e17b4d0"));
+  });
+});
+
+// ---- held-out families, measured AFTER the weights were fitted -------------
+// These were never in the fit. They are what turns "worst residual 19.8%" (the
+// fit flattering itself) into a defensible bound: median 3.3% / worst 16.2% on
+// real content, with one named pathological case. See EVALS section 9.
+const uuid = Array.from({ length: 400 }, (_, i) => {
+  const h = (n: number) => ((i * 2654435761 + n) >>> 0).toString(16).padStart(8, "0");
+  return `${h(1)}-${h(2).slice(0, 4)}-${h(3).slice(0, 4)}-${h(4).slice(0, 4)}-${h(5)}${h(6).slice(0, 4)}`;
+}).join("\n").slice(0, 24000);
+const paths = Array.from({ length: 400 }, (_, i) => `/srv/data/prod/batch/segment_${String(i).padStart(5, "0")}.parquet`).join("\n").slice(0, 24000);
+const mixedIds = Array.from({ length: 350 }, (_, i) =>
+  `req=7f3a${((i * 2654435761) >>> 0).toString(16).slice(0, 8)} pod=api-7d9f${(i % 97).toString(16)}-x${i % 9} mac=${[0, 1, 2, 3, 4, 5].map((k) => ((i * 7 + k) % 256).toString(16).padStart(2, "0")).join(":")}`,
+).join("\n").slice(0, 24000);
+const camel = Array.from({ length: 300 }, (_, i) => `someLongCamelCaseIdentifierNumber${i} = anotherCamelCaseValue${i * 3};`).join("\n").slice(0, 24000);
+
+const HELD_OUT: readonly (readonly [string, string, number])[] = [
+  ["uuid", uuid, 10076],
+  ["paths", paths, 6799],
+  ["mixed-ids", mixedIds, 14442],
+];
+
+describe("held-out content the weights never saw", () => {
+  test("real-world families stay inside the documented 20% bound", () => {
+    for (const [name, text, real] of HELD_OUT) {
+      const err = Math.abs(textTokens(text) / real - 1);
+      expect([name, err < 0.2]).toEqual([name, true]);
+    }
+  });
+
+  test("the camelCase pathology is a KNOWN bound, pinned so it cannot drift silently", () => {
+    // Not a bug to fix: splitting runs at case transitions repairs this case but
+    // costs 2.4 median points on all real content (EVALS section 9), so it was
+    // measured and rejected. This test documents the ceiling, and fails if the
+    // error moves materially in EITHER direction.
+    const err = textTokens(camel) / 7799 - 1;
+    expect(err).toBeGreaterThan(1.5);
+    expect(err).toBeLessThan(3.5);
+  });
+
+  test("real source code does NOT trigger that pathology", () => {
+    // punctuation, keywords and digits break the runs up
+    const src = readFileSync(new URL("../src/needles.ts", import.meta.url), "utf8").slice(0, 24000);
+    expect(Math.abs(textTokens(src) / 6724 - 1)).toBeLessThan(0.2);
   });
 });

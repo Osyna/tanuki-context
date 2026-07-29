@@ -23,6 +23,7 @@ import { mkdtempSync, writeFileSync, appendFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { opsCorpus } from "./lib/corpus.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
@@ -41,36 +42,10 @@ const JSON_OUT = process.argv.includes("--json")
   ? process.argv[process.argv.indexOf("--json") + 1]
   : null;
 
-// ---- seeded corpus (same LCG discipline as tiers/needle reports) ----------
-function lcg(seed) {
-  let s = seed >>> 0;
-  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-}
-const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 16) | 0]).join("");
-
-function corpus() {
-  const r = lcg(41);
-  const units = ["api-gateway", "worker", "scheduler", "ingest", "cache", "relay"];
-  const lines = [];
-  for (let i = 0; i < 1200; i++) {
-    const ts = `2026-07-27T${String(8 + ((i / 300) | 0)).padStart(2, "0")}:${String((i / 5) % 60 | 0).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
-    const u = units[(r() * units.length) | 0];
-    // ingest dominates the errors by construction (task 1's ground truth)
-    if (r() < (u === "ingest" ? 0.09 : 0.015)) {
-      lines.push(`${ts} ${u} ERROR request failed status=502 retry=${(r() * 3) | 0}`);
-    } else {
-      lines.push(`${ts} ${u} INFO poll ok latency=${1 + ((r() * 40) | 0)}ms conn=${(r() * 9) | 0}`);
-    }
-  }
-  const reqId = hex(lcg(43), 12);
-  const answers = { unit: "ingest", version: "9.4.1-rc.2", reqId };
-  lines.splice(400, 0, `2026-07-27T08:40:00Z relay ERROR upstream 502 request-id=${reqId} peer=10.0.4.2:8443`);
-  lines.splice(800, 0, `2026-07-27T09:10:00Z relay WARN rollback: pinned to ${answers.version} after failed canary`);
-  lines.splice(801, 0, `2026-07-27T09:10:01Z relay ERROR digest mismatch, expected sha256:${hex(lcg(47), 16)}`);
-  return { text: lines.join("\n") + "\n", answers };
-}
-
-const { text: LOG, answers: A } = corpus();
+// The fixture is shared with the other end-to-end harnesses (reference/lib):
+// same seed, same 74514 chars, same planted answers, so every number this
+// script has ever printed stays reproducible after the de-duplication.
+const { text: LOG, answers: A } = opsCorpus();
 const TASKS = [
   {
     name: "dominant-error-unit",
@@ -144,18 +119,26 @@ async function runOne(arm, task) {
   // agent, same tools, same prompt - only the sidecar policy differs, which is
   // the whole question (42% of a render's tokens, but does the agent then have
   // to make an extra round trip to get an exact id?).
-  if (arm === "lazy") process.env.TANUKI_VERBATIM = "lazy";
-  else delete process.env.TANUKI_VERBATIM;
-  const options = arm === "off" ? base : withTanuki(base);
+  // The sidecar policy rides an explicit per-arm env, never ambient
+  // process.env: mutating global state only stays arm-clean if the SDK spawns
+  // a fresh MCP server per query(), and server reuse would silently couple the
+  // arms - making the full-vs-lazy comparison unprovable. off/on pass no env
+  // at all, so their spawned server is byte-identical to before.
+  const options =
+    arm === "off" ? base : arm === "lazy" ? withTanuki(base, { env: { TANUKI_VERBATIM: "lazy" } }) : withTanuki(base);
   let text = "";
   let usd = 0;
   // The three input classes differ by up to 12.5x in price ($3.00 fresh /
   // $3.75 cache-write / $0.30 cache-read per Mtok on Sonnet), so a single
   // summed number makes every cost conclusion unfalsifiable: a cached rerun
   // and a cold run look identical. Record them apart; sum only for display.
+  // Output is the fourth class and the one no eval here had ever recorded:
+  // $15.00/Mtok, 50x a cache read. Every dollar of it is a dollar no
+  // input-side tool can touch, which is why it caps this repo's whole thesis.
   let fresh = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
+  let output = 0;
   let err = null;
   try {
     for await (const m of query({ prompt, options })) {
@@ -166,6 +149,7 @@ async function runOne(arm, task) {
         fresh = u.input_tokens ?? 0;
         cacheRead = u.cache_read_input_tokens ?? 0;
         cacheWrite = u.cache_creation_input_tokens ?? 0;
+        output = u.output_tokens ?? 0;
       }
     }
   } catch (e) {
@@ -178,6 +162,7 @@ async function runOne(arm, task) {
     fresh,
     cacheRead,
     cacheWrite,
+    output,
     inputSide: fresh + cacheRead + cacheWrite,
     text: err ? `[error: ${err.slice(0, 80)}]` : text.slice(0, 200),
   };
@@ -193,7 +178,7 @@ outer: for (const task of PLAN) {
       rows.push({ task: task.name, arm, run: i + 1, ...r });
       console.log(
         `  ${task.name} ${arm} #${i + 1}: ${r.ok ? "PASS" : "FAIL"} $${r.usd.toFixed(4)} ` +
-          `in=${r.inputSide} (fresh ${r.fresh} / write ${r.cacheWrite} / read ${r.cacheRead})`,
+          `in=${r.inputSide} (fresh ${r.fresh} / write ${r.cacheWrite} / read ${r.cacheRead}) out=${r.output}`,
       );
       if (JSON_OUT) appendFileSync(JSON_OUT, JSON.stringify(rows.at(-1)) + "\n");
       spent += r.usd;
@@ -206,28 +191,55 @@ outer: for (const task of PLAN) {
 }
 
 // ---- the table ---------------------------------------------------------------
-function armStats(arm) {
-  const rs = rows.filter((r) => r.arm === arm);
+// Published Anthropic list prices for Sonnet, $ per Mtok. Stated here rather
+// than buried in a helper, because every dollar figure below is derived from
+// these four numbers - and output at $15.00 is 50x a cache read at $0.30.
+const USD_PER_MTOK = { fresh: 3.0, cacheWrite: 3.75, cacheRead: 0.3, output: 15.0 };
+function statsOf(rs) {
   const sum = (f) => rs.reduce((a, r) => a + f(r), 0);
   const ok = rs.filter((r) => r.ok).length;
   const usd = sum((r) => r.usd);
   const fresh = sum((r) => r.fresh);
   const cacheRead = sum((r) => r.cacheRead);
   const cacheWrite = sum((r) => r.cacheWrite);
+  const output = sum((r) => r.output);
   const inTok = fresh + cacheRead + cacheWrite;
-  return { runs: rs.length, ok, usd, fresh, cacheRead, cacheWrite, inTok, perSuccess: ok > 0 ? usd / ok : null };
+  // The share is MODELED from the list prices above, not taken from
+  // total_cost_usd: the SDK reports one opaque dollar figure that cannot be
+  // split into an output share at all. The two will not match to the cent
+  // (discounts, other models), so `total $` stays the SDK's number and the
+  // share stays explicitly derived. Both are shown; neither is laundered.
+  const outUsd = (output * USD_PER_MTOK.output) / 1e6;
+  const inUsd =
+    (fresh * USD_PER_MTOK.fresh + cacheWrite * USD_PER_MTOK.cacheWrite + cacheRead * USD_PER_MTOK.cacheRead) / 1e6;
+  return {
+    runs: rs.length,
+    ok,
+    usd,
+    fresh,
+    cacheRead,
+    cacheWrite,
+    output,
+    inTok,
+    perSuccess: ok > 0 ? usd / ok : null,
+    // null, not 0: nothing billed means the share is unknown, and printing 0%
+    // would read as "output is free" - the most flattering lie available here.
+    outSharePct: outUsd + inUsd === 0 ? null : (100 * outUsd) / (outUsd + inUsd),
+  };
 }
+const armStats = (arm) => statsOf(rows.filter((r) => r.arm === arm));
 const off = armStats("off");
 const on = armStats("on");
 const fmt = (s) =>
-  `| ${s.runs} | ${s.ok} (${Math.round((100 * s.ok) / s.runs)}%) | $${s.usd.toFixed(4)} | ` +
+  `| ${s.runs} | ${s.runs === 0 ? "n/a" : `${s.ok} (${Math.round((100 * s.ok) / s.runs)}%)`} | $${s.usd.toFixed(4)} | ` +
   `${s.fresh} | ${s.cacheWrite} | ${s.cacheRead} | ` +
   `${s.inTok === 0 ? "n/a" : `${Math.round((100 * s.cacheRead) / s.inTok)}%`} | ${s.inTok} | ` +
+  `${s.output} | ${s.outSharePct === null ? "n/a" : `${s.outSharePct.toFixed(1)}%`} | ` +
   `${s.perSuccess === null ? "n/a (0 successes)" : `$${s.perSuccess.toFixed(4)}`} |`;
 console.log(
-  "\n| arm | runs | successes | total $ | fresh in | cache write | cache read | cache hit | input-side tokens | cost per successful task |",
+  "\n| arm | runs | successes | total $ | fresh in | cache write | cache read | cache hit | input-side tokens | output tok | output $ share | cost per successful task |",
 );
-console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 console.log(`| off (raw text) ${fmt(off)}`);
 console.log(`| on (tanuki) ${fmt(on)}`);
 for (const a of ARMS) if (a !== "off" && a !== "on") console.log(`| ${a} ${fmt(armStats(a))}`);
@@ -236,4 +248,28 @@ console.log(
 );
 console.log(
   "The three input classes are priced 12.5x apart (fresh / cache-write / cache-read), so compare arms at the same cache hit rate or the token columns say nothing about spend.",
+);
+
+// ---- the ceiling -------------------------------------------------------------
+// The bound belongs to the UNTOOLED bill, since that is the bill an input-side
+// tool proposes to cut; fall back to every recorded row if the off arm was not
+// run (PAIRED_ARMS) and name which basis was used.
+const ceiling =
+  off.runs > 0
+    ? { label: "the off (raw text) arm", s: off }
+    : { label: `arms ${ARMS.join("+")} combined`, s: statsOf(rows) };
+// A check that cannot fail is a bug. If output_tokens ever stops arriving, the
+// share reads 0% and the ceiling reads "an input-side tool can save 100% of
+// the bill" - precisely the conclusion this repo would most like to hear. So
+// refuse to print a ceiling at all rather than print a zero-shaped one.
+if (ceiling.s.outSharePct === null || (ceiling.s.inTok > 0 && ceiling.s.output === 0)) {
+  console.error(
+    ceiling.s.outSharePct === null
+      ? "\nNOT A MEASUREMENT: no tokens were billed on any run, so there is no spend to take a share of. Every run failed - check ANTHROPIC_API_KEY and rerun."
+      : "\nNOT A MEASUREMENT: input tokens arrived but output_tokens was 0 on every run, so the SDK usage shape changed. No output share, no ceiling.",
+  );
+  process.exit(1);
+}
+console.log(
+  `\nOutput is ${ceiling.s.outSharePct.toFixed(1)}% of modeled spend on ${ceiling.label}, so no input-side tool - tanuki included - can ever cut more than ${(100 - ceiling.s.outSharePct).toFixed(1)}% of this bill.`,
 );

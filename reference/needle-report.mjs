@@ -24,18 +24,14 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hex, lcg } from "./lib/rand.mjs";
+import { needleCorpus } from "./lib/corpus.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
 const CMD = (process.env.TANUKI_BIN ||
   (existsSync(path.join(ROOT, "dist", "cli.js")) ? "node dist/cli.js" : "bun src/cli.ts")).split(" ");
 const OUT = path.join(HERE, "needles");
-
-function lcg(seed) {
-  let s = seed >>> 0;
-  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-}
-const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 16) | 0]).join("");
 
 /** 14 needles per density, 7 kinds x 2. Values differ per density so a
  *  reader cannot carry answers from one page to the next. base64 (mixed
@@ -62,40 +58,6 @@ function makeNeedles(r) {
   ];
 }
 
-/** ~80 log lines (one page at both densities) with the needles embedded in
- *  lines shaped like the lines they would really live in. */
-function corpus(r, needles) {
-  const units = ["api-gateway", "worker", "scheduler", "ingest", "cache", "relay"];
-  const lines = [];
-  for (let i = 0; i < 80; i++) {
-    const ts = `2026-07-27T09:${String(10 + ((i / 4) | 0)).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
-    const u = units[(r() * units.length) | 0];
-    lines.push(`${ts} ${u} INFO poll ok latency=${1 + ((r() * 40) | 0)}ms conn=${(r() * 9) | 0}`);
-  }
-  const carriers = [
-    (n) => `ERROR request failed session=${n}`,
-    (n) => `ERROR request failed session=${n}`,
-    (n) => `WARN rollback: pinned to ${n} after failed canary`,
-    (n) => `INFO upgraded runtime to ${n}`,
-    (n) => `ERROR upstream 502 request-id=${n}`,
-    (n) => `WARN retry exhausted request-id=${n}`,
-    (n) => `INFO image digest ${n} verified`,
-    (n) => `ERROR digest mismatch, expected ${n}`,
-    (n) => `    at handler (${n})`,
-    (n) => `    at flush (${n})`,
-    (n) => `INFO issued session token=${n}`,
-    (n) => `DEBUG auth: bearer ${n} accepted`,
-    (n) => `WARN slow span start=${n} over budget`,
-    (n) => `INFO checkpoint written at ${n}`,
-  ];
-  const r2 = lcg(101);
-  needles.forEach((n, i) => {
-    const at = 4 + ((r2() * 72) | 0);
-    lines.splice(at, 0, `2026-07-27T09:30:00Z relay ${carriers[i](n.value)}`);
-  });
-  return lines.join("\n") + "\n";
-}
-
 const DENSITIES = [
   { name: "normal", seed: 11, flags: [] },
   { name: "tiny", seed: 23, flags: ["--font", "tiny"] },
@@ -108,7 +70,7 @@ function gen() {
     const needles = makeNeedles(lcg(d.seed));
     answers[d.name] = needles;
     const f = path.join(OUT, `${d.name}.log`);
-    writeFileSync(f, corpus(lcg(d.seed + 1), needles));
+    writeFileSync(f, needleCorpus(lcg(d.seed + 1), needles));
     const dir = path.join(OUT, d.name);
     mkdirSync(dir, { recursive: true });
     execFileSync(CMD[0], [...CMD.slice(1), "render", f, "0", dir, ...d.flags], { cwd: ROOT });
