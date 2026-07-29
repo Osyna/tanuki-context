@@ -22,8 +22,12 @@ export interface StdioServerConfig {
   env?: Record<string, string>;
 }
 
-/** External stdio MCP server config for `options.mcpServers`. */
-export declare function tanukiMcpServer(): StdioServerConfig;
+/**
+ * External stdio MCP server config for `options.mcpServers`. `env` names the
+ * variables the spawned server gets, layered on top of the inherited
+ * environment; omit it and the config is exactly as before.
+ */
+export declare function tanukiMcpServer(env?: Record<string, string>): StdioServerConfig;
 
 /** `mcp__<key>__<tool>` names for `options.allowedTools`. */
 export declare function tanukiAllowedTools(key?: string): string[];
@@ -37,7 +41,7 @@ export interface TanukiOptions {
 /** Merge tanuki (server + allowed tools) into an Agent SDK options object. */
 export declare function withTanuki<T extends TanukiOptions>(
   options?: T,
-  opts?: { key?: string; server?: unknown },
+  opts?: { key?: string; server?: unknown; env?: Record<string, string> },
 ): T & TanukiOptions;
 
 export interface ZodChain {

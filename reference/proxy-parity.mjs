@@ -3,9 +3,9 @@
 // the TS proxy and the Rust proxy against a capturing upstream, then diff what
 // upstream actually received.
 import http from "node:http";
-import { inflateSync } from "node:zlib";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { pngPixels } from "./lib/png.mjs";
 
 const BIG = Array.from(
   { length: 300 },
@@ -87,25 +87,9 @@ const norm = (s) => JSON.stringify(canon(JSON.parse(s)));
 console.log(`       trailing message untouched: ${JSON.stringify(jt.messages[1].content)}`);
 console.log(`       system untouched: ${JSON.stringify(jt.system)}`);
 
-// the invariant that actually binds: identical PNG bytes from both engines
-// The two zlib encoders emit different compressed bytes for identical pixels;
-// parity-ts.mjs handles this by inflating, so do the same here. Pixels are the
-// invariant - a page must LOOK identical, not compress identically.
-function pngPixels(buf) {
-  let off = 8, w = 0, h = 0;
-  const idat = [];
-  while (off < buf.length) {
-    const len = buf.readUInt32BE(off);
-    const type = buf.toString("ascii", off + 4, off + 8);
-    if (type === "IHDR") { w = buf.readUInt32BE(off + 8); h = buf.readUInt32BE(off + 12); }
-    if (type === "IDAT") idat.push(buf.subarray(off + 8, off + 8 + len));
-    off += 12 + len;
-  }
-  const raw = inflateSync(Buffer.concat(idat));
-  const px = Buffer.alloc(w * h);
-  for (let y = 0; y < h; y++) raw.copy(px, y * w, y * (w + 1) + 1, (y + 1) * (w + 1));
-  return { w, h, px };
-}
+// The invariant that actually binds: both engines must render PIXEL-identical
+// pages. Their zlib encoders emit different compressed bytes for identical
+// pixels, so lib/png.mjs inflates before comparing - see the note there.
 const imgs = (s) => JSON.parse(s).messages[0].content.filter((b) => b.type === "image").map((b) => pngPixels(Buffer.from(b.source.data, "base64")));
 const it = imgs(ts);
 const ir = haveRust ? imgs(rs) : null;

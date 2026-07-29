@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { taskCorpus } from "./lib/corpus.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
@@ -26,28 +27,6 @@ const MODEL = process.env.TIER_MODEL || "claude-opus-4-8";
 const SEEDS = (process.env.TIER_SEEDS || "11,23").split(",").map((s) => Number(s.trim()));
 const key = process.env.ANTHROPIC_API_KEY;
 
-// ---- seeded corpus: identical shape to task-report.mjs (one FATAL line) ----
-function lcg(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32); }
-const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 16) | 0]).join("");
-function corpus(seed) {
-  const r = lcg(seed);
-  const units = ["api-gateway", "worker", "scheduler", "ingest", "cache", "relay"];
-  const comps = ["frame-allocator", "wal-compactor", "shard-router", "quota-reaper", "vclock-merger", "bloom-indexer", "lease-broker", "chunk-scrubber"];
-  const reasons = ["disk write failed errno=ENOSPC", "deadlock acquiring lease table", "checksum mismatch on replay", "heap arena corruption detected", "fd table exhausted"];
-  const lines = [];
-  for (let i = 0; i < 120; i++) {
-    const ts = `2026-07-27T09:${String(10 + ((i / 6) | 0)).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
-    const u = units[(r() * units.length) | 0];
-    if (r() < 0.06) lines.push(`${ts} ${u} WARN retry status=502 backoff=${1 + ((r() * 8) | 0)}s conn=${(r() * 9) | 0}`);
-    else lines.push(`${ts} ${u} INFO poll ok latency=${1 + ((r() * 40) | 0)}ms conn=${(r() * 9) | 0}`);
-  }
-  const comp = comps[(r() * comps.length) | 0];
-  const reason = reasons[(r() * reasons.length) | 0];
-  const at = 8 + ((r() * 100) | 0);
-  const line = 100 + ((r() * 900) | 0);
-  lines.splice(at, 0, `2026-07-27T09:30:00Z relay FATAL panic: ${reason} component=${comp}#${hex(r, 6)} at lib/relay/${comp}.rs:${line}`);
-  return { text: lines.join("\n") + "\n", token: comp };
-}
 const QUESTION =
   "This service log has exactly one FATAL panic line - the root cause. Reply with ONLY " +
   "the component name in its `component=` field (the word after `component=`, drop any #id).";
@@ -80,7 +59,7 @@ async function ask(pages) {
 }
 
 mkdirSync(OUT, { recursive: true });
-const cases = SEEDS.map((seed) => { const { text, token } = corpus(seed); const f = path.join(OUT, `seed-${seed}.log`); writeFileSync(f, text); return { seed, token, f }; });
+const cases = SEEDS.map((seed) => { const { text, token } = taskCorpus(seed); const f = path.join(OUT, `seed-${seed}.log`); writeFileSync(f, text); return { seed, token, f }; });
 
 const rows = [];
 for (const cfg of CONFIGS) {

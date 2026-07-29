@@ -5,33 +5,12 @@ import path from "node:path";
 import os from "node:os";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { opsCorpus } from "./lib/corpus.mjs";
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const CLI = path.join(ROOT, "dist", "cli.js");
 
-function lcg(seed) {
-  let s = seed >>> 0;
-  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-}
-const hex = (r, n) => Array.from({ length: n }, () => "0123456789abcdef"[(r() * 16) | 0]).join("");
-function corpus() {
-  const r = lcg(41);
-  const units = ["api-gateway", "worker", "scheduler", "ingest", "cache", "relay"];
-  const lines = [];
-  for (let i = 0; i < 1200; i++) {
-    const ts = `2026-07-27T${String(8 + ((i / 300) | 0)).padStart(2, "0")}:${String((i / 5) % 60 | 0).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
-    const u = units[(r() * units.length) | 0];
-    if (r() < (u === "ingest" ? 0.09 : 0.015)) lines.push(`${ts} ${u} ERROR request failed status=502 retry=${(r() * 3) | 0}`);
-    else lines.push(`${ts} ${u} INFO poll ok latency=${1 + ((r() * 40) | 0)}ms conn=${(r() * 9) | 0}`);
-  }
-  const reqId = hex(lcg(43), 12);
-  lines.splice(400, 0, `2026-07-27T08:40:00Z relay ERROR upstream 502 request-id=${reqId} peer=10.0.4.2:8443`);
-  lines.splice(800, 0, `2026-07-27T09:10:00Z relay WARN rollback: pinned to 9.4.1-rc.2 after failed canary`);
-  lines.splice(801, 0, `2026-07-27T09:10:01Z relay ERROR digest mismatch, expected sha256:${hex(lcg(47), 16)}`);
-  return { text: `${lines.join("\n")}\n`, reqId };
-}
-
-const { text: LOG, reqId } = corpus();
+const { text: LOG, answers: { reqId } } = opsCorpus();
 const tmp = mkdtempSync(path.join(os.tmpdir(), "tanuki-trace-"));
 process.env.TANUKI_STASH = path.join(tmp, "stash");
 const logFile = path.join(tmp, "service.log");

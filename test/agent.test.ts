@@ -38,6 +38,46 @@ describe("config helpers", () => {
     expect(cfg.args.length).toBeGreaterThan(0);
   });
 
+  test("zero-arg config carries no env key at all", () => {
+    // byte-identical to the pre-env config: an implementation that helpfully
+    // seeded `env` from process.env (the ambient-coupling bug this API exists
+    // to kill) would add a fourth key and fail here.
+    expect(Object.keys(tanukiMcpServer()).sort()).toEqual(["args", "command", "type"]);
+  });
+
+  test("named env reaches the config and nothing else does", () => {
+    process.env.TANUKI_TEST_AMBIENT = "leaked";
+    try {
+      const cfg = tanukiMcpServer({ TANUKI_VERBATIM: "lazy" });
+      expect(cfg.env).toEqual({ TANUKI_VERBATIM: "lazy" });
+      // the point of naming variables: an unnamed ambient var must not ride
+      // along, or arms stay coupled through process.env exactly as before.
+      expect(cfg.env?.TANUKI_TEST_AMBIENT).toBeUndefined();
+      // env is additive at spawn time, so the command must be untouched
+      expect(cfg.command).toBe(tanukiMcpServer().command);
+      expect(cfg.args).toEqual(tanukiMcpServer().args);
+    } finally {
+      delete process.env.TANUKI_TEST_AMBIENT;
+    }
+  });
+
+  test("withTanuki threads env into the generated server", () => {
+    const threaded = withTanuki({}, { env: { TANUKI_VERBATIM: "full" } }).mcpServers?.tanuki as {
+      env?: Record<string, string>;
+    };
+    expect(threaded.env).toEqual({ TANUKI_VERBATIM: "full" });
+    // default form stays env-free
+    const plain = withTanuki().mcpServers?.tanuki as { env?: Record<string, string> };
+    expect(plain.env).toBeUndefined();
+  });
+
+  test("an explicit server wins over the generated one, env included", () => {
+    const own = { type: "sdk", name: "inproc" };
+    const merged = withTanuki({}, { server: own, env: { TANUKI_VERBATIM: "lazy" } });
+    expect(merged.mcpServers?.tanuki).toBe(own);
+    expect(merged.allowedTools).toContain("mcp__tanuki__tanuki_render");
+  });
+
   test("allowed tools follow the SDK mcp__<key>__<tool> convention", () => {
     expect(tanukiAllowedTools()).toEqual([
       "mcp__tanuki__tanuki_render",

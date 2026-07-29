@@ -242,12 +242,26 @@ describe("cache-aware ledger", () => {
   });
 
   test("session never changes the emitted bytes", () => {
+    // The guard on a plausible-looking optimisation that is really a
+    // pessimisation: swapping a block seen in an EARLIER request for a short
+    // pointer changes the prefix and invalidates the cache entry the
+    // cache_control breakpoint exists to keep stable. So EVERY sequential call
+    // of a warm session must emit the same bytes as a session-less call, not
+    // just the first.
     const cold = transformRequestBody(body, CFG);
     const s = newSession();
     s.cachingSeen = true;
-    transformRequestBody(body, CFG, s);
-    const warm = transformRequestBody(body, CFG, s);
-    expect(warm!.body).toBe(cold!.body);
+    const first = transformRequestBody(body, CFG, s);
+    const second = transformRequestBody(body, CFG, s);
+    const third = transformRequestBody(body, CFG, s);
+    expect(first!.body).toBe(cold!.body);
+    expect(second!.body).toBe(cold!.body);
+    expect(third!.body).toBe(cold!.body);
+    // and the session really was warm, so the equalities above are not passing
+    // on a session that never recorded anything: the block is remembered and
+    // the ledger moved from first-flip pricing to replay pricing.
+    expect(s.seenBlocks.size).toBe(1);
+    expect(second!.savedTokensCacheAware).not.toBe(first!.savedTokensCacheAware);
   });
 });
 // The proxy has always PRICED caching but never CREATED it. Imaged pages are

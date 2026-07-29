@@ -44,15 +44,25 @@ export interface StdioServerConfig {
 /// External stdio MCP server config for `options.mcpServers`. Resolves the
 /// installed dist/cli.js next to this module (published layout); falls back to
 /// npx when running from source.
-export function tanukiMcpServer(): StdioServerConfig {
+///
+/// `env` names the variables the spawned server gets. It exists because the
+/// alternative — mutating `process.env` and hoping the SDK spawns a fresh
+/// server per call — silently couples measurement arms: an eval that varies
+/// TANUKI_VERBATIM between arms cannot prove a later arm did not read the
+/// earlier arm's value, so the comparison is unpublishable. Naming the
+/// variables here makes the experiment reproducible.
+///
+/// Additive, never replacing: the MCP stdio transport spawns with
+/// `{ ...getDefaultEnvironment(), ...env }` (@modelcontextprotocol/sdk
+/// client/stdio.js), so these land on top of the inherited safe set.
+/// Omitted when absent, so the zero-arg config is byte-identical to before.
+export function tanukiMcpServer(env?: Record<string, string>): StdioServerConfig {
   const cli = new URL("./cli.js", import.meta.url);
-  if (cli.protocol === "file:") {
-    const p = fileURLToPath(cli);
-    if (existsSync(p)) {
-      return { type: "stdio", command: process.execPath, args: [p] };
-    }
-  }
-  return { type: "stdio", command: "npx", args: ["-y", "tanuki-context"] };
+  const base: StdioServerConfig =
+    cli.protocol === "file:" && existsSync(fileURLToPath(cli))
+      ? { type: "stdio", command: process.execPath, args: [fileURLToPath(cli)] }
+      : { type: "stdio", command: "npx", args: ["-y", "tanuki-context"] };
+  return env ? { ...base, env } : base;
 }
 
 /// The SDK names MCP tools `mcp__<serverKey>__<tool>`; pass the key you used
@@ -69,16 +79,17 @@ export interface TanukiOptions {
 
 /// Merge tanuki into an Agent SDK options object: registers the server under
 /// `key` and appends the allowed-tool names. Pass `server` to use an
-/// in-process instance from `tanukiSdkServer()` instead of the stdio default.
+/// in-process instance from `tanukiSdkServer()` instead of the stdio default;
+/// `env` then has no effect, since there is no subprocess to hand it to.
 export function withTanuki<T extends TanukiOptions>(
   options?: T,
-  opts: { key?: string; server?: unknown } = {},
+  opts: { key?: string; server?: unknown; env?: Record<string, string> } = {},
 ): T & TanukiOptions {
   const base: TanukiOptions = options ?? {};
   const key = opts.key ?? "tanuki";
   return {
     ...(base as T),
-    mcpServers: { ...(base.mcpServers ?? {}), [key]: opts.server ?? tanukiMcpServer() },
+    mcpServers: { ...(base.mcpServers ?? {}), [key]: opts.server ?? tanukiMcpServer(opts.env) },
     allowedTools: [...(base.allowedTools ?? []), ...tanukiAllowedTools(key)],
   };
 }

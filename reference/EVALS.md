@@ -25,6 +25,34 @@ Where a number does not flatter the tool, it is here anyway.
   thrashes on our harness. Drive tanuki *explicitly* (estimate → render); don't
   dump the tools on the agent and hope (§6).
 
+## The seam: three capabilities, one of them conditional
+
+Every result below splits along the same line. tanuki bundles three separable
+capabilities, and they do not carry equal risk.
+
+- **A. Imaging** — characters become pixels. Every bad result in this document
+  belongs to A: read-back of dense random strings (§2), the two tested models
+  that score 0% on pages (§3), the tiers that break the task (§4), and the
+  capped cost case (§6) — prompt caching prices a stable inlined log at
+  **$0.30/Mtok**, so plain inlining wins the median **3.5×**. A is conditional
+  on the reader, on the content, and on the tier. §2-§4 and §6 are its
+  envelope.
+- **B. Stash / fetch / verify** — park bytes under a hash, retrieve slices,
+  settle exact values. B has not missed a measurement: byte-identity over
+  19.7 MB and sidecar coverage on the same corpus (§7), deterministic
+  correction of a one-character misread with no model in the loop (§7),
+  credential masking on the way out at 2 false positives in 166,985 lines
+  (§8). Exact by construction, not statistically.
+- **C. Text reduction** — distill, compress, table, codebook, output stays
+  text. Priced on every `estimate` call as `recommend.text` (§5), on a
+  denominator now measured against a real tokenizer instead of `chars / 4`
+  (§9). No fidelity risk, no model dependence, nothing to read off a page.
+
+A is the capability the tool was named for and the only one whose value is
+conditional. B and C hold regardless of which model is reading. And every
+figure in this document is **input-side**: whatever share of a bill is output
+tokens is a ceiling no input-side tool can cross, however well it compresses.
+
 ## 1. Pricing — `estimate --model`   *(deterministic, no vision needed)*
 
 `estimate` prices the decision in real dollars via each provider's tile/patch
@@ -166,6 +194,65 @@ the TS and Rust engines (see `reference/parity-ts.mjs`).
 The honest end number is cost per *successful* task, tool-off (log inlined) vs
 tool-on (the log stashed; the agent gets a ~700-token map plus the tanuki tools
 and fetches what it needs), on a 1,200-line log with `claude-sonnet-5`.
+
+### The ceiling on all of it: output is 53% of the bill
+
+Read this before any other number in this file. Every saving tanuki can produce
+is **input-side**, and on a measured agent run the input side is not most of the
+bill:
+
+| arm | fresh in | cache write | cache read | output tok | **output $ share** |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| off (raw text), n=1 | 10 | 127,708 | 415,462 | 45,914 | **53.3%** |
+
+**Output is 53.3% of modeled spend, so no input-side tool — tanuki included —
+can ever cut more than 46.7% of this bill.** Output bills at $15.00/Mtok against
+$0.30 for a cache read: a 50× ratio that makes 45,914 output tokens outweigh
+543,180 input tokens.
+
+Worse for the pitch, the ceiling *tightens as the tool succeeds*: cutting input
+mechanically raises output's share of what remains. An arm whose input tanuki has
+already shrunk has a higher output share than the raw arm, so the second half of
+any saving is harder-won than the first.
+
+This is **n=1** on the off arm — the budget stopped the run — so treat 53.3% as
+an order of magnitude, not a constant, and expect it to swing with how verbose
+the agent is. It is nonetheless the number that bounds every other table here,
+and it went unmeasured for nine releases. `npm run paired` now reports it per
+arm, and refuses to print a ceiling at all if `output_tokens` comes back zero —
+otherwise the most flattering possible conclusion ("input is 100% of the bill")
+would print silently.
+
+### Rejected: reusing imaged pages across requests
+
+If a byte-identical block is imaged in request N, why image it again in request
+N+1? The proxy already collapses an in-request repeat into a short pointer, and
+`ProxySession.seenBlocks` already tracks hashes across requests — it looked like
+two lines of plumbing. It was built in both engines, and it is wrong for two
+independent reasons.
+
+**It inverts the goal.** The same block sits at the same position in every later
+request of a conversation. Swapping it for a pointer *changes the prefix*, so the
+cache entry for everything from that block onward is invalidated and rewritten —
+the exact prefix the `cache_control` breakpoint exists to hold stable. Measured
+by the test that caught it: expected body ~59 KB of pages, emitted ~283 bytes of
+pointer, divergence starting at message 0. Cross-request substitution does not
+avoid cache writes, it causes them. In-request dedupe is safe *only* because the
+pointer replaces a second occurrence while the first still carries the pages.
+
+**It also loses the sidecar.** The pointer replaces the whole emitted block
+group, `verbatim` included. In-request that is harmless — the first occurrence
+still carries the sidecar above it. Across requests the sidecar vanishes with
+nothing above to recover it, so every exact id the scanner extracted is gone: a
+direct regression on §7's coverage, independent of caching.
+
+So `seenBlocks` stays ledger-only, and both engines now carry a comment saying
+why, because the idea is attractive enough to recur. The guard is the proxy test
+**"session never changes the emitted bytes"**, which now drives three sequential
+calls on a warm session and asserts all three bodies equal the session-less
+body. Rust had *no* session coverage at all before this — every Rust proxy test
+passed `None` — so the same idea could have landed there alone and gone
+unnoticed; that test is now mirrored.
 
 **This section previously reported that "the fully-autonomous loop is not a win
 — handed the tools, a capable agent thrashes: fetching, imaging, re-fetching."
@@ -589,10 +676,45 @@ run are nearly free (~6 chars/token), letters in a vowelless or overlong run
 fragment, whitespace mostly merges into the next word. Least squares over the
 30 samples, integer per-mille weights so both engines are bit-identical.
 
-**Worst residual 19.8% (21.7% leave-one-out) against 72% for `chars/4`; real
-logs land within 3.5%.** `test/tokens.test.ts` pins it to the measured counts
-and includes a guard asserting `chars/4` would still fail the suite — a bound
-that stops discriminating is a decorative bound.
+### Held out, not fitted — the honest bound
+
+"Worst residual 19.8%" was the *fit* on those 30 samples, which is the number a
+model always flatters itself with. A second, larger and deliberately more
+diverse batch of **37 measurements** (real logs, TS and Rust source, markdown,
+CSV, JSON, stack traces, UUIDs, paths, mixed ids, plus synthetic extremes) was
+then scored against the **shipped** weights without refitting:
+
+| | `chars/4` | shipped estimator |
+| --- | ---: | ---: |
+| real content, n=30 — worst | 65.6% | **16.2%** |
+| real content — median | 38.3% | **3.3%** |
+| real logs only, n=18 — worst | — | **11.6%** |
+| real logs — median | — | **2.7%** |
+| synthetic extremes, n=7 — worst | 71.3% | **239%** |
+
+On the content tanuki actually routes it holds up: **median 3.3%, worst 16.2%**,
+against 38.3% / 65.6% for the old divisor. On real source code specifically
+(TypeScript and Rust files from this repo) it lands between −3.2% and +14.2%.
+
+**The 239% is real and worth naming.** It is a synthetic blob of nothing but
+long camelCase identifiers (`someLongCamelCaseIdentifierNumber123 = …`). Runs
+over 14 characters are priced as random blobs at ~1.5 tokens/char, but a BPE
+splits camelCase into known subwords, so the estimate is 3.4× too high. Real
+source code never triggers it — punctuation, keywords and digits break the runs
+up — but generated or machine-mangled identifier soup could.
+
+**The obvious fix was measured and rejected.** Splitting alpha runs at
+lowercase→uppercase boundaries before the word test collapses that case from
+239% to −27%, and also fixes base64 (−33% → −1.6%) and solid hex (+38% → +1.8%).
+But on the 30 real samples it is *worse*: median 5.7% against 3.3%. Trading a
+2.4-point median regression on everything real to fix a fixture nobody will send
+is the wrong trade, so the shipped weights stand and the bound is documented
+instead. All weights are non-negative by construction; a negative one would
+claim a character class makes text cheaper.
+
+`test/tokens.test.ts` pins the measured counts, keeps the held-out families as
+fixtures, and includes a guard asserting `chars/4` would still fail the suite —
+a bound that stops discriminating is a decorative bound.
 
 ### It also re-calibrated the fidelity band
 
@@ -620,6 +742,66 @@ why this waited for a key: assistant `output_tokens` from local session logs
 (thinking bills to output but is not in the logged text — 161 chars against
 962 tokens), and input-token deltas across turns (Claude Code elides tool
 results, so the reconstruction spans 0.15–20.15 chars/token, i.e. noise).
+
+## 10. Retrieval precision — `npm run retrieval`   *(measured, no model)*
+
+§6 measures whether the agent *answered*, which conflates two failures needing
+opposite fixes: tanuki handed back a slice without the answer, or tanuki handed
+back the answer and the model fumbled it. The last run solved 4 of 6 and we
+could not say which. This harness separates them, deterministically, with **no
+API key and no model** — it asks only whether the ground truth came back as
+**readable text**.
+
+Three outcomes per (answer, query-strategy) pair, and the distinction is the
+whole point:
+
+- **TEXT** — the value is in a text block. Recoverable.
+- **PIXELS** — it is in the slice but only on a page. Since read-back of exact
+  strings is measured at **0/14** (§2), this is scored a MISS, not a success.
+- **ABSENT** — not retrievable by that strategy at all.
+
+Measured on `opsCorpus()`, four strategies × three planted answers, **identical
+cell-for-cell on both engines**:
+
+| answer | exact-substring | near-keyword | alt-keyword | line-range |
+| --- | --- | --- | --- | --- |
+| request id `42440ce06042` | TEXT | TEXT | TEXT | TEXT |
+| version `9.4.1-rc.2` | TEXT | TEXT | TEXT | TEXT |
+| unit `ingest` | **PIXELS** | **PIXELS** | **PIXELS** | **PIXELS** |
+
+**Retrieval precision 8/12 = 66.7%**, and the 4 misses are one coherent cause:
+the `verbatim` sidecar carries id-, hash-, version- and path-shaped strings.
+**`ingest` is a bare English word**, so no strategy ever carries it as text —
+every route puts it on a page only.
+
+That resolves the §6 ambiguity precisely: **a failure on
+`dominant-error-unit` is retrieval; a failure on the id or version tasks is
+reasoning.** Two different bugs that had been averaging into one number.
+
+The aggregate answer is still settleable from text, by a different route — the
+`[query matched N of M lines]` marker added in 0.16. Per-unit ERROR counts come
+back `ingest=16, api-gateway=5, worker=5, cache=5, scheduler=4, relay=4`, so the
+marker ranks the answer first by 3.2×, and the harness asserts that ranking. If
+the marker ever stops reporting raw counts, the question becomes unanswerable
+from text at all.
+
+### The control I specified was invalid, and the harness said so
+
+The brief asked for a no-match query as the zero baseline. Measured, it scores
+**2 of 3 TEXT, not 0**: distill keeps every ERROR/WARN line regardless of query,
+and all three answers are planted on ERROR/WARN lines, so even a random hex
+query hands both ids back. Using it as the zero baseline would have "proved" the
+instrument worked while measuring nothing. It is kept and printed as a finding;
+the valid zero control is a **near-miss decoy** set (`egress`, `9.4.1-rc.3`,
+`42440ce06043`), which scores 0/12 and proves the classifier matches returned
+bytes exactly rather than approximately.
+
+Non-vacuity is proven by mutation, not asserted: making the classifier count any
+reply containing images as TEXT — the whole-dump-grep regression — inflates
+precision to 12/12 and trips two controls. Disabling the sidecar
+(`TANUKI_VERBATIM=off`) drops precision to 0.0% while all four controls still
+pass, which is the correct split: controls check the instrument, the gate checks
+the engine.
 
 ## Reproduce
 
