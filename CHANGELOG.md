@@ -10,6 +10,11 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.19.3
+
+- **A "which model should you use?" section, because the first caveat in this README is "pages need a capable reader" and nothing told you which ones qualify.** Two questions, kept apart: whether a model can *read* a dense page (measured, five models, and the answer does not track how good the model is — `claude-sonnet-4-5` scores 100% as text and **0%** as pages while the older `claude-opus-4-8` manages 88% on both), and what a page *costs* on its provider (implemented for three tile rules: Anthropic 28px patches 10,528 tokens, OpenAI 512px tiles 10,880, Gemini 768px tiles **6,192** — the same page, counted three ways).
+- GPT, Gemini, GLM, Qwen, DeepSeek, Mistral and Llama vision are listed as **unmeasured**, not guessed. Extrapolating would contradict the measurement directly above them. The task fixtures are committed with their exact question, so testing a model takes a few minutes and no code: text arm, image arm, compare against `reference/task/answers.json`. Results are welcome as issues and go into the router's refusal list.
+
 ## 0.19.2
 
 - **This file.** The release history was 101 lines in the middle of the README, between the evidence and the reference links, where nobody looking for "what changed" would find it and everybody scrolling for install had to pass it. Extracted here, linked from a nav line under the badges and from `## More`. Shipped in the npm tarball so it reads from the package page too.
