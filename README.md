@@ -4,7 +4,7 @@
 
 # tanuki-context
 
-**Pay pixels, not tokens. Bulky text enters the model as dense PNG pages, at a fraction of the price.**
+**A content-addressed store for the bulky parts of a conversation: park bytes, fetch precise slices, settle exact values — and image a slice when imaging is measured to win.**
 
 [![npm](https://img.shields.io/npm/v/tanuki-context?style=for-the-badge&logo=npm&logoColor=white&color=cb3837)](https://www.npmjs.com/package/tanuki-context)
 [![CI](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml/badge.svg)](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml)
@@ -13,22 +13,58 @@
 
 </div>
 
-AI models charge for every token they read. tanuki-context turns the bulky
-parts of a conversation — logs, command output, long documents — into compact
-PNG pages the same model reads for a fraction of the price. Node >= 18 or a
-static Rust binary, zero dependencies either way.
+AI models charge for every token they read. tanuki-context is a
+content-addressed store for the bulky parts of a conversation — logs, command
+output, long documents. Text goes into a stash under a sha256; the model gets a
+small map and fetches the slices it needs; anything it reads back is checkable
+against the original bytes with no model in the loop. Node >= 18 or a static
+Rust binary, zero dependencies either way.
 
-It is just how pricing works: text costs about 1 token per 4 characters; an
-image costs a fixed amount set by its pixel size, no matter how much text is
-drawn inside it. Pack 28,000 characters into one 1568x728 page and the model
-reads it for 1,456 tokens instead of ~7,000.
-[pxpipe](https://github.com/teamchong/pxpipe) found how far that gap stretches;
-tanuki packages it so the model itself decides when to use it, plus a proxy
-mode for clients you can't change.
+Three separable capabilities ship in that box, and they do not carry equal
+risk. Two are unconditional:
+
+- **Park, fetch, verify — exact by construction.** stash → fetch → diff over
+  19.7 MB of real logs recovers **19,722,893 / 19,722,893 characters
+  byte-identical**; the `verbatim` sidecar carries **100%** of at-risk
+  identifiers on that corpus as text; `tanuki_verify` turns a one-character
+  misread into `corrected` with no model call at all
+  ([EVALS §7](reference/EVALS.md)).
+- **Text reduction — no fidelity risk, no model dependence.** distill,
+  compress, table and codebook cut a real pacman log **70.9%** with the output
+  still text. `estimate` prices this on every call as `recommend.text`, so
+  there is a token answer even when imaging is the wrong one
+  ([EVALS §5](reference/EVALS.md)).
+
+One is conditional, and it is the one the tool is named for:
+
+- **Imaging — 79% off input tokens on a real log, inside a measured
+  envelope.** Text costs roughly a token per few characters (real logs
+  tokenise at 1.9-2.9 chars/token, prose near 5.0); an image costs a fixed
+  amount set by its pixel size, no matter how much text is drawn inside it.
+  [pxpipe](https://github.com/teamchong/pxpipe) found how far that gap
+  stretches; tanuki packages it so the model itself decides when to use it,
+  plus a proxy mode for clients you can't change. The envelope, stated: pages
+  need a capable reader (2 of 5 tested models score **0%** on a task they solve
+  100% as text), exact strings never survive them (**0/14** needles byte-exact
+  on every model tested — which is why they ride the sidecar as text), the
+  fidelity-preserving tier is normal font (`tiny` is **0/5** on the task,
+  `distill` **1/5**), and the cost case is capped by prompt caching: a cached
+  payload bills at **$0.30/Mtok**, so plain inlining wins the **median by
+  3.5×**. The honest cost claim is *predictable*, not cheaper —
+  **$0.124–$0.225** across nine runs against inlining's **$2.94** worst run
+  ([EVALS §2-§4, §6](reference/EVALS.md)).
+
+Every figure above is input-side. An output-dominated bill bounds what any
+input-side tool can save at all, whatever it does to the input —
+`tanuki_stats` reports that share.
+
+The strongest evidence the router is well built is that it refuses to sell
+itself: pointed at four real corpora it declined to image two — one for
+credentials, one for being past the read-back cliff.
 
 ![a rendered page: dense 5x8-pixel text, 312 columns of system log](https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/example-page.png)
 
-## What you save
+## What imaging saves
 
 Measured on a 200 KB slice of a real system journal (identifiers rewritten;
 repetition and every error line untouched). Reproduce with `npm run tiers`.
@@ -47,13 +83,15 @@ nothing, and says so when plain text would be cheaper:
 npx tanuki-context estimate your.log 0 --distill --codebook --font tiny
 ```
 
-The last two rows are **lossy on purpose** — distill drops repeat lines
-(errors kept verbatim), tiny font shrinks glyphs. Measured, the ladder/distill
-tiers still let a model *do the task* (find the error) while cutting up to
-~93%; tiny font is the one that trades word-level legibility — use it for bulk
-you won't need exact words back from. `estimate` reports a `fidelity` band per
-config (mapped to DeepSeek-OCR's measured read-back curve), so you see the
-cliff before you hit it. The token-vs-task curve: [reference/EVALS.md](reference/EVALS.md).
+The last two rows are **lossy on purpose**, and measured they are lossy about
+the task as well: on a capable reader the normal font holds **5/5** on the
+root-cause task while cutting **76%**, `distill` drops to **1/5** and `tiny`
+font to **0/5** ([EVALS §4](reference/EVALS.md)). Reach for them for bulk you
+only need the gist of, not for a log you will be asked questions about.
+`estimate` reports a `fidelity` band per config (mapped to DeepSeek-OCR's
+measured read-back curve), and since the estimator was fitted against a real
+tokenizer the band agrees with the outcome — *good* ↔ 100%, *unreliable* ↔ 20%
+([EVALS §9](reference/EVALS.md)).
 
 ## Try it in 30 seconds
 
@@ -75,6 +113,33 @@ npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
 - **The exact bytes must survive.** Secrets and credentials are **auto-refused — never imaged**, and **masked out of a fetched slice** (`redact:false` when you really want them). Dense random strings misread silently — measured, even frontier models (Opus 4.8/5) read back just **0–1 of 14** needles byte-exact ([evals](reference/EVALS.md)) — so the `verbatim` sidecar ships ids, hashes, MACs, pod names and base64 as text beside the pages: **97%** of unrecoverable identifiers across 19.7 MB of real logs, **92.9%** against id shapes it was never designed for (`npm run coverage`, `npm run adversarial`). Exactness itself never rides on pixels at all — the stash holds the original bytes under a sha256, **19,722,893 / 19,722,893 characters recovered byte-identical** on that corpus (fetched with `redact:false`), and `tanuki_verify` settles any value you read off a page — exact, a corrected near-miss, or absent — no model.
 - **The content is small, or your bill is output-dominated.** `tanuki_stats` reports the output share so you can tell.
 - **You're not on Anthropic pricing.** Pass `model` to `tanuki_estimate` for provider-correct `cost` (OpenAI tiles, Gemini tiles), overridable via `TANUKI_RATES`.
+
+## Measured and rejected
+
+Ideas that were built or priced and then declined. A dead end nobody records
+costs the next reader a week:
+
+- **`tiny` font as a densification lever.** 1.67× denser, and **0/5** on the
+  comprehension task where the normal font scores 5/5. It stays what the
+  fidelity band always called it: a lossy-bulk tier, not free tokens.
+- **`verbatim: "lazy"` as the default.** The sidecar is **42%** of a render's
+  tokens, so deferring it looked like the largest payload cut available.
+  Measured as its own arm it halves cache writes and lifts the hit rate to
+  **97%** — and saves nothing outside the noise, because a cached payload bills
+  at **$0.30/Mtok**, so removing 42% of it removes 42% of the cheapest thing in
+  the request. Lazy stays opt-in, and stays right for cold one-shot renders
+  ([EVALS §6](reference/EVALS.md)).
+- **Sidecar prefix-folding.** Factoring shared prefixes out of the carried
+  strings saves **68 tokens** — not worth a second encoding both engines must
+  agree on byte-for-byte.
+- **Template dedup inside distill.** distill already cuts a real pacman log
+  **70.9%**, above the ceiling a naive template-collapse pass was projected to
+  reach.
+- **In-block frequency for needle detection.** It would add **19–32 false
+  needles per page** on real logs (`DISCONNECTED`, `configuration`,
+  `firmware`) — enough to tip pages to `dense`, which forfeits imaging
+  outright — to chase a shape with **zero instances across 19.5 MB** of real
+  logs ([EVALS §7](reference/EVALS.md)).
 
 ## New in 0.19
 
