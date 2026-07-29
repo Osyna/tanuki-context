@@ -4,7 +4,7 @@
 
 # tanuki-context
 
-**The bulky parts of a conversation — logs, dumps, command output — are what you actually pay for. tanuki-context cuts those input tokens by 79–91%, keeps every byte exactly recoverable, and tells you when plain text is the cheaper call.**
+**The bulky parts of a conversation logs, dumps, command output are what you actually pay for. tanuki-context cuts those input tokens by 79–91%, keeps every byte exactly recoverable, and tells you when plain text is the cheaper call.**
 
 [![npm](https://img.shields.io/npm/v/tanuki-context?style=for-the-badge&logo=npm&logoColor=white&color=cb3837)](https://www.npmjs.com/package/tanuki-context)
 [![CI](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml/badge.svg)](https://github.com/Osyna/tanuki-context/actions/workflows/ci.yml)
