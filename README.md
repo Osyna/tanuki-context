@@ -11,7 +11,7 @@
 [![zero dependencies](https://img.shields.io/badge/dependencies-zero-3DA639?style=for-the-badge)](https://www.npmjs.com/package/tanuki-context?activeTab=dependencies)
 [![license](https://img.shields.io/badge/license-MIT-8ab4f8?style=for-the-badge)](LICENSE)
 
-**[Install](#install) · [What's new](CHANGELOG.md) · [Evals](reference/EVALS.md) · [Manual](docs/manual.md) · [Design notes](DESIGN.md)**
+**[Install](#install) · [Which model?](#which-model-should-you-use) · [What's new](CHANGELOG.md) · [Evals](reference/EVALS.md) · [Manual](docs/manual.md) · [Design notes](DESIGN.md)**
 
 </div>
 
@@ -104,6 +104,89 @@ itself**: pointed at four real corpora it declined to image two — one for
 credentials, one for being past the read-back cliff.
 
 ![a rendered page: dense 5x8-pixel text, 312 columns of system log](https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/example-page.png)
+
+## Which model should you use?
+
+Two separate questions, and conflating them is the usual mistake:
+**can the model read a dense page**, and **what does that page cost on its
+provider**. The second is implemented for three tile rules. The first is only
+knowable by measuring, and we have measured five models.
+
+### Read-back capability — measured, n=8 seeds
+
+Same task, same corpus, text arm vs imaged-pages arm
+([EVALS §3](reference/EVALS.md)):
+
+| model | as text | as pages | verdict |
+| --- | ---: | ---: | --- |
+| `claude-opus-5` | 100% | **100%** | use pages freely |
+| `claude-opus-4-8` | 88% | **88%** | use pages freely |
+| `claude-sonnet-5` | 100% | **88%** | use pages freely |
+| `claude-sonnet-4-5` | 100% | **0%** | **keep it text** |
+| `claude-haiku-4-5` | 100% | **0%** | **keep it text** |
+
+**Page-reading does not track how good the model is.** `claude-sonnet-4-5`
+solves this task 100% of the time as text and **0%** of the time as pages, while
+the older, smaller `claude-opus-4-8` manages 88% on both. There is no ordering
+here you could have guessed from benchmarks or parameter counts — which is
+exactly why the list below asks you to test rather than telling you what to
+expect. Pass `model` to `tanuki_estimate` and it refuses to route a measured
+weak reader to images at all.
+
+### What a page costs, per provider — implemented
+
+The same 200 KB journal, rendered once, counted by each provider's own rule:
+
+| provider | how it counts an image | image tokens | vs Anthropic |
+| --- | --- | ---: | ---: |
+| Anthropic | 28 px patches | 10,528 | — |
+| OpenAI | 512 px high-detail tiles, 85 + 170/tile | 10,880 | +3% |
+| Google Gemini | 768 px tiles, 258/tile | **6,192** | **−41%** |
+| anything else | falls back to the patch grid | 10,528 | approximate — set `TANUKI_RATES` |
+
+Gemini's coarser tiles make the identical page notably cheaper to *send*. That
+is a counting fact, not a comprehension one: it says nothing about whether
+Gemini can read the page, which is the question above.
+
+```sh
+npx tanuki-context estimate your.log 0 --model gpt-5      # OpenAI tile rule
+npx tanuki-context estimate your.log 0 --model gemini-2.5-pro
+```
+
+### Help us measure yours
+
+These are **unmeasured**. We are not going to guess on your behalf — the table
+above is the reason why.
+
+| model | read-back |
+| --- | --- |
+| GPT-5 / GPT-5-mini | unmeasured |
+| Gemini 2.5 Pro / Flash, Gemini 3 | unmeasured |
+| GLM-4.6 / GLM-4.5V | unmeasured |
+| Qwen2.5-VL, Qwen3-VL | unmeasured |
+| DeepSeek-VL, Mistral, Llama vision | unmeasured |
+
+The fixtures are committed, so testing one takes a few minutes and needs no
+harness changes. The question is stored with them, verbatim:
+
+> This service log has exactly one FATAL panic line - the root cause. Reply with
+> ONLY the component name in its `component=` field (the word after
+> `component=`, drop any #id).
+
+1. **Text arm** — send `reference/task/seed-11.log` with that question.
+2. **Image arm** — send `reference/task/seed-11-default/page0.png` plus the
+   `verbatim.txt` beside it, same question.
+3. Both should answer `vclock-merger`. Ground truth for every seed is in
+   `reference/task/answers.json`; repeat across `seed-23` and `seed-37`.
+
+A model that answers the text arm but not the image arm is a weak reader, and
+belongs in the refusal list. `npm run taskqual` automates exactly this, but it
+posts to the Anthropic API today, so other providers need the manual run above —
+or a provider adapter, which is a welcome contribution.
+
+**Please open an issue with what you find**, including the model id and the
+seeds you ran. Measured results go into the table above and into the router's
+refusal list, where they stop other people wasting money.
 
 ## Every feature, measured
 
