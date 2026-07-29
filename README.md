@@ -13,53 +13,92 @@
 
 </div>
 
-AI models charge for every token they read. tanuki-context is a
-content-addressed store for the bulky parts of a conversation — logs, command
-output, long documents. Text goes into a stash under a sha256; the model gets a
-small map and fetches the slices it needs; anything it reads back is checkable
-against the original bytes with no model in the loop. Node >= 18 or a static
-Rust binary, zero dependencies either way.
+AI models charge for every token they read. tanuki-context parks the bulky parts
+of a conversation — logs, command output, long documents — in a
+content-addressed stash, hands the model a small map, and lets it fetch only the
+slices it needs. Anything it reads back is checkable against the original bytes
+with **no model in the loop**. When a slice is genuinely cheaper as pixels, it
+draws it as an image page instead.
 
-Three separable capabilities ship in that box, and they do not carry equal
-risk. Two are unconditional:
+**Node ≥ 18 or a static Rust binary. Zero dependencies either way.**
+
+## Install
+
+Three ways in. All of them work with no config file and nothing to build.
+
+### 1. As an MCP server — the model decides when to use it
+
+```sh
+claude mcp add tanuki-context -- npx -y tanuki-context
+```
+
+Any other MCP client takes the same command:
+
+```json
+{ "command": "npx", "args": ["-y", "tanuki-context"] }
+```
+
+Five tools by default — `render`, `estimate`, `stash`, `fetch`, `verify`. Set
+`TANUKI_ALL_TOOLS=1` for all eight.
+
+### 2. As a proxy — for clients you can't change
+
+Sits on the wire and rewrites oversized blocks in place. Nothing to integrate.
+
+```sh
+npx tanuki-context proxy
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
+```
+
+It touches nothing it shouldn't: **system prompt and tools untouched**, only
+oversized in-place blocks rewritten, the **most recent message always stays
+text**, **secrets never imaged**, and blocks already carrying `cache_control`
+left alone. It prints those rules on startup, marks the imaged prefix cacheable,
+and **forwards your original bytes unchanged if anything goes wrong**.
+
+Useful knobs: `--distill` (drop repeated log noise), `--codebook`,
+`--font tiny`, `--min-chars 4000`, `--recency 1`, `--no-cache`, `--port`,
+`--upstream`.
+
+### 3. Just price a file — no client, no server
+
+```sh
+npx tanuki-context estimate your.log
+```
+
+Renders nothing, costs nothing, and tells you when plain text would be cheaper —
+which, honestly, is most of the time. Add `--model claude-opus-4 --cached` to
+price it against your own model with the prompt cache warm.
+
+## Is it worth it? Read this first
+
+**On a real 200 KB system journal, imaging cuts input tokens 79%** — and that is
+the honest headline only with three caveats attached, all measured:
+
+| | |
+| --- | --- |
+| Pages need a **capable reader** | 2 of 5 tested models score **0%** on a task they solve **100%** as text |
+| Exact strings **never** survive pixels | **0/14** needles byte-exact on every model tested — so they ride a text sidecar instead |
+| The cost case is **capped by caching** | a cached payload bills at **$0.30/Mtok**, so plain inlining wins the median by **3.5×** |
+
+So the honest cost claim is **predictable, not cheaper**: $0.124–$0.225 across
+nine runs, against inlining's $2.94 worst run. And every figure in this README is
+**input-side** — with output measured at **53% of spend**, halving your input
+tokens is at best a ~23% cut to the bill ([EVALS §6](reference/EVALS.md)).
+
+Two capabilities carry no such caveats, and they are the ones worth reaching for
+first:
 
 - **Park, fetch, verify — exact by construction.** stash → fetch → diff over
   19.7 MB of real logs recovers **19,722,893 / 19,722,893 characters
-  byte-identical**; the `verbatim` sidecar carries **100%** of at-risk
-  identifiers on that corpus as text; `tanuki_verify` turns a one-character
-  misread into `corrected` with no model call at all
-  ([EVALS §7](reference/EVALS.md)).
-- **Text reduction — no fidelity risk, no model dependence.** distill,
-  compress, table and codebook cut a real pacman log **70.9%** with the output
-  still text. `estimate` prices this on every call as `recommend.text`, so
-  there is a token answer even when imaging is the wrong one
-  ([EVALS §5](reference/EVALS.md)).
+  byte-identical**. `tanuki_verify` turns a one-character misread into
+  `corrected` with no model call ([EVALS §7](reference/EVALS.md)).
+- **Text reduction — no fidelity risk, no model dependence.** `distill` cuts a
+  real pacman log **45%** and a JSON dump **94%**, output still text
+  ([EVALS §4](reference/EVALS.md)).
 
-One is conditional, and it is the one the tool is named for:
-
-- **Imaging — 79% off input tokens on a real log, inside a measured
-  envelope.** Text costs roughly a token per few characters (real logs
-  tokenise at 1.9-2.9 chars/token, prose near 5.0); an image costs a fixed
-  amount set by its pixel size, no matter how much text is drawn inside it.
-  [pxpipe](https://github.com/teamchong/pxpipe) found how far that gap
-  stretches; tanuki packages it so the model itself decides when to use it,
-  plus a proxy mode for clients you can't change. The envelope, stated: pages
-  need a capable reader (2 of 5 tested models score **0%** on a task they solve
-  100% as text), exact strings never survive them (**0/14** needles byte-exact
-  on every model tested — which is why they ride the sidecar as text), the
-  fidelity-preserving tier is normal font (`tiny` is **0/5** on the task,
-  `distill` **1/5**), and the cost case is capped by prompt caching: a cached
-  payload bills at **$0.30/Mtok**, so plain inlining wins the **median by
-  3.5×**. The honest cost claim is *predictable*, not cheaper —
-  **$0.124–$0.225** across nine runs against inlining's **$2.94** worst run
-  ([EVALS §2-§4, §6](reference/EVALS.md)).
-
-Every figure above is input-side. An output-dominated bill bounds what any
-input-side tool can save at all, whatever it does to the input —
-`tanuki_stats` reports that share.
-
-The strongest evidence the router is well built is that it refuses to sell
-itself: pointed at four real corpora it declined to image two — one for
+The strongest evidence the router is well built is that **it refuses to sell
+itself**: pointed at four real corpora it declined to image two — one for
 credentials, one for being past the read-back cliff.
 
 ![a rendered page: dense 5x8-pixel text, 312 columns of system log](https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/example-page.png)
@@ -136,20 +175,6 @@ only need the gist of, not for a log you will be asked questions about.
 measured read-back curve), and since the estimator was fitted against a real
 tokenizer the band agrees with the outcome — *good* ↔ 100%, *unreliable* ↔ 20%
 ([EVALS §9](reference/EVALS.md)).
-
-## Try it in 30 seconds
-
-```
-claude mcp add tanuki-context -- npx -y tanuki-context
-```
-
-Any MCP client: `{ "command": "npx", "args": ["-y", "tanuki-context"] }`. Or
-price a file with no client at all — `--cached` flips the verdict when the
-text would ride the prompt cache:
-
-```
-npx tanuki-context estimate big.log 0 --model claude-opus-4 --cached
-```
 
 ## When not to reach for it
 
