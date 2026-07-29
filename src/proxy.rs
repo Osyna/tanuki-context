@@ -194,6 +194,18 @@ pub struct TransformResult {
 /// input — the counterfactual-accounting hole the rakuen post names.
 pub struct ProxySession {
     /// sha256 of block texts imaged in EARLIER requests this session.
+    ///
+    /// Ledger-only is a decision, not an oversight. Swapping a block seen in an
+    /// earlier request for a short pointer — the way an in-request repeat is
+    /// swapped — looks like it would avoid re-imaging and re-caching those pages.
+    /// It does the opposite. The same block sits at the same position in every
+    /// later request of the conversation, so a pointer CHANGES THE PREFIX and
+    /// invalidates the cache entry for everything from that block onward: the
+    /// exact prefix the cache_control breakpoint exists to hold stable.
+    /// Cross-request substitution does not avoid cache writes, it causes them.
+    /// In-request dedupe is safe only because the pointer replaces a SECOND
+    /// occurrence while the first still carries the pages. Guarded by the proxy
+    /// test "session never changes the emitted bytes".
     pub seen_blocks: std::collections::HashSet<String>,
     /// a prior response showed cache traffic (cache_read/cache_creation > 0).
     pub caching_seen: bool,
@@ -269,6 +281,8 @@ pub fn transform_request_body(
     // Exact-repeat dedupe: block text -> page count, recorded only when a
     // block is actually imaged in THIS request. A later byte-identical block
     // that reaches the funnel becomes one short marker, no repeated pages.
+    // Deliberately in-request only — see the ProxySession comment for why the
+    // cross-request version is a cache pessimisation, not an optimisation.
     // index of the last message we imaged into; where the cache breakpoint
     // goes. Cell because `funnel` already holds a mutable borrow of the
     // counters, so the loop cannot read them directly.
@@ -849,6 +863,36 @@ mod tests {
         let c = out["messages"][0]["content"].as_array().unwrap();
         assert_eq!(c[0]["text"], expected_marker(&b));
         assert_eq!(out["messages"][1]["content"], "latest");
+    }
+
+    /// The TS test of the same name, mirrored: the session is a ledger, never a
+    /// rewrite. Swapping a block seen in an EARLIER request for a short pointer
+    /// changes the prefix and invalidates the cache entry the cache_control
+    /// breakpoint exists to keep stable, so EVERY sequential call of a warm
+    /// session must emit the same bytes as a session-less call, not just the
+    /// first. Rust had no session coverage at all before this.
+    #[test]
+    fn session_never_changes_emitted_bytes() {
+        let b = big();
+        let body = json!({ "model": "claude-opus-4", "messages": [
+            msg("user", json!(b)),
+            msg("user", json!("latest")),
+        ] })
+        .to_string();
+        let cold = transform_request_body(&body, &cfg(), None).expect("must transform");
+        let mut s = ProxySession::new();
+        s.caching_seen = true;
+        let first = transform_request_body(&body, &cfg(), Some(&mut s)).expect("must transform");
+        let second = transform_request_body(&body, &cfg(), Some(&mut s)).expect("must transform");
+        let third = transform_request_body(&body, &cfg(), Some(&mut s)).expect("must transform");
+        assert_eq!(first.body, cold.body);
+        assert_eq!(second.body, cold.body);
+        assert_eq!(third.body, cold.body);
+        // and the session really was warm, so the equalities above are not
+        // passing on a session that never recorded anything: the block is
+        // remembered and the ledger moved from first-flip to replay pricing.
+        assert_eq!(s.seen_blocks.len(), 1);
+        assert_ne!(second.saved_tokens_cache_aware, first.saved_tokens_cache_aware);
     }
 
     /// The exact dedupe marker for a repeat of `text` first imaged as `pages` pages.

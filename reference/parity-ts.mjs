@@ -3,12 +3,13 @@
 //   node reference/parity-ts.mjs [file...]
 // Env: TANUKI_BIN (rust binary), TANUKI_TS ("bun src/cli.ts" | "node dist/cli.js")
 import { readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
-import { inflateSync } from "node:zlib";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { pixelEqual, pngPixels } from "./lib/png.mjs";
+import { mcpSession } from "./lib/mcp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..");
@@ -45,40 +46,6 @@ const check = (label, ok, detail) => {
 // Both engines emit topRepeats in deterministic first-seen order since the
 // rust HashMap tie-order fix — compare everything exactly, no canonicalizing.
 const deq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-
-// Decode a grayscale filter-0 PNG produced by either encoder -> raw pixel bytes.
-function pngPixels(buf) {
-  let off = 8;
-  const idat = [];
-  let w = 0, h = 0;
-  while (off < buf.length) {
-    const len = buf.readUInt32BE(off);
-    const type = buf.toString("ascii", off + 4, off + 8);
-    if (type === "IHDR") { w = buf.readUInt32BE(off + 8); h = buf.readUInt32BE(off + 12); }
-    if (type === "IDAT") idat.push(buf.subarray(off + 8, off + 8 + len));
-    off += 12 + len;
-  }
-  const raw = inflateSync(Buffer.concat(idat));
-  const px = Buffer.alloc(w * h);
-  for (let y = 0; y < h; y++) {
-    if (raw[y * (w + 1)] !== 0) throw new Error(`non-zero PNG filter at row ${y}`);
-    raw.copy(px, y * w, y * (w + 1) + 1, (y + 1) * (w + 1));
-  }
-  return { w, h, px };
-}
-
-// --- MCP: drive both servers with identical request lines, compare replies.
-function mcpSession(cmd, args, lines, env) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env } });
-    let out = "";
-    p.stdout.on("data", (d) => (out += d));
-    p.on("error", reject);
-    p.on("close", () => resolve(out.trim().split("\n").map((l) => JSON.parse(l))));
-    p.stdin.write(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
-    p.stdin.end();
-  });
-}
 
 const tmp = mkdtempSync(path.join(os.tmpdir(), "tanuki-parity-"));
 const logFile = path.join(tmp, "synthetic.log");
@@ -209,9 +176,7 @@ const secretText = `${Array.from({ length: 40 }, (_, i) =>
     : `2026-07-27 worker-${i % 5} INFO handled request in ${i * 7}ms`,
 ).join("\n")}\n`;
 const secretId = createHash("sha256").update(secretText, "utf8").digest("hex").slice(0, 12);
-const req = [
-  { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
-  { jsonrpc: "2.0", method: "notifications/initialized" },
+const requests = [
   { jsonrpc: "2.0", id: 2, method: "ping" },
   { jsonrpc: "2.0", id: 3, method: "tools/list" },
   { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "tanuki_compress", arguments: { text, level: 2 } } },
@@ -303,13 +268,36 @@ const req = [
   { jsonrpc: "2.0", id: 26, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: secretText } } },
   { jsonrpc: "2.0", id: 27, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "1-40" } } },
   { jsonrpc: "2.0", id: 28, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "1-40", redact: false } } },
+  // 0.19 estimator: it prices character CLASSES, so the classifier boundaries
+  // (word-like vs vowelless vs overlong runs, digits, punctuation) are where the
+  // two engines can silently disagree. `chars/4` had no boundaries to disagree
+  // about; these do. Empty, astral-plane and pure-base64 inputs pin the edges,
+  // and the camelCase case pins the documented 239% pathology (EVALS §9) so it
+  // cannot drift in one engine only.
+  { jsonrpc: "2.0", id: 29, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "", level: 0 } } },
+  { jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "\u00e9\u00fc\u4e2d\u6587 \u2603 mixed \u{1f600} unicode ".repeat(200), level: 0 } } },
+  { jsonrpc: "2.0", id: 31, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 37) % 251)).toString("base64"), level: 0 } } },
+  { jsonrpc: "2.0", id: 32, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "someLongCamelCaseIdentifierNumber42 = anotherCamelCaseValue126;\n".repeat(120), level: 0 } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
-  mcpSession(TS[0], [...TS.slice(1)], req, env),
-  mcpSession(BIN, [], req, env),
+  mcpSession(TS[0], [...TS.slice(1)], requests, { cwd: ROOT, env }),
+  mcpSession(BIN, [], requests, { cwd: ROOT, env }),
 ]);
-check("MCP reply count", tsOut.length === rsOut.length, `${tsOut.length} vs ${rsOut.length}`);
+// A dead engine yields zero replies, and `0 === 0` would sail through a pure
+// equality check while the loop below compares nothing and the file prints ALL
+// PASS. The shared client parses whatever arrives instead of throwing on empty
+// stdout, so demand that every request id was actually answered by both.
+const answered = (out) => requests.every((r) => out.some((m) => m.id === r.id));
+check(
+  "MCP reply count",
+  tsOut.length === rsOut.length && answered(tsOut) && answered(rsOut),
+  `${tsOut.length} vs ${rsOut.length}, ${requests.length} ids requested`,
+);
+// Label each check from the reply id, not the array index: the handshake sends
+// two lines but only `initialize` answers, so index-matching named every check
+// after it one request early. Only the id=1 reply has no entry here.
+const methodById = new Map(requests.map((r) => [r.id, r.method]));
 for (let i = 0; i < Math.min(tsOut.length, rsOut.length); i++) {
   const a = tsOut[i], b = rsOut[i];
   // renders return PNGs, whose compressed bytes differ by zlib encoder; compare
@@ -323,15 +311,13 @@ for (let i = 0; i < Math.min(tsOut.length, rsOut.length); i++) {
         ok = ta[j].type === "text" && ta[j].text === tb[j].text;
         if (!ok) detail = `text block ${j}:\n        ts=${JSON.stringify(ta[j].text)}\n        rs=${JSON.stringify(tb[j].text)}`;
       } else {
-        const pa = pngPixels(Buffer.from(ta[j].data, "base64"));
-        const pb = pngPixels(Buffer.from(tb[j].data, "base64"));
-        ok = pa.w === pb.w && pa.h === pb.h && pa.px.equals(pb.px);
+        ok = pixelEqual(ta[j].data, tb[j].data);
         if (!ok) detail = `image block ${j} mismatch`;
       }
     }
     check("MCP tanuki_render (pixels)", ok, detail);
   } else {
-    check(`MCP id=${b.id ?? "?"} ${req[i]?.method ?? ""}`, deq(a, b),
+    check(`MCP id=${b.id ?? "?"} ${methodById.get(b.id) ?? "initialize"}`, deq(a, b),
       `ts=${JSON.stringify(a).slice(0, 400)}\n        rs=${JSON.stringify(b).slice(0, 400)}`);
   }
 }
