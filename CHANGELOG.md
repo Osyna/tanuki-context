@@ -10,6 +10,11 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.19.4
+
+- **The pitch says what it saves.** The old tagline described the architecture ("a content-addressed store... park bytes, fetch precise slices") which told a reader nothing about why they should care. It now leads with the cost: the bulky parts of a conversation are what you actually pay for, and imaging cuts those input tokens **79-91%**. The npm description and keywords match, since that is what search results render.
+- The honesty is load-bearing and stayed in the sentence rather than being buried: *"tells you when plain text is the cheaper call."* Every figure above the fold — 51,200 raw, 10,752 imaged, 5,264 with noise dropped — is the same figure as the table further down, and the weak-reader caveat, the 0/14 read-back result and the 53% output ceiling all still sit **above** the feature table. A number nobody can check is marketing; these are checkable.
+
 ## 0.19.3
 
 - **A "which model should you use?" section, because the first caveat in this README is "pages need a capable reader" and nothing told you which ones qualify.** Two questions, kept apart: whether a model can *read* a dense page (measured, five models, and the answer does not track how good the model is — `claude-sonnet-4-5` scores 100% as text and **0%** as pages while the older `claude-opus-4-8` manages 88% on both), and what a page *costs* on its provider (implemented for three tile rules: Anthropic 28px patches 10,528 tokens, OpenAI 512px tiles 10,880, Gemini 768px tiles **6,192** — the same page, counted three ways).
