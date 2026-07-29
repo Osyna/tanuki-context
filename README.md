@@ -64,6 +64,50 @@ credentials, one for being past the read-back cliff.
 
 ![a rendered page: dense 5x8-pixel text, 312 columns of system log](https://raw.githubusercontent.com/Osyna/tanuki-context/main/docs/example-page.png)
 
+## Every feature, measured
+
+One sweep, four corpora (real journald log, pacman log, JSON, TypeScript
+source), current engine. `[calc]` means arithmetic at published rates, not an
+end-to-end measurement. Reproduce any row from the linked eval section.
+
+| Feature | Applies to | Tokens saved (measured) | Task / fidelity result | Verdict & comment | Evals |
+| --- | --- | ---: | --- | --- | --- |
+| **— text-side transforms —** | | | | | |
+| `L1` whitespace | any text | **0%** on all 4 corpora | lossless | Safe no-op. Only pays on ragged or indented text. | [§4](reference/EVALS.md) |
+| `L2` prose / `L3` dense | prose | **0–0.1%** | light/medium **loss** | **Not worth enabling.** Irreversible rewording for a tenth of a percent. | [§4](reference/EVALS.md) |
+| `L4` caveman | prose | **0–1%** | heavy **loss** | **Not worth enabling.** Worst trade in the codebase. | [§4](reference/EVALS.md) |
+| `distill` (stage 0) | logs, noisy output | **30%** log · **45%** pacman · **94%** JSON · 16% TS | keeps every error line verbatim | **Best text feature.** The only text tier that pays for itself. | [§4](reference/EVALS.md) |
+| `table` (columnar) | JSON/NDJSON only | **59%** JSON · 0% elsewhere | reversible | Excellent, narrow. Keys stated once. | [§4](reference/EVALS.md) |
+| `codebook` (sigils) | repeated long tokens, paths | image 5,264 → 3,808 (**−28%** off image) | reversible; confusability guard | Free win, no downside measured. | [§4](reference/EVALS.md) |
+| **— imaging —** | | | | | |
+| Imaging, normal font | bulk you will *read* | **85–91%** vs raw text | capable readers match their own text score (88–100%); **2 of 5 models score 0%**; exact strings **0/14** | The headline, and the only **conditional** capability here. | [§2](reference/EVALS.md), [§3](reference/EVALS.md) |
+| `tiny` font (4×6) | bulk you will *never* read | **91–96%** (−40% off image) | **0/5 task**, 3/10 needle recall | Cheapest number on the page; cannot do the job. Lossy-bulk only. | [§3](reference/EVALS.md), [§4](reference/EVALS.md) |
+| `distill` + imaging | navigation index | **88–100%** | **1/5 task** | Locating only, never understanding. | [§4](reference/EVALS.md) |
+| **— exactness & safety —** | | | | | |
+| `verbatim` sidecar | ids, hashes, MACs, base64 | **costs** ~42% of render payload | **100%** of at-risk ids over 19.7 MB; **94.5%** on never-seen shapes | Essential: it is what makes imaging safe at all. | [§7](reference/EVALS.md) |
+| `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
+| `stash` | content beyond the window | n/a — a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation; a capability. | [§7](reference/EVALS.md) |
+| `fetch` + match-count | slice retrieval | n/a | **retrieval precision 66.7%**; bare words reach pixels only | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
+| `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop; covers the sidecar's residual. | [§7](reference/EVALS.md) |
+| Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
+| Redaction on `fetch` | secrets in returned slices | n/a | **2 false positives in 166,985 lines**, both real secrets | Essential — `fetch` returned secrets as text until 0.18. | [§8](reference/EVALS.md) |
+| `dense` refusal | identifier-dense pages | forces text | 2 of 1,393 pages flagged | Correct. Prevents a silently capped sidecar. | [§7](reference/EVALS.md) |
+| Weak-reader gate | haiku-4-5, sonnet-4-5 | forces text | those two: 100% as text, **0% as pages** | Essential — but only fires when the caller passes `model`. | [§3](reference/EVALS.md) |
+| Fidelity band | all imaging | n/a | band now agrees with outcome: good ↔ 100%, unreliable ↔ 20% | Honest since 0.19; previously called `distill` "degraded" while it solved 1/5. | [§9](reference/EVALS.md) |
+| Router | every call | n/a | declined to image **2 of 4** real corpora (credentials; past the cliff) | Best evidence the engineering is sound: it refuses to sell itself. | [§5](reference/EVALS.md) |
+| **— proxy —** | | | | | |
+| In-request dedupe | repeated blocks | repeat → ~283-byte pointer | safe: the first copy still carries pages and sidecar | Keep. | [§6](reference/EVALS.md) |
+| Cross-request reuse | — | — | **rejected**: changes the prefix and invalidates the cache it meant to save; also drops the sidecar | Built, measured, reverted. Guard test mirrored into Rust. | [§6](reference/EVALS.md) |
+| `cache_control` breakpoint | multi-turn conversations | **2.1× / 3.0× / 4.7×** at 3/5/10 turns `[calc]` | byte-stable pages | Biggest cost lever found. Cache *writes* are the whole variance story (5.1×). | [§6](reference/EVALS.md) |
+| Fail-open | any transform throw | n/a | survives malformed, astral-plane and null-byte bodies | Essential: a throw used to kill every in-flight call. | [§6](reference/EVALS.md) |
+| **— accounting —** | | | | | |
+| `textTokens` (class-weighted) | every routing decision | n/a | real content **median 3.3% / worst 16.2%**, vs `chars/4` at 38.3% / 65.6% | Fixed a 3× error in both directions. One documented bound: 239% on pure camelCase blobs. | [§9](reference/EVALS.md) |
+| Output-share reporting | every workload | n/a | **output = 53.3% of spend** | **The ceiling: no input-side tool can cut more than 46.7% of the bill.** Tightens as the tool succeeds. | [§6](reference/EVALS.md) |
+
+**Reading it in three lines.** Unconditional value: `distill` (30–94%), `table` on JSON (59%), and `stash`/`verify` (byte-exact). Conditional value: imaging at the normal font (85–91%), for a measured-capable reader, for comprehension, never for exact strings. Not worth enabling: `L2`/`L3`/`L4`, and `tiny` or `distill`+imaging when the goal is understanding.
+
+Every percentage above is **input-side**. With output measured at 53% of spend, halving input tokens is at best a ~23% cut to the bill.
+
 ## What imaging saves
 
 Measured on a 200 KB slice of a real system journal (identifiers rewritten;
@@ -143,11 +187,17 @@ costs the next reader a week:
 
 ## New in 0.19
 
-- **`chars / 4` was wrong by a factor of three, and it was the denominator of every routing decision.** Measured against Anthropic's own tokenizer (30 samples, free via `count_tokens`): real content runs from **1.14 chars/token** (base64) to **4.97** (prose). `chars/4` was **−72%** on base64, **−53%** on pacman logs, **+24%** on prose. The error never cancelled — image tokens come from exact pixel geometry — so tanuki declined log wins it should have taken *and* imaged prose it should have left alone. `textTokens` now prices character classes by how a BPE treats them; worst residual **19.8%** vs 72%, real logs within **3.5%**. `npm run tokenizer` reproduces it ([EVALS §9](reference/EVALS.md)).
+- **Output is 53% of the bill, so this whole tool is capped at 46.7%.** Every saving tanuki produces is input-side, and nobody had measured the other side. `npm run paired` now records `output_tokens` beside the three input classes and prints the ceiling. Output bills at $15.00/Mtok against $0.30 for a cache read, so **45,914 output tokens outweighed 543,180 input tokens**. Worse for the pitch, the ceiling *tightens as the tool succeeds*: cutting input raises output's share of what remains. n=1, so read it as an order of magnitude — but it bounds every other number in the repo ([EVALS §6](reference/EVALS.md)).
+- **Retrieval failure is now separable from reasoning failure** — `npm run retrieval`, model-free, needs no API key. Scoring three outcomes per (answer, query) pair — carried as **TEXT**, on **PIXELS** only (a miss, since exact read-back is 0/14), or **ABSENT** — gives **66.7% precision**, identical on both engines. All four misses are one cause: the sidecar carries id-, hash- and version-shaped strings, and a bare English word like a unit name never qualifies. So a *dominant-error-unit* failure is retrieval; an id or version failure is reasoning ([EVALS §10](reference/EVALS.md)).
+- **`chars / 4` was wrong by a factor of three, and it was the denominator of every routing decision.** Measured against Anthropic's own tokenizer (free via `count_tokens`): real content runs from **1.14 chars/token** (base64) to **4.97** (prose). `chars/4` was **−72%** on base64, **−53%** on pacman logs, **+24%** on prose. The error never cancelled — image tokens come from exact pixel geometry — so tanuki declined log wins it should have taken *and* imaged prose it should have left alone. `textTokens` now prices character classes by how a BPE treats them. Held out on 37 fresh samples: real content **median 3.3%, worst 16.2%** against 38.3% / 65.6% for the old divisor, with one documented pathology (239% on a blob of pure camelCase). `npm run tokenizer` reproduces it ([EVALS §9](reference/EVALS.md)).
 - **That silently re-calibrated the fidelity band, which had been flattering itself.** Its 8/12/16/20 thresholds come from DeepSeek-OCR's table, defined with a *real* tokenizer, so feeding it `chars/4` made every log ratio ~1.5× too low. Re-running the tier sweep: `distill` used to report **"degraded, ~75-87%"** while actually solving **1 task in 5**; it now reports **"unreliable, <60%"**. Band and outcome finally agree — *good* ↔ 100%, *unreliable* ↔ 20%.
 - **The cost tail has a mechanism now, not a story.** Splitting the three input classes (0.18) shows the inlining arm writes **5.1× more cache** than tanuki (215,673 vs 42,237 tokens) at **12.5× the price of a read**, running a 71% hit rate against tanuki's 92%. The expensive runs aren't "the agent re-read the log" — a warm re-read is nearly free. Inlining a large body keeps invalidating the prefix and paying to rebuild it.
 - **`tiny` is not a densification lever.** It is 1.67× denser, but measured **0/5** on the comprehension task at L0 where the normal font scores 5/5. It stays what the band always said it was: a lossy-bulk tier, not free tokens.
 - **`verbatim: "lazy"` measured, and it stays opt-in.** The sidecar is 42% of a render's tokens, so deferring it looked like the biggest payload cut going. It isn't: measured as its own arm it halves cache writes, lifts the hit rate to 97%, and saves **nothing outside the noise** — because a cached payload bills at $0.30/Mtok, so removing 42% of it removes 42% of the cheapest thing in the request. The lever is keeping the cache warm, not shrinking the payload. Lazy is still right for cold one-shot renders.
+- **A wrong published table, caused by a duplicated number.** `tiers-report` re-derived tokens as `chars/4` with the comment *"same rule as rawTextTokens"*. Once the real estimator landed that comment became false, and the table reported `L1 whitespace` — which is **lossless** — as a 49% saving. `estimate` now reports `stage1Tokens` and the harness uses it. A second implementation of a number is a second answer waiting to disagree.
+- **Cross-request page reuse: built, measured, rejected.** Reusing pages for a block already imaged in an earlier request looks like free savings. It is the opposite: the same block sits at the same position every turn, so a pointer **changes the prefix** and invalidates the cache entry for everything after it — the prefix the breakpoint exists to hold stable. It also drops the `verbatim` sidecar with nothing above to recover it. Guarded now by a test that drives three sequential calls on a warm session, mirrored into Rust, which had *no* session coverage at all.
+- **The eval harnesses stopped duplicating each other.** `reference/lib/{rand,corpus,mcp,png}.mjs`: `lcg` had been copied into six harnesses, the corpora into five, the PNG pixel decoder into two, and ad-hoc MCP clients had omitted parts of the handshake and "passed" while comparing nothing. Net **−164 lines** across seven harnesses, every baseline output byte-identical.
+- **`withTanuki(options, { env })`** passes server environment explicitly, so eval arms stop communicating through ambient `process.env`. The paired harness had been mutating it globally, which is why the full-vs-lazy sidecar comparison had a contamination path that could not be ruled out.
 - **`TANUKI_VERBATIM=lazy|full|off`** sets the sidecar policy once for a deployment instead of per call. An explicit `verbatim` argument always wins — the env is a default, never an override the caller can't escape.
 
 ## New in 0.18
