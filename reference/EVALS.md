@@ -2,25 +2,25 @@
 
 tanuki publishes the **harness, not a percentage.** A savings number nobody
 can re-measure is the exact failure this project exists to avoid (the rakuen
-post *"Token compression tools measure the wrong thing"* — this repo's own
+post *"Token compression tools measure the wrong thing"*: this repo's own
 bar). Every harness is seeded and reproducible.
 
-Below is a real API run on **2026-07-28** across five models — `claude-opus-5`,
+Below is a real API run on **2026-07-28** across five models: `claude-opus-5`,
 `claude-opus-4-8`, `claude-sonnet-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`.
 Where a number does not flatter the tool, it is here anyway.
 
-## TL;DR — what's proven, what's open
+## TL;DR: what's proven, what's open
 
 - **Proven, deterministic:** imaging cuts input tokens **72–94%** on real logs;
   `estimate` prices it and the router picks the right route (§1, §5).
-- **Proven, measured:** dense random strings never survive pixels —
-  **0/14 byte-exact, every one of 5 models** — which is *why* the `verbatim`
+- **Proven, measured:** dense random strings never survive pixels;
+  **0/14 byte-exact, every one of 5 models**, which is *why* the `verbatim`
   sidecar carries them as text and the credential gate refuses to image secrets
   (§2).
-- **Model-dependent:** image *comprehension* needs a capable reader —
+- **Model-dependent:** image *comprehension* needs a capable reader;
   opus-4-8 / opus-5 / sonnet-5 solve the task off pixels as well as off text;
   sonnet-4-5 and haiku-4-5 do not (§3). The fidelity band is calibrated to a
-  capable reader — measure yours.
+  capable reader; measure yours.
 - **Open, not a win yet:** handing the tools to a fully-autonomous agent loop
   thrashes on our harness. Drive tanuki *explicitly* (estimate → render); don't
   dump the tools on the agent and hope (§6).
@@ -30,20 +30,20 @@ Where a number does not flatter the tool, it is here anyway.
 Every result below splits along the same line. tanuki bundles three separable
 capabilities, and they do not carry equal risk.
 
-- **A. Imaging** — characters become pixels. Every bad result in this document
+- **A. Imaging**: characters become pixels. Every bad result in this document
   belongs to A: read-back of dense random strings (§2), the two tested models
   that score 0% on pages (§3), the tiers that break the task (§4), and the
-  capped cost case (§6) — prompt caching prices a stable inlined log at
+  capped cost case (§6): prompt caching prices a stable inlined log at
   **$0.30/Mtok**, so plain inlining wins the median **3.5×**. A is conditional
   on the reader, on the content, and on the tier. §2-§4 and §6 are its
   envelope.
-- **B. Stash / fetch / verify** — park bytes under a hash, retrieve slices,
+- **B. Stash / fetch / verify**: park bytes under a hash, retrieve slices,
   settle exact values. B has not missed a measurement: byte-identity over
   19.7 MB and sidecar coverage on the same corpus (§7), deterministic
   correction of a one-character misread with no model in the loop (§7),
   credential masking on the way out at 2 false positives in 166,985 lines
   (§8). Exact by construction, not statistically.
-- **C. Text reduction** — distill, compress, table, codebook, output stays
+- **C. Text reduction**: distill, compress, table, codebook, output stays
   text. Priced on every `estimate` call as `recommend.text` (§5), on a
   denominator now measured against a real tokenizer instead of `chars / 4`
   (§9). No fidelity risk, no model dependence, nothing to read off a page.
@@ -53,7 +53,7 @@ conditional. B and C hold regardless of which model is reading. And every
 figure in this document is **input-side**: whatever share of a bill is output
 tokens is a ceiling no input-side tool can cross, however well it compresses.
 
-## 1. Pricing — `estimate --model`   *(deterministic, no vision needed)*
+## 1. Pricing: `estimate --model`   *(deterministic, no vision needed)*
 
 `estimate` prices the decision in real dollars via each provider's tile/patch
 rule. Two corpora, two providers:
@@ -68,7 +68,7 @@ rule. Two corpora, two providers:
 node dist/cli.js estimate <log> 0 --model claude-opus-4 [--distill --codebook --font tiny]
 ```
 
-## 2. Read-back fidelity — `npm run needles`   *(measured)*
+## 2. Read-back fidelity: `npm run needles`   *(measured)*
 
 Blind byte-exact transcription of 14 dense random needles per density (uuid,
 semver, hex id, `sha256:`, `path:line:col`, base64, ms timestamp),
@@ -82,18 +82,18 @@ containment-scored:
 | claude-sonnet-4-5 | 0/14 | 0/14 |
 | claude-haiku-4-5 | 0/14 | 0/14 |
 
-**0/14 across every model.** The misses are **value-drift** — confident
+**0/14 across every model.** The misses are **value-drift**: confident
 single-character misreads (`3→1`, `4→a`, `5→8`, `a→3`), delivered as fact, not
 blanks. That is the silent failure the project is built around, and **why the
 `verbatim` sidecar exists**: it ships 10/14 of these needles as text beside the
-pages, so exactness never rides on transcription — but that 10/14 is scored on
+pages, so exactness never rides on transcription, but that 10/14 is scored on
 needle kinds the scanner already knows; **§7 measures what it misses on real
 logs, and the answer is 69%.** (An earlier run scored
-opus-5 at 1/14 — read-back of random strings is near-chance, so treat the floor
+opus-5 at 1/14. Read-back of random strings is near-chance, so treat the floor
 as 0–1/14, not zero-with-certainty.) `claude-fable-5` refuses the task outright
 (`stop_reason: refusal`).
 
-Takeaway: dense random strings — hashes, ids, secrets — must never be trusted
+Takeaway: dense random strings (hashes, ids, secrets) must never be trusted
 to pixels. The credential gate enforces that for secrets; `tanuki_verify` is
 the deterministic backstop for anything you *do* read off a page (`exact` /
 `corrected` / `ambiguous` / `absent`, no model), so a silent miss becomes a
@@ -101,10 +101,10 @@ flagged one.
 
 `score` also splits *glyph-shape* confusions (a bigger font could recover)
 from *value-drift* (it cannot). base64 and ms are deliberately **not** matched
-by the production `scanNeedles` sidecar — a generic base64 pattern would
-false-positive across normal logs — so they ride font fidelity alone.
+by the production `scanNeedles` sidecar; a generic base64 pattern would
+false-positive across normal logs, so they ride font fidelity alone.
 
-## 3. Task comprehension — `npm run taskqual`   *(measured)*
+## 3. Task comprehension: `npm run taskqual`   *(measured)*
 
 The claim that matters: can the model still **do the job** from image pages?
 Find the FATAL root-cause component in a 120-line log, TEXT arm vs IMAGE-pages
@@ -120,15 +120,15 @@ arm, same model, same corpus, **n=8 seeds**
 | claude-haiku-4-5 | 8 | 100% | **0%** | **cannot read pages** |
 
 **Image comprehension tracks model capability, and the split is binary.** The
-three capable readers match their own text score off the pixels — the whole
+three capable readers match their own text score off the pixels; the whole
 thesis, measured: *prose and structure survive imaging.* sonnet-4-5 and
 haiku-4-5 score **100% on the text arm and 0% on the image arm** of the same
-task. Not degraded — zero. They misread the panic line as a nearby word
+task. Not degraded: zero. They misread the panic line as a nearby word
 (`worker`, `LatenciesMs`), confidently, rather than reporting failure.
 
 **This is no longer just a caveat; it is wired into the product.** The
 `fidelity` band maps a density ratio to a DeepSeek-OCR read-back curve that
-assumes a capable reader — so for these two models the band was not optimistic,
+assumes a capable reader, so for these two models the band was not optimistic,
 it was *wrong*: tanuki would answer `fidelity: high, route: image` to a caller
 whose measured task success is 0%. Passing `model` to `tanuki_estimate` now
 floors the band to `unreliable` and routes to text for any measured weak
@@ -137,12 +137,12 @@ reader.
 That table is safe to pin where a model→context-window table would not be: a
 model id names an **immutable snapshot**, so a measurement of one never goes
 stale. The list only ever grows, and an unmeasured model is treated as capable
-— today's behaviour, so nothing regresses for a reader we have not tested. Run
+today's behaviour, so nothing regresses for a reader we have not tested. Run
 the harness on yours before trusting pages for comprehension; the knob that
 recovers a weak reader is **a larger font / lower density**, not a lossier
 tier.
 
-## 4. Lossy tiers: tokens vs task — `npm run tier`   *(measured)*
+## 4. Lossy tiers: tokens vs task: `npm run tier`   *(measured)*
 
 Levels 2–4, `--distill`, `--codebook`, `--font tiny` are **not** byte-lossless.
 Do they keep the *task* solvable? Same root-cause task per tier, on a capable
@@ -161,18 +161,18 @@ reader (`claude-sonnet-5`, **n=5 seeds**):
 The fidelity-preserving cut is **normal font**: L0 and even L4 caveman (which
 telegraphs prose but keeps the FATAL line verbatim and legible) hold at 5/5
 while cutting **76%**. Two knobs break the task on this reader: **tiny font**
-(4×6 is past the legibility cliff — 0/5) and **distill** (reshaping the log into
-a denser page drops it to 1/5, even though the FATAL line survives verbatim —
+(4×6 is past the legibility cliff, 0/5) and **distill** (reshaping the log into
+a denser page drops it to 1/5, even though the FATAL line survives verbatim;
 the model reads the smaller, restructured page worse). A stronger reader
 (opus-class) tolerates distill better; a weaker one, worse. **The sell:** reach
 for L0 or caveman at normal font for a −76% cut with the task intact; reserve
 tiny font and heavy distill for bulk you only need the gist of.
 
-## 5. The router — `estimate.route` / `recommend`   *(deterministic)*
+## 5. The router: `estimate.route` / `recommend`   *(deterministic)*
 
 Since 0.12.0 `estimate` returns a **`route`**: one hybrid pick (image / text /
 raw) that weighs real cost **and** the read-back fidelity band **and** the
-content — not just token count. It images only when imaging clears the clean
+content, not just token count. It images only when imaging clears the clean
 band *and* is the genuine save; it routes to the lossless text side on
 credentials, cached content, or past-the-cliff density. On the 1,200-line log:
 
@@ -184,12 +184,12 @@ route: { pick: "image", fidelity: "high", savedPct: 81,
 The same call also prices a **no-image** route (`recommend.text`): lossless
 whitespace plus a distill sibling, so there is a token answer even when imaging
 is the wrong call. On that log, `recommend.text.withDistill` is **100 tokens**
-(distill-as-text) vs 18,525 raw — the router's answer when you must keep the
+(distill-as-text) vs 18,525 raw; the router's answer when you must keep the
 bytes as text. Every alternative is priced in `recommend` for override. The
 decision is a transparent policy over measured signals, byte-identical across
 the TS and Rust engines (see `reference/parity-ts.mjs`).
 
-## 6. End-to-end: cost per successful task — `npm run paired` / `npm run trace`
+## 6. End-to-end: cost per successful task: `npm run paired` / `npm run trace`
 
 The honest end number is cost per *successful* task, tool-off (log inlined) vs
 tool-on (the log stashed; the agent gets a ~700-token map plus the tanuki tools
@@ -205,7 +205,7 @@ bill:
 | --- | ---: | ---: | ---: | ---: | ---: |
 | off (raw text), n=1 | 10 | 127,708 | 415,462 | 45,914 | **53.3%** |
 
-**Output is 53.3% of modeled spend, so no input-side tool — tanuki included —
+**Output is 53.3% of modeled spend, so no input-side tool (tanuki included)
 can ever cut more than 46.7% of this bill.** Output bills at $15.00/Mtok against
 $0.30 for a cache read: a 50× ratio that makes 45,914 output tokens outweigh
 543,180 input tokens.
@@ -215,11 +215,11 @@ mechanically raises output's share of what remains. An arm whose input tanuki ha
 already shrunk has a higher output share than the raw arm, so the second half of
 any saving is harder-won than the first.
 
-This is **n=1** on the off arm — the budget stopped the run — so treat 53.3% as
+This is **n=1** on the off arm (the budget stopped the run), so treat 53.3% as
 an order of magnitude, not a constant, and expect it to swing with how verbose
 the agent is. It is nonetheless the number that bounds every other table here,
 and it went unmeasured for nine releases. `npm run paired` now reports it per
-arm, and refuses to print a ceiling at all if `output_tokens` comes back zero —
+arm, and refuses to print a ceiling at all if `output_tokens` comes back zero;
 otherwise the most flattering possible conclusion ("input is 100% of the bill")
 would print silently.
 
@@ -227,13 +227,13 @@ would print silently.
 
 If a byte-identical block is imaged in request N, why image it again in request
 N+1? The proxy already collapses an in-request repeat into a short pointer, and
-`ProxySession.seenBlocks` already tracks hashes across requests — it looked like
+`ProxySession.seenBlocks` already tracks hashes across requests, and it looked like
 two lines of plumbing. It was built in both engines, and it is wrong for two
 independent reasons.
 
 **It inverts the goal.** The same block sits at the same position in every later
 request of a conversation. Swapping it for a pointer *changes the prefix*, so the
-cache entry for everything from that block onward is invalidated and rewritten —
+cache entry for everything from that block onward is invalidated and rewritten:
 the exact prefix the `cache_control` breakpoint exists to hold stable. Measured
 by the test that caught it: expected body ~59 KB of pages, emitted ~283 bytes of
 pointer, divergence starting at message 0. Cross-request substitution does not
@@ -241,7 +241,7 @@ avoid cache writes, it causes them. In-request dedupe is safe *only* because the
 pointer replaces a second occurrence while the first still carries the pages.
 
 **It also loses the sidecar.** The pointer replaces the whole emitted block
-group, `verbatim` included. In-request that is harmless — the first occurrence
+group, `verbatim` included. In-request that is harmless; the first occurrence
 still carries the sidecar above it. Across requests the sidecar vanishes with
 nothing above to recover it, so every exact id the scanner extracted is gone: a
 direct regression on §7's coverage, independent of caching.
@@ -250,31 +250,31 @@ So `seenBlocks` stays ledger-only, and both engines now carry a comment saying
 why, because the idea is attractive enough to recur. The guard is the proxy test
 **"session never changes the emitted bytes"**, which now drives three sequential
 calls on a warm session and asserts all three bodies equal the session-less
-body. Rust had *no* session coverage at all before this — every Rust proxy test
-passed `None` — so the same idea could have landed there alone and gone
+body. Rust had *no* session coverage at all before this. Every Rust proxy test
+passed `None`, so the same idea could have landed there alone and gone
 unnoticed; that test is now mirrored.
 
 **This section previously reported that "the fully-autonomous loop is not a win
-— handed the tools, a capable agent thrashes: fetching, imaging, re-fetching."
+handed the tools, a capable agent thrashes: fetching, imaging, re-fetching."
 That diagnosis was wrong.** It was inferred from token counts. Tracing the loop
 call-by-call (`npm run trace`) showed two ordinary bugs, neither of them about
 agent discipline:
 
 1. **`tanuki_fetch` was not in the advertised tool surface.** `tanuki_stash`
-   was, and fetch is the only way to read a stash back — so the model parked
+   was, and fetch is the only way to read a stash back, so the model parked
    text it could never retrieve. The trace is unambiguous: five `ToolSearch`
-   calls, then *"No `tanuki_fetch` tool exists in my toolset — I searched
+   calls, then *"No `tanuki_fetch` tool exists in my toolset. I searched
    exhaustively."* Every "over-fetch" token was a tool hunt.
 2. **The verbatim sidecar shipped *after* the image blocks.** With fetch
-   exposed, the answer was handed to the agent in the sidecar on turn 4 —
-   `L21 42440ce06042` — and it re-queried six more times before finding it.
+   exposed, the answer was handed to the agent in the sidecar on turn 4:
+   `L21 42440ce06042`, and it re-queried six more times before finding it.
    Exact strings trailing a 12 KB PNG are easy to skip past.
 
 Both are fixed in 0.15: fetch joins the default surface, and every emitter
 (`render`, `fetch`, proxy) puts the sidecar **before** the pages.
 
 **The tradeoff that caused bug 1, priced.** The slim surface exists to save
-advertised-schema tokens — a real cost, and one worth measuring rather than
+advertised-schema tokens: a real cost, and one worth measuring rather than
 assuming. Dead-schema accounting ("tool schemas you pay for on every call but
 never invoke") is a first-class check in
 [ctxdiff](https://github.com/salmanzafar949/ctxdiff); measured on our own
@@ -288,7 +288,7 @@ never invoke") is a first-class check in
 
 Hiding three tools saves **200 tokens per request**; `tanuki_fetch` itself
 costs **74**. Hiding it burned **521,000 input tokens in a single failed run**
-— a break-even of roughly 7,000 requests, against a workflow it made
+a break-even of roughly 7,000 requests, against a workflow it made
 impossible. Schema thrift is worth measuring *and* worth losing to a
 capability the documented workflow depends on.
 
@@ -296,7 +296,7 @@ capability the documented workflow depends on.
 A third gap survived those two. `dominant-error-unit` ("which unit logged the
 most ERROR lines") still failed, and tracing showed why: **the agent had no way
 to count.** A query fetch returns a distilled, context-padded slice, so its
-line count is not a match count — and nothing else reported one. Slices cannot
+line count is not a match count, and nothing else reported one. Slices cannot
 count what they do not show. 0.16 makes a query fetch report the raw tally:
 
 ```
@@ -329,18 +329,18 @@ were artifacts. Here is n=9 per arm, `claude-sonnet-5`, both tasks pooled:
 **Inlining is usually cheaper, and occasionally catastrophic.** By median it
 beats tanuki 3.5×: prompt caching makes re-reading an inlined log nearly free,
 which is exactly the cached-content case §5's router already sends to text. But
-its cost distribution has a long right tail — one `dominant-error-unit` run hit
-**$2.94**, a 73× spread within a single task — because nothing bounds how often
+its cost distribution has a long right tail: one `dominant-error-unit` run hit
+**$2.94**, a 73× spread within a single task, because nothing bounds how often
 the agent re-reads.
 
 The tool arm's distribution is flat: **$0.124–$0.225 across nine runs**, a 2×
 spread, because it ships a ~700-token map and a 40-token count instead of the
-log. So the honest claim is not "cheaper" — it is **predictable**, with a worst
+log. So the honest claim is not "cheaper"; it is **predictable**, with a worst
 case 13× better ($0.225 vs $2.94). Whether that trade is worth it depends on
 whether you are optimising the median bill or the tail.
 
 A mean-only reading would have said "tanuki is 2.24× cheaper" ($0.392 vs
-$0.175) and been just as misleading in the other direction — the mean is one
+$0.175) and been just as misleading in the other direction: the mean is one
 $2.94 run.
 
 ### What that median gap is actually made of
@@ -348,8 +348,8 @@ $2.94 run.
 Prompt caching is doing the work on both sides, and the harness could not see
 it: `paired-report` summed `input_tokens`, `cache_read_input_tokens` and
 `cache_creation_input_tokens` into one figure. Those three are priced **$3.00 /
-$0.30 / $3.75 per Mtok** on Sonnet — a 12.5× spread between the cheapest and
-dearest — so one collapsed number cannot distinguish a cheap run from a cached
+$0.30 / $3.75 per Mtok** on Sonnet, a 12.5× spread between the cheapest and
+dearest, so one collapsed number cannot distinguish a cheap run from a cached
 one, and every "why" in this section was unfalsifiable. 0.18 records them
 separately and reports a cache hit rate.
 
@@ -362,7 +362,7 @@ With the split in place, the tail stops being mysterious
 | on (tanuki) | 24 | **42,237** | 498,953 | **92%** | $0.1955 |
 
 Both arms read a similar volume from cache. The difference is entirely in
-**cache writes — the inlining arm creates 5.1× more of them**, at 12.5× the
+**cache writes (the inlining arm creates 5.1× more of them)**, at 12.5× the
 price of a read. That is the $2.94 outlier's mechanism, and it is not "the
 agent re-read the log" as this section previously guessed: a re-read of a
 *warm* prefix is nearly free. It is that inlining a large body keeps
@@ -372,13 +372,13 @@ small and byte-stable, so it stays cached (92%).
 That also explains why the median and the mean disagreed so violently: the
 median run is one where the off arm's cache happened to hold, the tail is one
 where it churned. Compare arms at equal hit rate or the token columns are
-meaningless — which is exactly what summing the three classes hid.
+meaningless, which is exactly what summing the three classes hid.
 
 ### Corollary: shrinking a cached payload buys almost nothing
 
 The `verbatim` sidecar is **42% of a render's tokens** (5,611 of 13,213 on a
-1,200-line service log), so `verbatim: "lazy"` — ship a one-line pointer, defer
-the strings to `tanuki_fetch`/`tanuki_verify` — looked like the largest single
+1,200-line service log), so `verbatim: "lazy"` (ship a one-line pointer, defer
+the strings to `tanuki_fetch`/`tanuki_verify`) looked like the largest single
 payload cut available. Measured as its own arm (`PAIRED_ARMS=on,lazy`,
 `claude-sonnet-5`, budget-capped):
 
@@ -393,7 +393,7 @@ table: once a payload is cached it is billed at **$0.30/Mtok**, so removing
 42% of a *cached* payload removes 42% of the cheapest thing in the request.
 
 **So lazy stays opt-in, not the default.** The measurement says the lever
-worth pulling is keeping the cache warm, not making the payload smaller —
+worth pulling is keeping the cache warm, not making the payload smaller;
 which inverts the intuition the sidecar-size number invites. Both arms also
 failed runs on the verbatim task (the `on` arm 2 of 6), so this is not
 evidence that lazy hurts recall either; it is evidence that at n=5-6 this task
@@ -403,8 +403,8 @@ one-shot renders where nothing is cached yet.
 That reframes the goal. Losing the median to inlining is not a compression
 problem; it is that a re-read of an already-cached log costs almost nothing
 while tanuki paid full price for its pages **every turn**. Imaged pages are the
-ideal thing to cache — large, re-sent verbatim each turn, and byte-stable
-(asserted in the render tests since 0.16.1) — but the proxy priced caching
+ideal thing to cache: large, re-sent verbatim each turn, and byte-stable
+(asserted in the render tests since 0.16.1). But the proxy priced caching
 without ever creating it. 0.18 places one `cache_control` breakpoint on the last
 imaged message:
 
@@ -414,7 +414,7 @@ imaged message:
 | 5 | $0.1129 | $0.0373 | 3.0× |
 | 10 | $0.2259 | $0.0486 | **4.7×** |
 
-This is arithmetic at published rates, not an end-to-end measurement — the
+This is arithmetic at published rates, not an end-to-end measurement; the
 paired run that would confirm it needs a working key and is **not yet done**.
 The breakpoint counts the client's existing ones first and declines at
 Anthropic's ceiling of four, so it cannot break a request that already worked.
@@ -425,9 +425,9 @@ actually traced, and all three causes turned out to be ordinary missing
 capabilities: a tool that was not advertised, a text block in the wrong order,
 and no way to count.
 
-## 7. Sidecar coverage on real logs — `npm run coverage` / `npm run adversarial`
+## 7. Sidecar coverage on real logs: `npm run coverage` / `npm run adversarial`
 
-The needle harness (§2) seeds uuid/semver/hex/digest/path — **the same kinds
+The needle harness (§2) seeds uuid/semver/hex/digest/path, **the same kinds
 the scanner's allowlist already matches.** So its 20/20 measured *that the two
 lists agree*, not how much of a real log is protected. The miss that actually
 hurt was a high-entropy string nobody wrote a regex for, riding as pixels
@@ -456,7 +456,7 @@ the base64 alphabet and the ISO pattern's character class omitted `Z`; and a
 therefore fully readable. The at-risk population changed (5,136 → 4,568) for
 the first reason.
 
-The families the allowlist could not name, ranked by misses before the fix —
+The families the allowlist could not name, ranked by misses before the fix:
 the reader's three guesses (internal id, pod name, base64 chunk) were the top
 three:
 
@@ -466,14 +466,14 @@ three:
 | 617 | MAC address |
 | 158 | base64 blob |
 | 82 | PCI/USB id |
-| 74 | hex run ≥6 (**git short sha** — the allowlist floor was 12) |
+| 74 | hex run ≥6 (**git short sha**, the allowlist floor was 12) |
 
 ### The fix: ask the answerable question
 
-"Is this a known id format?" has an unbounded complement — every id format
+"Is this a known id format?" has an unbounded complement: every id format
 anyone will ever invent. "Is this token *recoverable* if one character flips?"
 has a small, enumerable one. 0.13 inverts the classifier: ship a token unless
-it is provably recoverable, using structure rather than a format list —
+it is provably recoverable, using structure rather than a format list;
 a long alnum run mixing letters and digits, or a long alphabetic run that is
 not a word (words alternate vowels and consonants; random letters pile up).
 Bias is to recall: a false positive costs a few tokens and is never wrong.
@@ -486,7 +486,7 @@ are worthless while the cap discards them.
 **0.13.0 half-fixed this and shipped a worse bug.** Scaling the cap by line
 count (32…512) stopped the truncation but left the cap *bounding its own
 cost*: a needle-dense block therefore stayed cheap while dropping the ids the
-sidecar exists to carry, and the router picked it up as a bargain —
+sidecar exists to carry, and the router picked it up as a bargain;
 
 ```
 720 at-risk ids | sidecar kept 120 | dropped 600 | dense=true
@@ -497,7 +497,7 @@ route: {"pick":"image", "fidelity":"high", "savedPct":65}
 cannot catch this, because the thing that overflowed is the thing that would
 have priced it. 0.13.1 fixes both halves:
 
-- the cap is a **budget, not a count** — the sidecar grows until its text
+- the cap is a **budget, not a count**; the sidecar grows until its text
   would reach half the **raw** characters it protects, the point where imaging
   stops paying. Measured against raw, not the compressed text handed to the
   scanner, or a `codebook`/`tiny` run would be refused precisely for
@@ -510,7 +510,7 @@ truncations) while the genuinely id-dense block is now correctly refused.
 Cost of all this: **~10 extra text tokens per 120-line page**, about 0.5% of
 that page's image cost.
 
-### The check that cannot be a tautology — `npm run adversarial`
+### The check that cannot be a tautology: `npm run adversarial`
 
 Coverage scored against a hand-written risk criterion still compares two lists
 from the same head. So the engine is also tested against **synthetic ids in
@@ -520,14 +520,14 @@ shapes it was never designed around**, injected into real log lines:
 | --- | ---: | ---: |
 | mean catch rate, **26 shapes × 500 draws** | **62.8%** | **94.4%** |
 | pure-alphabetic random (`ryvkuvrdmg`) | **0/500** | 349/500 |
-| KSUID, snowflake, ARN, JWT, dash-less UUID, IPv6, docker id, traceparent | — | **100%** |
-| S3 version id, URL-safe base64, pod-style, ulid, slash-path | — | 93–100% |
+| KSUID, snowflake, ARN, JWT, dash-less UUID, IPv6, docker id, traceparent | – | **100%** |
+| S3 version id, URL-safe base64, pod-style, ulid, slash-path | – | 93–100% |
 
 This is what found the worst bug: a blanket `^[A-Za-z]+$` "words are
 recoverable" rule was waving through **every** random alphabetic id, 0/500.
 **Every named real-world format now scores 93–100%.**
 
-**Residual, stated plainly:** pure-random alphabets still escape — 70–76% on
+**Residual, stated plainly:** pure-random alphabets still escape: 70–76% on
 the three weakest shapes. Structure alone cannot separate `UXASIMOWMOFRUAB`
 (47% vowels, longest consonant run 2) from a word without a dictionary.
 
@@ -535,8 +535,8 @@ Three shape-free oracles were tried and **rejected rather than shipped**.
 Shannon entropy over a token's own characters measures diversity, not
 unpredictability (it flags `ocean-sound-theme` and `DESIGN.md`). Bigram
 surprisal against the corpus scores MACs *low*, because `NN:NN` pairs are
-everywhere. And in-block frequency — "a long alphabetic token appearing once
-is likelier an id than vocabulary" — was measured on the real corpus rather
+everywhere. And in-block frequency ("a long alphabetic token appearing once
+is likelier an id than vocabulary") was measured on the real corpus rather
 than argued about:
 
 | corpus | needles now | frequency rule would ADD |
@@ -546,14 +546,14 @@ than argued about:
 | pacman | 7,703 | +2,776 (25/page) |
 
 The additions are `DISCONNECTED`, `generated`, `configuration`, `firmware`,
-`information` — plain vocabulary. At 19–32 false needles per page the sidecar
+`information`: plain vocabulary. At 19–32 false needles per page the sidecar
 bloats and pages tip to `dense`, which since 0.13.1 means **imaging is refused
 outright**. The rule costs the compression win to chase a shape with *zero
 instances across 19.5 MB of real logs*. Declined, with numbers.
 
 **The residual is not unprotected data, and that is testable.** A random
 alphabetic id that rides as pixels is still covered by `tanuki_verify` against
-the stash — measured on exactly the ids the sidecar misses:
+the stash, measured on exactly the ids the sidecar misses:
 
 | id | in sidecar | verify(exact) | verify(one char flipped) |
 | --- | :---: | --- | --- |
@@ -567,13 +567,13 @@ So the bound is: the sidecar carries 100% of at-risk ids on real logs and
 stash and checkable without a model. That is the honest ceiling, not a promise
 that every conceivable string rides as text.
 
-### What is actually exact — the lossless spine
+### What is actually exact: the lossless spine
 
 Pixel accuracy is not, and will never be, 1-in-10-million; §2 measures 0/14
 across five models. The **stash** is a different guarantee, exact by
 construction rather than statistically: original bytes held under a sha256,
 `tanuki_verify` checking any string against them with no model in the loop.
-Measured end to end on the same corpus — stash, fetch `redact:false`, compare
+Measured end to end on the same corpus: stash, fetch `redact:false`, compare
 (the store is raw bytes either way; the default fetch masks credential-shaped
 values on the way into the context window, so byte-identity is asserted with
 the mask off):
@@ -586,7 +586,7 @@ journal.log   16,998,002 bytes  BYTE-IDENTICAL
 == recovered byte-exact: 19,722,893 / 19,722,893 characters
 ```
 
-**Zero characters dropped in 19.7 million**, and it is not a sampling result —
+**Zero characters dropped in 19.7 million**, and it is not a sampling result.
 the bytes are addressed by hash. So for do-or-die logs the answer is not "trust
 the pixels": treat the image as a navigation index over bytes that stay
 recoverable in full, keep exact strings in the sidecar, and settle anything you
@@ -595,14 +595,14 @@ read off a page with `tanuki_verify`.
 ## 8. Credential redaction: measured false-positive rate   *(measured)*
 
 The credential gate has always refused to *image* a secret. It never stopped
-`tanuki_fetch` from returning one as text — the same secret in the same context
+`tanuki_fetch` from returning one as text: the same secret in the same context
 window by a shorter route. 0.18 masks them on the way out.
 
 Building it exposed that the detector had the **same flaw the sidecar
 classifier had in 0.12**: nine rules, each matching a value by its own *shape*.
 That works only for vendors who prefix their tokens (`AKIA…`, `ghp_…`,
 `sk-ant-…`). An AWS **secret** access key is 40 characters of base64 with no
-marker at all — indistinguishable from a build hash by shape — so
+marker at all (indistinguishable from a build hash by shape), so
 `AWS_SECRET_ACCESS_KEY=wJalr…` walked straight through a feature whose whole
 job was to stop it. An allowlist of known shapes has an unbounded complement.
 
@@ -612,7 +612,7 @@ names a secret, the right side is one regardless of shape.
 
 Name-based rules invite false positives, so the bounds were tuned against the
 same 19.7 MB real-log corpus used for sidecar coverage (journal, dmesg, git
-log, pacman — 166,985 lines). Each bound below is there because it was
+log, pacman: 166,985 lines). Each bound below is there because it was
 *measured*, not guessed:
 
 | rule | why | false positives removed |
@@ -620,9 +620,9 @@ log, pacman — 166,985 lines). Each bound below is there because it was
 | secret word must **end** the key | `systemd-ask-password-console.path: Deactivated` is a status line | 8 |
 | **singular only** (no `tokens`) | `imageTokens: rev.tokens` is source code | 84 |
 | value excludes **backticks** | `` const token = `frame-…` `` is a template literal | 2 |
-| value must not start with `[` | otherwise it re-redacts `[redacted:aws-key]` and double-counts | — |
+| value must not start with `[` | otherwise it re-redacts `[redacted:aws-key]` and double-counts | n/a |
 
-Residual: **2 hits in 166,985 lines (1 in 83,493)** — and both are real
+Residual: **2 hits in 166,985 lines (1 in 83,493)**, and both are real
 secrets, not noise: a test fixture holding an `sk-ant-` key, and
 `"x-api-key": process.env.ANTHROPIC_API_KEY`. Against a set of assignment-shaped
 secrets the shape rules all miss (`AWS_SECRET_ACCESS_KEY=`, `db_password:`,
@@ -630,9 +630,9 @@ secrets the shape rules all miss (`AWS_SECRET_ACCESS_KEY=`, `db_password:`,
 
 Two boundaries stated rather than hidden:
 
-- **The mask is on `fetch`, not on the stash.** The store keeps raw bytes —
+- **The mask is on `fetch`, not on the stash.** The store keeps raw bytes;
   that is what makes the 19,722,893-character byte-identity round-trip
-  assertable at all — and `redact: false` returns them. The threat model is
+  assertable at all, and `redact: false` returns them. The threat model is
   bytes entering a context window, not bytes on your own disk.
 - **`private-key` still matches only the `BEGIN` header**, so a PEM *body*
   ships as text under a redacted header. Widening it needs the same edit in
@@ -642,7 +642,7 @@ Two boundaries stated rather than hidden:
 A parity case pins `password=password`, where an `indexOf`-based splice masks
 the key instead of the value and silently diverges between engines.
 
-## 9. The token estimator — `npm run tokenizer`   *(measured)*
+## 9. The token estimator: `npm run tokenizer`   *(measured)*
 
 `textTokens` in `src/serde.ts` is the denominator of every decision the router
 makes: the imaging gate (`cost > rawTok * ratio`), the minimum saving, the
@@ -651,7 +651,7 @@ and had never been checked against a real tokenizer.
 
 **The error does not cancel.** Image tokens come from pixel geometry
 (`w*h/750`, exact); text tokens came from a guess. Measured against
-Anthropic's own tokenizer (`/v1/messages/count_tokens`, free — this whole
+Anthropic's own tokenizer (`/v1/messages/count_tokens`, free; this whole
 section cost $0), 30 samples:
 
 | content | real chars/token | `chars/4` was |
@@ -670,13 +670,13 @@ section cost $0), 30 samples:
 A **2.8× spread**, and it straddles zero: prose was over-priced, logs
 under-priced. So tanuki declined log wins it should have taken *and* imaged
 prose it should have left alone. One divisor cannot fit that, so `textTokens`
-now prices character classes by how a BPE treats them — letters in a word-like
+now prices character classes by how a BPE treats them: letters in a word-like
 run are nearly free (~6 chars/token), letters in a vowelless or overlong run
 (base64, hex, ids) fragment to well under one, digits and punctuation
 fragment, whitespace mostly merges into the next word. Least squares over the
 30 samples, integer per-mille weights so both engines are bit-identical.
 
-### Held out, not fitted — the honest bound
+### Held out, not fitted: the honest bound
 
 "Worst residual 19.8%" was the *fit* on those 30 samples, which is the number a
 model always flatters itself with. A second, larger and deliberately more
@@ -686,11 +686,11 @@ then scored against the **shipped** weights without refitting:
 
 | | `chars/4` | shipped estimator |
 | --- | ---: | ---: |
-| real content, n=30 — worst | 65.6% | **16.2%** |
-| real content — median | 38.3% | **3.3%** |
-| real logs only, n=18 — worst | — | **11.6%** |
-| real logs — median | — | **2.7%** |
-| synthetic extremes, n=7 — worst | 71.3% | **239%** |
+| real content, n=30 (worst) | 65.6% | **16.2%** |
+| real content (median) | 38.3% | **3.3%** |
+| real logs only, n=18 (worst) | n/a | **11.6%** |
+| real logs (median) | n/a | **2.7%** |
+| synthetic extremes, n=7 (worst) | 71.3% | **239%** |
 
 On the content tanuki actually routes it holds up: **median 3.3%, worst 16.2%**,
 against 38.3% / 65.6% for the old divisor. On real source code specifically
@@ -700,8 +700,8 @@ against 38.3% / 65.6% for the old divisor. On real source code specifically
 long camelCase identifiers (`someLongCamelCaseIdentifierNumber123 = …`). Runs
 over 14 characters are priced as random blobs at ~1.5 tokens/char, but a BPE
 splits camelCase into known subwords, so the estimate is 3.4× too high. Real
-source code never triggers it — punctuation, keywords and digits break the runs
-up — but generated or machine-mangled identifier soup could.
+source code never triggers it: punctuation, keywords and digits break the runs
+up, but generated or machine-mangled identifier soup could.
 
 **The obvious fix was measured and rejected.** Splitting alpha runs at
 lowercase→uppercase boundaries before the word test collapses that case from
@@ -713,7 +713,7 @@ instead. All weights are non-negative by construction; a negative one would
 claim a character class makes text cheaper.
 
 `test/tokens.test.ts` pins the measured counts, keeps the held-out families as
-fixtures, and includes a guard asserting `chars/4` would still fail the suite —
+fixtures, and includes a guard asserting `chars/4` would still fail the suite;
 a bound that stops discriminating is a decorative bound.
 
 ### It also re-calibrated the fidelity band
@@ -739,26 +739,26 @@ nobody had looked for.
 
 Two offline attempts at ground truth were tried first and discarded, which is
 why this waited for a key: assistant `output_tokens` from local session logs
-(thinking bills to output but is not in the logged text — 161 chars against
+(thinking bills to output but is not in the logged text; 161 chars against
 962 tokens), and input-token deltas across turns (Claude Code elides tool
 results, so the reconstruction spans 0.15–20.15 chars/token, i.e. noise).
 
-## 10. Retrieval precision — `npm run retrieval`   *(measured, no model)*
+## 10. Retrieval precision: `npm run retrieval`   *(measured, no model)*
 
 §6 measures whether the agent *answered*, which conflates two failures needing
 opposite fixes: tanuki handed back a slice without the answer, or tanuki handed
 back the answer and the model fumbled it. The last run solved 4 of 6 and we
 could not say which. This harness separates them, deterministically, with **no
-API key and no model** — it asks only whether the ground truth came back as
+API key and no model**; it asks only whether the ground truth came back as
 **readable text**.
 
 Three outcomes per (answer, query-strategy) pair, and the distinction is the
 whole point:
 
-- **TEXT** — the value is in a text block. Recoverable.
-- **PIXELS** — it is in the slice but only on a page. Since read-back of exact
+- **TEXT**: the value is in a text block. Recoverable.
+- **PIXELS**: it is in the slice but only on a page. Since read-back of exact
   strings is measured at **0/14** (§2), this is scored a MISS, not a success.
-- **ABSENT** — not retrievable by that strategy at all.
+- **ABSENT**: not retrievable by that strategy at all.
 
 Measured on `opsCorpus()`, four strategies × three planted answers, **identical
 cell-for-cell on both engines**:
@@ -771,14 +771,14 @@ cell-for-cell on both engines**:
 
 **Retrieval precision 8/12 = 66.7%**, and the 4 misses are one coherent cause:
 the `verbatim` sidecar carries id-, hash-, version- and path-shaped strings.
-**`ingest` is a bare English word**, so no strategy ever carries it as text —
+**`ingest` is a bare English word**, so no strategy ever carries it as text;
 every route puts it on a page only.
 
 That resolves the §6 ambiguity precisely: **a failure on
 `dominant-error-unit` is retrieval; a failure on the id or version tasks is
 reasoning.** Two different bugs that had been averaging into one number.
 
-The aggregate answer is still settleable from text, by a different route — the
+The aggregate answer is still settleable from text, by a different route: the
 `[query matched N of M lines]` marker added in 0.16. Per-unit ERROR counts come
 back `ingest=16, api-gateway=5, worker=5, cache=5, scheduler=4, relay=4`, so the
 marker ranks the answer first by 3.2×, and the harness asserts that ranking. If
@@ -797,7 +797,7 @@ the valid zero control is a **near-miss decoy** set (`egress`, `9.4.1-rc.3`,
 bytes exactly rather than approximately.
 
 Non-vacuity is proven by mutation, not asserted: making the classifier count any
-reply containing images as TEXT — the whole-dump-grep regression — inflates
+reply containing images as TEXT (the whole-dump-grep regression) inflates
 precision to 12/12 and trips two controls. Disabling the sidecar
 (`TANUKI_VERBATIM=off`) drops precision to 0.0% while all four controls still
 pass, which is the correct split: controls check the instrument, the gate checks
@@ -836,7 +836,7 @@ node reference/paired-report.mjs --dry                              # plan only,
 ANTHROPIC_API_KEY=... PAIRED_MODEL=claude-sonnet-5 PAIRED_RUNS=2 node reference/paired-report.mjs
 ```
 
-The 2026-07-28 run above cost ≈ **$7** of API — most of it the paired agent
+The 2026-07-28 run above cost ≈ **$7** of API, most of it the paired agent
 loop, which is exactly why that arm is capped and run last. Thinking models
 need a raised `max_tokens` (the harnesses set it) or they truncate mid-thought.
 Rerun any table with more seeds/models before trusting a single delta; the
