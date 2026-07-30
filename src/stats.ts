@@ -14,8 +14,10 @@ import { join } from "node:path";
 import { Float, asU64, isObj, rnd } from "./serde.ts";
 
 export function eventsPath(): string {
+  // Empty means unset, the same rule TANUKI_STASH uses. Without it,
+  // `TANUKI_EVENTS=` resolved the events path to "" instead of the default.
   const p = process.env.TANUKI_EVENTS;
-  if (p !== undefined) {
+  if (p !== undefined && p !== "") {
     return p;
   }
   const home = process.env.HOME ?? "";

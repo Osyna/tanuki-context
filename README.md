@@ -148,7 +148,7 @@ The same 200 KB journal, rendered once, counted by each provider's own rule:
 | Anthropic | 28 px patches | 10,528 | — |
 | OpenAI | 512 px high-detail tiles, 85 + 170/tile | 10,880 | +3% |
 | Google Gemini | 768 px tiles, 258/tile | **6,192** | **−41%** |
-| anything else | falls back to the patch grid | 10,528 | approximate — set `TANUKI_RATES` |
+| anything else | falls back to the patch grid | 10,528 | approximate — set `TANUKI_RATES` `{"default":{...}}` |
 
 Gemini's coarser tiles make the identical page notably cheaper to *send*. That
 is a counting fact, not a comprehension one: it says nothing about whether

@@ -1,6 +1,6 @@
 {
   "name": "tanuki-context",
-  "version": "0.19.4",
+  "version": "0.19.5",
   "description": "Cut 79-91% of the input tokens your logs and command output cost. MCP server or drop-in proxy: park bytes outside the conversation, fetch exact slices, draw a slice as dense PNG pages when that is cheaper - and it says when plain text is cheaper instead. Zero dependencies.",
   "license": "MIT",
   "type": "module",

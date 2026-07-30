@@ -13,6 +13,11 @@ import process from "node:process";
 import { distillLog } from "./distill.ts";
 import { cmpCodepoints, rustTrim, truncateChars } from "./serde.ts";
 
+/// 2^53-1: the largest integer JS holds exactly. Both engines saturate a line
+/// bound here so an absurd end bound means "to the end" identically, instead
+/// of TS rounding and Rust overflowing into an error.
+const MAX_LINE = 9007199254740991;
+
 function stashDir(): string {
   const env = process.env.TANUKI_STASH;
   if (env !== undefined && env !== "") return env;
@@ -79,10 +84,23 @@ export function fetchSlice(id: string, query: string | null, lines: string | nul
   if (lines !== null) {
     const m = /^(\d+)-(\d+)$/.exec(lines);
     if (m === null) throw new Error("bad lines range");
+    // A bound past the end means "to the end", so saturate instead of failing
+    // - but saturate at the SAME cap in both engines. Rust parses to usize and
+    // errored on overflow while TS let Number() round past 2^53 and returned
+    // the whole stash: one call, two answers, and the byte-parity harness only
+    // ever exercised "3-40" so it saw neither.
+    const bound = (s: string): number => {
+      const n = Number(s);
+      return Number.isSafeInteger(n) ? n : MAX_LINE;
+    };
+    const A = bound(m[1]);
+    const B = bound(m[2]);
+    if (A > B) throw new Error("bad lines range");
     const segments = text.split("\n");
-    const a = Math.max(1, Number(m[1]));
-    const b = Math.min(segments.length, Number(m[2]));
-    if (Number(m[1]) > Number(m[2])) throw new Error("bad lines range");
+    // Clamp BOTH ends into [1, len]. Raising only the low end made "0-0" an
+    // empty string here and the first line in Rust.
+    const a = Math.min(Math.max(1, A), segments.length);
+    const b = Math.min(Math.max(1, B), segments.length);
     return segments.slice(a - 1, b).join("\n");
   }
   return distillLog(text, query, 2).distilled;

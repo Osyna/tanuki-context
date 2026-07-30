@@ -49,8 +49,18 @@ const TINY_CAP =
 /// so nothing regresses for a reader we have not tested.
 const WEAK_READERS: readonly string[] = ["claude-haiku-4-5", "claude-sonnet-4-5"];
 
+/// Matched the way the price table matches (cost.ts `resolveRate`): fold case,
+/// then substring. The two used to disagree - this asked `startsWith` on the
+/// raw string while pricing asked `includes` on a lowercased one - so
+/// `anthropic/claude-haiku-4-5`, the spelling OpenRouter, Bedrock and LiteLLM
+/// use, was PRICED as haiku yet not FLAGGED as a weak reader. The router then
+/// answered `image` for a model measured at 0% read-back (EVALS §3): the exact
+/// failure 0.17 added this gate to prevent, reachable by respelling the id.
+/// One string must not have two vocabularies.
 export function weakReader(model: string | null): boolean {
-  return model !== null && WEAK_READERS.some((m) => model.startsWith(m));
+  if (model === null) return false;
+  const m = model.toLowerCase();
+  return WEAK_READERS.some((w) => m.includes(w));
 }
 
 const WEAK_NOTE =

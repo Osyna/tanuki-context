@@ -125,9 +125,7 @@ function zodShape(z: ZodNamespace, params: Knob[]): Record<string, ZodChain> {
   const shape: Record<string, ZodChain> = {};
   for (const p of params) {
     let c: ZodChain;
-    if (Array.isArray(p.type)) {
-      c = z.union([z.boolean(), z.string()]);
-    } else if (p.type === "boolean") {
+    if (p.type === "boolean") {
       c = z.boolean();
     } else if (p.type === "integer") {
       c = z.number().int();

@@ -152,7 +152,13 @@ export interface Compressed {
 }
 
 export function compressText(text: string, level: number): Compressed {
-  const lvl = Math.min(level, 4);
+  // Clamp defensively at the choke point, matching Rust's `f64 as u8` (which
+  // saturates) followed by `.min(4)`. `Math.min(level, 4)` alone let a
+  // negative through: the proxy's `--level -1` reached tightenProse, which
+  // only tests >=3 and >=4, so it silently applied LOSSY level-2 prose
+  // compression here while Rust applied none. Every caller is now safe
+  // regardless of how it parsed the number.
+  const lvl = Math.min(Math.max(0, Math.trunc(level)), 4);
   if (lvl === 0) {
     return { compressed: text, protectedLines: 0, level: lvl };
   }

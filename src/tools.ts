@@ -6,10 +6,11 @@
 
 export interface Knob {
   key: string;
-  /** `["boolean", "string"]` for a knob that takes either (verbatim). */
-  type: "string" | "boolean" | "integer" | readonly ["boolean", "string"];
+  /** Wire types only. A union (`["boolean","string"]`) is not representable
+   *  on purpose: strict providers reject it — see the VERBATIM note below. */
+  type: "string" | "boolean" | "integer";
   required?: boolean;
-  values?: readonly (string | boolean)[]; // enum, for string knobs
+  values?: readonly string[]; // enum, for string knobs
   min?: number;
   max?: number;
   hint?: string; // per-parameter description
@@ -38,14 +39,21 @@ const LEVEL: Knob = {
 };
 const QUERY: Knob = { key: "query", type: "string", hint: "distill: keep matching lines + context" };
 
-/// Tri-state, so the schema states the third state instead of hiding it in
-/// prose: `true` (default) ships every exact string as text, `false` opts out,
-/// `"lazy"` ships one pointer line naming the count and how to get them back.
+/// Tri-state, spelled as a closed string enum rather than `boolean | string`.
+/// The union shape (`{"type":["boolean","string"],"enum":[true,false,"lazy"]}`)
+/// is invalid JSON Schema for strict providers: Moonshot/Kimi rejects the whole
+/// tools list, so the server did not merely lose the knob, it failed to
+/// register at all (issue #1). Gemini is stricter still - its `type` is a
+/// single scalar enum, so a union is inexpressible there in any mode, not just
+/// a strict one. OpenAI does not validate `parameters` at all unless the
+/// caller sets `strict: true`. Booleans are still ACCEPTED on the way in
+/// (parseVerbatim) so callers passing true/false keep working — the wire
+/// contract is clean without breaking anyone.
 const VERBATIM: Knob = {
   key: "verbatim",
-  type: ["boolean", "string"],
-  values: [true, false, "lazy"],
-  hint: "exact strings (uuids/hashes/hex ids/ips/versions) ride as text next to the pages, never trusted to pixels (default true); \"lazy\" withholds them behind a one-line pointer",
+  type: "string",
+  values: ["full", "lazy", "off"],
+  hint: "exact strings (uuids/hashes/hex ids/ips/versions) ride as text next to the pages, never trusted to pixels: \"full\" (default) ships them, \"lazy\" withholds them behind a one-line pointer, \"off\" opts out",
 };
 
 /** Shared knobs of the two pipeline tools (render/estimate). */
@@ -111,7 +119,11 @@ export const TOOLS: readonly ToolMeta[] = [
     description:
       "Stage 1 alone: graded text compression for content that stays TEXT. level 0 none · 1 whitespace (lossless, safe for code) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths are preserved verbatim.",
     brief: "Stage 1 alone: graded text compression, levels 0-4, code/paths/hashes protected from level 2 up.",
-    params: [TEXT, LEVEL],
+    // tanuki_compress defaults level to 1, not 0 like render/estimate, so it
+    // cannot share LEVEL's hint: the published text said "default 0" while
+    // the code applied whitespace compression. The hint reaches the pi and
+    // Agent-SDK surfaces (the MCP JSON Schema carries no descriptions).
+    params: [TEXT, { ...LEVEL, hint: "ladder level (default 1): 0 raw · 1 whitespace · 2 prose · 3 dense · 4 caveman" }],
   },
   {
     name: "tanuki_stats",

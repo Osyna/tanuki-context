@@ -367,7 +367,8 @@ Two further properties:
   write premium, recouping ~(raw−pages)×0.1 per later turn. Events carry
   `saved_tokens_cache_aware`; `tanuki_stats` reports both bounds and
   `toolFurnitureTokens`, our own schemas counted against ourselves
-  (`TANUKI_TOOL_BRIEF=1` serves registry briefs, −46%). (3) The default
+  (registry briefs are the DEFAULT, −46%; `TANUKI_TOOL_VERBOSE=1` restores the
+full contracts). (3) The default
   imaging gate is UNCHANGED — steady-state still favors smaller cached
   pages, so this is measurement honesty, not a savings retreat. (4) What no
   ledger can claim, `reference/paired-report.mjs` measures: cost per

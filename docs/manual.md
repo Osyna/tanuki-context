@@ -176,7 +176,10 @@ Leave it alone when:
   OpenAI 512-px high-detail tiles (85 + 170 per tile), Gemini 768-px tiles
   (258 per tile, flagged approximate; their usage field is authoritative).
   Text is priced at that provider's cache-read ratio. Dollars stay labeled
-  list prices, overridable via `TANUKI_RATES`.
+  list prices, overridable via `TANUKI_RATES`. The override is keyed by the
+  five family names the resolver matches (`opus`, `sonnet`, `haiku`, `gpt`,
+  `gemini`) plus `default`; a key of your own invention is merged but never
+  matched, so price an unlisted model with `{"default":{...}}`.
 - the bulk is already prompt-cached. Cache reads cost a tenth of fresh
   input, so imaging content that was riding the cache is usually a net
   loss. Pass `cached:true` and the `cost` verdict computes it; it flips to
@@ -425,7 +428,7 @@ Nothing disappears silently.
 | progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
 | output share | the proxy logs `output_tokens`; `tanuki_stats` reports the share | names the part of the bill no input-side tool can cut |
 | cache-aware ledger | replays priced at cache-read rates, first flips charged the write premium | the savings estimate stops pretending every avoided token was full-price |
-| self-furniture line | `tanuki_stats` counts tanuki's own tool schemas | ~1.2k tokens of overhead, reported instead of hidden; `TANUKI_TOOL_BRIEF=1` halves it |
+| self-furniture line | `tanuki_stats` counts tanuki's own tool schemas | ~1.2k tokens of overhead, reported instead of hidden; one-line briefs are the default and halve it, `TANUKI_TOOL_VERBOSE=1` restores the full contracts |
 
 ## Benchmarks
 
@@ -599,7 +602,12 @@ known format). Against ids in shapes it was never designed for it catches
 **92.9%** (`npm run coverage`, `npm run adversarial`; residual is random
 strings that look pronounceable — [EVALS §7](../reference/EVALS.md)).
 The estimate verdict prices the extra text honestly, and
-`--no-verbatim` / `verbatim:false` turns it off. Two rules survive the
+`--no-verbatim` / `verbatim:"off"` turns it off (`"lazy"` withholds them
+behind a one-line pointer instead). The knob is a closed string enum —
+`full` | `lazy` | `off` — because the older `boolean | string` union was
+invalid JSON Schema for strict providers and cost Moonshot/Kimi users the
+whole tools list (issue #1); booleans are still accepted on input.
+Two rules survive the
 fix: secrets should never be imaged at all, and `recommend` prices
 `tiny` but never turns it on for you. For one exact string out of an
 already-stashed log, `tanuki_fetch` with a line range stays the
@@ -798,8 +806,9 @@ cache-write premium (~1.25×), so it books as negative before it pays
 back. `tanuki_stats` reports both bounds (`estInputSavedPct`,
 `estInputSavedPctCacheAware`) plus `toolFurnitureTokens`, the cost of
 tanuki's own tool schemas — counted against ourselves, because they ride
-every request too. `TANUKI_TOOL_BRIEF=1` swaps the MCP descriptions for
-one-line briefs (−46% furniture) once your model knows the workflow. The
+every request too. The MCP descriptions are one-line briefs by default (−46% furniture);
+`TANUKI_TOOL_VERBOSE=1` restores the full contracts if your model needs
+them spelled out. The
 honest number sits between the two bounds, and only
 `reference/paired-report.mjs` pins it.
 
