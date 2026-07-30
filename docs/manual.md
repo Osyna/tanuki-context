@@ -13,7 +13,7 @@
 
 </div>
 
-> **This is the full manual** — the short version is the
+> **This is the full manual**; the short version is the
 > [README](../README.md). Two engines at parity: `main` (this npm package)
 > and the [`rust` branch](../../../tree/rust) single static binary, held
 > byte/pixel-exact by `reference/parity-ts.mjs`. Recency-tiered proxy imaging,
@@ -163,7 +163,7 @@ Leave it alone when:
   (default on) pulls uuids/hashes/ids/ips/versions out as text automatically;
   secrets and edit-targets should still never be imaged.
   Read one off a page anyway? `tanuki_verify` checks it against the stashed
-  original — exact, a corrected near-miss (one substituted or swapped character), or absent — no model.
+  original (exact, a corrected near-miss (one substituted or swapped character), or absent); no model.
 - the content is small. A 500-token snippet is not worth a modality switch
   even when the math technically favors it; `estimate` and the proxy gate
   both say so.
@@ -423,7 +423,7 @@ Nothing disappears silently.
 | proxy dedupe | byte-identical repeats become a one-line pointer | ~1,400 tokens per repeated 30 KB block |
 | append-stable pages | appending text never changes earlier pages | prompt caching keeps pricing them at cache rates |
 | stash + fetch | park text on disk, return a distill map + content-address id | retrieval economics with awareness and imaged slices |
-| verify | `tanuki_verify` checks a transcribed value against the stashed original on disk | a silent misread becomes exact / corrected / absent — no model |
+| verify | `tanuki_verify` checks a transcribed value against the stashed original on disk | a silent misread becomes exact / corrected / absent, no model |
 | `run` wrapper | wrap any command; distilled output inline, full capture stashed | -70% of chars on chatty commands, before tokenization |
 | progress-frame collapse | `\r` spinner frames reduce to what the terminal showed | build/download logs stop paying per frame |
 | output share | the proxy logs `output_tokens`; `tanuki_stats` reports the share | names the part of the bill no input-side tool can cut |
@@ -456,7 +456,7 @@ npx tanuki-context estimate <file> <level> [--distill] [--table] [--no-pack] [--
 
 ### The number we refuse to print
 
-Every table below is input tokens on corpora — honest about its own domain,
+Every table below is input tokens on corpora, honest about its own domain,
 and still the wrong final metric. The number that decides whether a tool
 like this earns its place is **cost per successful task, measured in paired
 runs**: tool on, tool off, same model, same corpus, same success check,
@@ -469,7 +469,7 @@ ANTHROPIC_API_KEY=... node reference/paired-report.mjs
 ```
 
 Four seeded log tasks, two arms (corpus inlined vs stashed + tanuki tools),
-byte-exact success checks — a plausible-wrong-character answer counts as a
+byte-exact success checks; a plausible-wrong-character answer counts as a
 failure, not a saving. Any savings number you see in this README that is
 not from a paired run is counterfactual accounting, and it says so where it
 appears.
@@ -585,7 +585,7 @@ hard, lands 1/14; the misses are confident single-character misreads
 (`8`->`3`, `5`->`9`, `a`->`8`), not blanks, and Fable refuses the task.
 Regenerate with `node reference/needle-report.mjs` and score any model
 (`reference/needle-call.mjs`, or the `score` subcommand); the
-task-comprehension arm (image ≈ text on a capable reader — Opus / newest
+task-comprehension arm (image ≈ text on a capable reader: Opus / newest
 Sonnet name the root cause from pixels, smaller models under-read) is in
 [reference/EVALS.md](../reference/EVALS.md). The fix is
 the `verbatim` sidecar (default on): the same needle kinds are scanned
@@ -593,18 +593,18 @@ out of the exact text the pages carry and shipped as a `·verbatim·` text
 block next to the images - `L<line> <value>`, deduped, capped per block
 (32…512, scaling with the block; overflow sets `dense`, meaning keep the
 content as text). Coverage on the needle corpus is 20/20 **by construction**
-— the harness seeds the kinds the scanner matches, so that number proves the
+(the harness seeds the kinds the scanner matches), so that number proves the
 two lists agree, not that a real log is protected. Measured instead against
 an independent risk criterion on 19.7 MB of real logs, the scanner carries
 **97%** of unrecoverable identifiers (it was 30.9% in 0.12, before the
 classifier was inverted to ask what is *recoverable* rather than what is a
 known format). Against ids in shapes it was never designed for it catches
 **92.9%** (`npm run coverage`, `npm run adversarial`; residual is random
-strings that look pronounceable — [EVALS §7](../reference/EVALS.md)).
+strings that look pronounceable; [EVALS §7](../reference/EVALS.md)).
 The estimate verdict prices the extra text honestly, and
 `--no-verbatim` / `verbatim:"off"` turns it off (`"lazy"` withholds them
-behind a one-line pointer instead). The knob is a closed string enum —
-`full` | `lazy` | `off` — because the older `boolean | string` union was
+behind a one-line pointer instead). The knob is a closed string enum,
+`full` | `lazy` | `off`, because the older `boolean | string` union was
 invalid JSON Schema for strict providers and cost Moonshot/Kimi users the
 whole tools list (issue #1); booleans are still accepted on input.
 Two rules survive the
@@ -730,14 +730,14 @@ compose in one session.
 
 | capability | tanuki | pxpipe | context-mode | rtk |
 | --- | :---: | :---: | :---: | :---: |
-| model reads the whole content | ✓ pages | ✓ pages | — answers only | ✓ trimmed text |
+| model reads the whole content | ✓ pages | ✓ pages | answers only | ✓ trimmed text |
 | error lines guaranteed verbatim | ✓ | ✓ | only if queried, at text price | ✓ |
-| narrow question without paying for the file | ✓ stash + fetch | — | ✓ its home game | — |
-| shape map before spending anything | ✓ 305-token map | — | — | — |
-| big slices below text price | ✓ imaged fetches | — | — | — |
-| cuts command output before tokenization | ✓ `run` wrapper | — | ✓ sandbox exec | ✓ 100+ parsers |
-| verdict in real dollars (cache state, provider) | ✓ `cost` | — | — | — |
-| works without a vision model | — | — | ✓ | ✓ |
+| narrow question without paying for the file | ✓ stash + fetch | (none) | ✓ its home game | (none) |
+| shape map before spending anything | ✓ 305-token map | n/a | n/a | n/a |
+| big slices below text price | ✓ imaged fetches | n/a | n/a | n/a |
+| cuts command output before tokenization | ✓ `run` wrapper | n/a | ✓ sandbox exec | ✓ 100+ parsers |
+| verdict in real dollars (cache state, provider) | ✓ `cost` | n/a | n/a | n/a |
+| works without a vision model | n/a | n/a | ✓ | ✓ |
 | deterministic, no model in the loop | ✓ | ✓ | ✓ | ✓ |
 
 The last two rows matter. Everything in this table is deterministic
@@ -797,15 +797,15 @@ request (agents re-read files constantly), the second byte-identical copy
 becomes a one-line pointer to the pages above. Exact repeats only.
 
 Responses stream through untouched. Savings land in
-`~/.pxpipe/events.jsonl` with the baseline named — what was billed plus
-what the imaged blocks would have cost as text — and a second,
+`~/.pxpipe/events.jsonl` with the baseline named: what was billed plus
+what the imaged blocks would have cost as text, and a second,
 cache-aware figure beside it: once the session shows cache traffic,
 replayed blocks are priced at the provider's cache-read rate (~0.1× on
 Anthropic) and the FIRST text→pages flip of a block is charged the
 cache-write premium (~1.25×), so it books as negative before it pays
 back. `tanuki_stats` reports both bounds (`estInputSavedPct`,
 `estInputSavedPctCacheAware`) plus `toolFurnitureTokens`, the cost of
-tanuki's own tool schemas — counted against ourselves, because they ride
+tanuki's own tool schemas, counted against ourselves, because they ride
 every request too. The MCP descriptions are one-line briefs by default (−46% furniture);
 `TANUKI_TOOL_VERBOSE=1` restores the full contracts if your model needs
 them spelled out. The
@@ -958,7 +958,7 @@ unassigned codepoints.
 | path                   | role                                                                                         |
 | ---------------------- | -------------------------------------------------------------------------------------------- |
 | `src/main.ts`          | MCP stdio server (hand-rolled JSON-RPC) + CLI (entry: `src/cli.ts`)                          |
-| `src/tools.ts`         | the tool registry: names, descriptions, knobs — projected into MCP/pi/SDK schemas           |
+| `src/tools.ts`         | the tool registry: names, descriptions, knobs, projected into MCP/pi/SDK schemas           |
 | `src/serde.ts`         | Rust-parity primitives: serde_json serializer, Unicode counts/trim/cmp                       |
 | `src/agent.ts`         | Claude Agent SDK glue: `withTanuki`, in-process `tanukiSdkServer`                            |
 | `src/pi.ts`            | pi extension: the tanuki tools over a spawned stdio server (`TANUKI_BIN` picks the engine)  |
