@@ -99,14 +99,21 @@ pub fn match_count(id: &str, query: &str) -> Result<(usize, usize), String> {
     Ok((matched, segs.len()))
 }
 
-/// "a-b" -> (a, b); None when unparsable or a > b.
+/// 2^53-1: the largest integer the TS engine holds exactly. Both engines
+/// saturate a line bound here so an absurd end bound means "to the end"
+/// identically, instead of TS rounding past 2^53 and returning the whole
+/// stash while this side overflowed into "bad lines range".
+const MAX_LINE: usize = 9_007_199_254_740_991;
+
+/// "a-b" -> (a, b), each saturated to MAX_LINE; None when unparsable or a > b.
 fn parse_range(s: &str) -> Option<(usize, usize)> {
     let (a, b) = s.split_once('-')?;
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
     if !digits(a) || !digits(b) {
         return None;
     }
-    let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+    let bound = |t: &str| t.parse::<usize>().unwrap_or(MAX_LINE).min(MAX_LINE);
+    let (a, b) = (bound(a), bound(b));
     (a <= b).then_some((a, b))
 }
 

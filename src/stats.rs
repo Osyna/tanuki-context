@@ -13,7 +13,9 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 pub(crate) fn events_path() -> PathBuf {
-    if let Ok(p) = std::env::var("TANUKI_EVENTS") {
+    // Empty means unset, the same rule TANUKI_STASH uses. Without it,
+    // `TANUKI_EVENTS=` resolved the events path to "" instead of the default.
+    if let Some(p) = std::env::var("TANUKI_EVENTS").ok().filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").unwrap_or_default();
