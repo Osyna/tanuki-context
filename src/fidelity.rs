@@ -30,8 +30,19 @@ fn order(l: &str) -> usize {
 /// list only grows; an unmeasured model is treated as capable.
 const WEAK_READERS: [&str; 2] = ["claude-haiku-4-5", "claude-sonnet-4-5"];
 
+/// Matched the way the price table matches (cost.rs `resolve_rate`): fold
+/// case, then substring. The two used to disagree - this asked `starts_with`
+/// on the raw string while pricing asked `contains` on a lowercased one - so
+/// `anthropic/claude-haiku-4-5`, the spelling OpenRouter, Bedrock and LiteLLM
+/// use, was PRICED as haiku yet not FLAGGED as a weak reader. The router then
+/// answered `image` for a model measured at 0% read-back (EVALS §3): the exact
+/// failure 0.17 added this gate to prevent, reachable by respelling the id.
+/// One string must not have two vocabularies.
 pub fn weak_reader(model: Option<&str>) -> bool {
-    model.is_some_and(|m| WEAK_READERS.iter().any(|w| m.starts_with(w)))
+    model.is_some_and(|m| {
+        let m = m.to_lowercase();
+        WEAK_READERS.iter().any(|w| m.contains(w))
+    })
 }
 
 const WEAK_NOTE: &str = "this model is measured at 0% task success on imaged pages while scoring 100% on the same task as text (EVALS \u{a7}3) - it cannot read dense pages; keep this content as text";

@@ -177,7 +177,10 @@ struct PipeArgs<'a> {
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
     PipeArgs {
         text: args["text"].as_str().unwrap_or(""),
-        level: args["level"].as_u64().unwrap_or(0) as u8,
+        // Clamp, do not truncate: `as u8` made level 256 mean NO compression
+        // while 255 meant maximum - non-monotonic, and the schema advertises
+        // maximum 4. Both engines now clamp to the advertised ceiling.
+        level: args["level"].as_u64().unwrap_or(0).min(4) as u8,
         distill: args["distill"].as_bool().unwrap_or(false),
         query: args["query"].as_str(),
         reflow: args["reflow"].as_bool().unwrap_or(true),
@@ -376,7 +379,7 @@ fn tool_render(args: &Value) -> Value {
         if s.dense {
             // Same contract as the credential gate: exactness must never ride
             // on pixels silently.
-            return json!([{ "type": "text", "text": format!("[tanuki-context: refused to render — {} of {} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:false to opt out knowingly]", s.more, s.needles.len() + s.more) }]);
+            return json!([{ "type": "text", "text": format!("[tanuki-context: refused to render — {} of {} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:\"off\" to opt out knowingly]", s.more, s.needles.len() + s.more) }]);
         }
     }
     let img_tok = r.tokens;
@@ -485,7 +488,7 @@ fn tool_distill(args: &Value) -> Value {
 
 fn tool_compress(args: &Value) -> Value {
     let text = args["text"].as_str().unwrap_or("");
-    let level = args["level"].as_u64().unwrap_or(1) as u8;
+    let level = args["level"].as_u64().unwrap_or(1).min(4) as u8; // clamp, never truncate
     let c = ladder::compress_text(text, level);
     let (name, loss, desc) = ladder::LEVELS[c.level as usize];
     let o_tok = text_tokens(&text);
@@ -609,14 +612,25 @@ fn level_schema() -> Value {
     json!({ "type": "integer", "minimum": 0, "maximum": 4 })
 }
 
-/// Tri-state, so the schema states the third state instead of hiding it in
-/// prose: `true` (default) ships every exact string as text, `false` opts out,
-/// `"lazy"` ships one pointer line naming the count and how to get them back.
+/// Tri-state, spelled as a closed string enum rather than `boolean | string`.
+/// The union shape (`{"type":["boolean","string"],"enum":[true,false,"lazy"]}`)
+/// is invalid JSON Schema for strict providers: Moonshot/Kimi rejects the whole
+/// tools list, so the server did not merely lose the knob, it failed to
+/// register at all (issue #1). Gemini is stricter still - its `type` is a
+/// single scalar enum, so a union is inexpressible there in any mode, not just
+/// a strict one. OpenAI does not validate `parameters` at all unless the
+/// caller sets `strict: true`. Booleans are still ACCEPTED on the way in
+/// (Verbatim::parse) so callers passing true/false keep working — the wire
+/// contract is clean without breaking anyone.
 fn verbatim_schema() -> Value {
-    json!({ "type": ["boolean", "string"], "enum": [true, false, "lazy"] })
+    json!({ "type": "string", "enum": ["full", "lazy", "off"] })
 }
 
-fn tools_list() -> Value {
+/// The full advertised set, before any environment filtering. Split out so
+/// the schema tests can assert on ALL eight tools without mutating a global:
+/// the slim default surface hides three of them, and a bad shape in a hidden
+/// tool breaks a provider just as hard the moment TANUKI_ALL_TOOLS=1.
+fn all_tools() -> Value {
     let text_prop = json!({ "type": "string" });
     let mut v = json!({ "tools": [
         {
@@ -642,7 +656,7 @@ fn tools_list() -> Value {
         {
             "name": "tanuki_stats",
             "description": "Summarize the pxpipe measurement log (~/.pxpipe/events.jsonl): requests, compression counts, honest input-token savings (input + cache reads + cache creates), and the output-token share of the bill — the part no input-side tool can cut.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "inputSchema": { "type": "object" }
         },
         {
             "name": "tanuki_stash",
@@ -660,6 +674,11 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "value": { "type": "string" } }, "required": ["id", "value"] }
         }
     ] });
+    v
+}
+
+fn tools_list() -> Value {
+    let mut v = all_tools();
     // Brief one-line descriptions by default (~4x smaller furniture the model
     // pays for on every request); TANUKI_TOOL_VERBOSE=1 restores the full
     // contracts. The slim default surface is applied below too.
@@ -697,9 +716,38 @@ fn tools_list() -> Value {
     v
 }
 
+/// Enforce the `required` list the schema advertises. It was advertised and
+/// never checked, so `tanuki_estimate({})` answered with a confident verdict
+/// for zero bytes and `{"text": 42}` silently became "" - a caller's bug came
+/// back as advice instead of an error, which is how the `verbatim:"off"` class
+/// of bug hurts. The list here is pinned against tools_list() by a test, so
+/// the two copies of the contract cannot drift.
+///
+/// An EMPTY STRING stays legal: it is a real, if pointless, input, and parity
+/// case 29 pins the estimator's behaviour on it. Only absent or wrong-typed
+/// values are refused.
+fn missing_required(name: &str, args: &Value) -> Option<String> {
+    let required: &[&str] = match name {
+        "tanuki_render" | "tanuki_estimate" | "tanuki_distill" | "tanuki_compress"
+        | "tanuki_stash" => &["text"],
+        "tanuki_fetch" => &["id"],
+        "tanuki_verify" => &["id", "value"],
+        _ => &[],
+    };
+    for key in required {
+        if !args[*key].is_string() {
+            return Some(format!("{name}: \"{key}\" is required and must be a string"));
+        }
+    }
+    None
+}
+
 fn tools_call(params: &Value) -> Result<Value, String> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
+    if let Some(err) = missing_required(name, args) {
+        return Err(err);
+    }
     let content = match name {
         "tanuki_render" => tool_render(args),
         "tanuki_estimate" => {
@@ -776,6 +824,61 @@ fn serve() {
 
 // ---------------------------------------------------------------- CLI
 
+/// Flags that consume the NEXT token. A positional scan that does not know
+/// them swallows the value as a positional: `render f.log 2 --verbatim off
+/// out/` read "off" as the output directory and wrote the pages into ./off,
+/// silently ignoring out/. Same for `--font tiny out/` -> ./tiny.
+const VALUE_FLAGS: [&str; 13] = [
+    "--font",
+    "--level",
+    "--lines",
+    "--max-pages",
+    "--min-chars",
+    "--min-save",
+    "--model",
+    "--port",
+    "--query",
+    "--ratio",
+    "--recency",
+    "--upstream",
+    "--verbatim",
+];
+
+/// Positional arguments from `from` on, skipping flags AND their values.
+fn positionals(args: &[String], from: usize) -> Vec<&String> {
+    let mut out = Vec::new();
+    let mut i = from;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            if VALUE_FLAGS.contains(&args[i].as_str()) {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        out.push(&args[i]);
+        i += 1;
+    }
+    out
+}
+
+/// One verbatim vocabulary for every CLI subcommand. `fetch` and `proxy` took
+/// `--verbatim <word>` while `estimate` and `render` understood only the
+/// boolean `--no-verbatim` and SILENTLY IGNORED `--verbatim off` - issue #1's
+/// bug wearing a different hat. Absent flags parse Null so TANUKI_VERBATIM
+/// still supplies the default, exactly as on the MCP path.
+fn cli_verbatim(args: &[String]) -> needles::Verbatim {
+    if let Some(w) = args
+        .iter()
+        .position(|a| a == "--verbatim")
+        .and_then(|i| args.get(i + 1))
+    {
+        return needles::Verbatim::parse(&json!(w));
+    }
+    let fallback = if args.iter().any(|a| a == "--no-verbatim") { json!(false) } else { Value::Null };
+    needles::Verbatim::parse(&fallback)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -790,16 +893,16 @@ fn main() {
                     working = t.text;
                 }
             }
-            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
+            let pos = positionals(&args, 3);
             let d = distill::distill_log(&working, pos.first().map(|s| s.as_str()), 2);
             println!("{}", serde_json::to_string(&d.stats).unwrap());
         }
         Some("estimate") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook] [--model <id>] [--cached]",
+                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
-            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
+            let pos = positionals(&args, 3);
             let level: u64 = pos.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let flag = |n: &str| args.iter().any(|a| a == n);
             let font = args
@@ -820,7 +923,7 @@ fn main() {
                 "font": font,
                 "codebook": flag("--codebook"),
                 "table": flag("--table"),
-                "verbatim": !flag("--no-verbatim"),
+                "verbatim": cli_verbatim(&args).as_str(),
                 "cached": flag("--cached"),
             });
             if let Some(m) = model { req["model"] = json!(m); }
@@ -829,7 +932,7 @@ fn main() {
         }
         Some("render") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook]",
+                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let creds = needles::scan_credentials(&text);
@@ -837,8 +940,11 @@ fn main() {
                 println!("{}", json!({ "refused": true, "credentials": creds }));
                 return;
             }
-            let pos: Vec<&String> = args[3..].iter().filter(|a| !a.starts_with("--")).collect();
-            let level: u8 = pos.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pos = positionals(&args, 3);
+            // Same parse width as `estimate`, whose contract is "the same
+            // arguments as render": u8 here made `estimate f.log 300` report
+            // level 4 while `render f.log 300` produced level-0 pixels.
+            let level: u8 = pos.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0).min(4) as u8;
             let flag = |n: &str| args.iter().any(|a| a == n);
             let pack = !flag("--no-pack");
             let use_cb = flag("--codebook");
@@ -858,13 +964,16 @@ fn main() {
                 args.iter().any(|a| a == "--table"),
             );
             let r = render::render_text(&p.compressed, true, pack, font);
-            let side = if flag("--no-verbatim") { None } else { Some(needles::scan_needles_sized(&p.compressed, text.chars().count())) };
+            let vb = cli_verbatim(&args);
+            let side = if vb == needles::Verbatim::Off { None } else { Some(needles::scan_needles_sized(&p.compressed, text.chars().count())) };
             let tok = r.tokens;
             println!(
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
                         "rawTextTokens": text_tokens(&text),
-                        "verbatimTokens": side.as_ref().map_or(0, |s| s.tokens) })
+                        // Price what would actually ship: `lazy` sends one
+                        // pointer line, not the sidecar.
+                        "verbatimTokens": side.as_ref().map_or(0, |s| if vb == needles::Verbatim::Lazy { text_tokens(&needles::lazy_pointer(s, None)) } else { s.tokens }) })
             );
             if let Some(dir) = pos.get(1).map(|s| s.as_str()) {
                 std::fs::create_dir_all(dir).expect("mkdir");
@@ -1046,9 +1155,12 @@ fn main() {
                 .unwrap_or(d.recency_window as f64);
             proxy::run(proxy::ProxyCfg {
                 port: num("--port", d.port as f64) as u16,
+                // Empty means unset, the same rule TANUKI_STASH uses: `.ok()`
+                // yielded Ok("") so an unset-but-present var won over the
+                // default and was handed on as an upstream URL.
                 upstream: sval("--upstream")
                     .cloned()
-                    .or_else(|| std::env::var("TANUKI_UPSTREAM").ok())
+                    .or_else(|| std::env::var("TANUKI_UPSTREAM").ok().filter(|v| !v.is_empty()))
                     .unwrap_or(d.upstream),
                 level: num("--level", d.level as f64) as u8,
                 distill: flag("--distill"),
@@ -1496,5 +1608,167 @@ mod token_estimator_tests {
     #[test]
     fn word_run_is_cheaper_than_random_run() {
         assert!(text_tokens("consideration") < text_tokens("f3a9c2e17b4d0"));
+    }
+}
+
+/// The advertised tool schema has to satisfy the strictest provider that
+/// validates it, not just the one we develop against.
+///
+/// Issue #1: `verbatim` was emitted as a union,
+/// `{"type":["boolean","string"],"enum":[true,false,"lazy"]}`. Anthropic
+/// accepts it; Moonshot/Kimi rejects the ENTIRE tools list, so the server did
+/// not degrade to a missing knob, it failed to register at all. Gemini is
+/// stricter still: its `type` is a single scalar enum, so a union cannot be
+/// expressed there in any mode. OpenAI only validates `parameters` under
+/// `strict: true`.
+#[cfg(test)]
+mod schema_tests {
+    use super::{all_tools, missing_required, tools_list};
+    use crate::needles::Verbatim;
+    use serde_json::Value;
+    use serde_json::json;
+
+    /// Walk every advertised parameter rather than pinning the one that broke:
+    /// the next union would be just as invisible here as this one was.
+    #[test]
+    fn no_advertised_parameter_is_a_type_union() {
+        let list = all_tools();
+        let mut unions: Vec<String> = Vec::new();
+        let mut params = 0;
+        for t in list["tools"].as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            // A zero-parameter tool omits `properties` entirely (Gemini
+            // rejects an empty one), so absence is valid, not a failure.
+            let Some(props) = t["inputSchema"]["properties"].as_object() else { continue };
+            for (key, spec) in props {
+                params += 1;
+                if spec["type"].is_array() {
+                    unions.push(format!("{name}.{key}"));
+                }
+            }
+        }
+        // Guard the guard: an empty walk would pass this vacuously.
+        assert!(params > 10, "schema walk found almost nothing: {params}");
+        assert_eq!(unions, Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_enum_member_matches_its_declared_type() {
+        for t in all_tools()["tools"].as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            let Some(props) = t["inputSchema"]["properties"].as_object() else { continue };
+            for (key, spec) in props {
+                let Some(values) = spec["enum"].as_array() else { continue };
+                let declared = spec["type"].as_str().unwrap_or("<union>");
+                for v in values {
+                    let actual = match v {
+                        Value::String(_) => "string",
+                        Value::Bool(_) => "boolean",
+                        Value::Number(_) => "integer",
+                        _ => "other",
+                    };
+                    assert_eq!(actual, declared, "{name}.{key} enum member {v}");
+                }
+            }
+        }
+    }
+
+    /// `{"properties":{}}` is fine for Kimi/OpenAI/Mistral/DeepSeek/Anthropic
+    /// and a hard 400 on Gemini ("should be non-empty for OBJECT type") - the
+    /// same whole-request failure as issue #1, on a different provider. Kimi
+    /// and Mistral require the schema field itself to exist, so the shape that
+    /// satisfies everyone is `{"type":"object"}` with no `properties` key.
+    #[test]
+    fn a_no_argument_tool_omits_properties() {
+        let mut zero_param = 0;
+        for t in all_tools()["tools"].as_array().unwrap() {
+            let schema = &t["inputSchema"];
+            assert_eq!(schema["type"], "object", "{}", t["name"]);
+            let empty = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .is_none_or(serde_json::Map::is_empty);
+            if !empty {
+                continue;
+            }
+            zero_param += 1;
+            assert!(schema.get("properties").is_none(), "{} sends empty properties", t["name"]);
+            // Kimi: `required` present while `properties` is absent is an error.
+            assert!(schema.get("required").is_none(), "{} sends required without properties", t["name"]);
+        }
+        assert!(zero_param > 0, "no zero-parameter tool advertised - the check would be vacuous");
+    }
+
+    /// The required list in `missing_required` is a SECOND copy of what
+    /// `tools_list` advertises. Two copies of a contract are two answers
+    /// waiting to disagree - issue #1 shipped because nothing compared the
+    /// advertised shape to anything. Pin them together.
+    #[test]
+    fn enforced_required_matches_advertised_required() {
+        let mut checked = 0;
+        for t in all_tools()["tools"].as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            let advertised: Vec<&str> = t["inputSchema"]["required"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            for key in &advertised {
+                // Absent -> refused, naming that key.
+                let err = missing_required(name, &json!({}))
+                    .unwrap_or_else(|| panic!("{name} advertises required {key} but accepts {{}}"));
+                assert!(err.contains(name), "error should name the tool: {err}");
+                checked += 1;
+            }
+            // Everything advertised as required is present -> accepted.
+            let mut full = serde_json::Map::new();
+            for key in &advertised {
+                full.insert((*key).to_string(), json!("x"));
+            }
+            assert_eq!(missing_required(name, &Value::Object(full)), None, "{name}");
+        }
+        assert!(checked >= 6, "expected several required params, saw {checked}"); // slim surface: 5 tools, 6 required
+    }
+
+    /// render, estimate and fetch all take it; a per-tool copy could drift.
+    #[test]
+    fn every_tool_carrying_verbatim_advertises_the_same_closed_enum() {
+        let want = serde_json::json!({ "type": "string", "enum": ["full", "lazy", "off"] });
+        let mut seen = 0;
+        for t in all_tools()["tools"].as_array().unwrap() {
+            let props = &t["inputSchema"]["properties"];
+            if props.get("verbatim").is_none() {
+                continue;
+            }
+            seen += 1;
+            assert_eq!(props["verbatim"], want, "{}", t["name"]);
+        }
+        assert_eq!(seen, 3, "expected render/estimate/fetch to carry verbatim");
+    }
+
+    /// "off" is the value this fix ADDED to the advertised contract, and the
+    /// old parser mapped it to Full - it only understood the boolean `false`.
+    /// An enum member that silently means its own opposite is worse than the
+    /// registration failure, because nothing errors.
+    #[test]
+    fn advertised_verbatim_values_do_what_the_enum_says() {
+        for (given, want) in [
+            ("full", Verbatim::Full),
+            ("lazy", Verbatim::Lazy),
+            ("off", Verbatim::Off),
+            ("OFF", Verbatim::Off),
+            ("Lazy", Verbatim::Lazy),
+            ("banana", Verbatim::Full),
+        ] {
+            assert_eq!(Verbatim::parse(&serde_json::json!(given)), want, "verbatim={given}");
+        }
+    }
+
+    /// Booleans are no longer advertised but must still be accepted: existing
+    /// callers wrote them against the old union, and the CLI passes them.
+    #[test]
+    fn legacy_boolean_callers_still_work() {
+        assert_eq!(Verbatim::parse(&serde_json::json!(true)), Verbatim::Full);
+        assert_eq!(Verbatim::parse(&serde_json::json!(false)), Verbatim::Off);
+        assert_eq!(Verbatim::parse(&serde_json::json!(7)), Verbatim::Full);
     }
 }

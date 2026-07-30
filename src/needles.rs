@@ -37,9 +37,23 @@ pub enum Verbatim {
 }
 
 impl Verbatim {
-    /// `false` opts out, `"lazy"` withholds, anything else (absent included)
-    /// is the full sidecar.
-    ///
+    /// One fold from word to policy, shared by the argument and the
+    /// environment default. They used to carry separate matches and
+    /// disagreed: the env understood "off"/"false", the argument understood
+    /// only the boolean `false`, so a caller passing the string `"off"`
+    /// silently got the FULL sidecar. That was unreachable while the schema
+    /// advertised booleans; issue #1 made "off" a documented enum value,
+    /// which turns a dormant mismatch into a live one.
+    fn word(s: &str) -> Verbatim {
+        if s.eq_ignore_ascii_case("lazy") {
+            Verbatim::Lazy
+        } else if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("false") {
+            Verbatim::Off
+        } else {
+            Verbatim::Full
+        }
+    }
+
     /// `TANUKI_VERBATIM` sets the default for callers that do not pass
     /// `verbatim`, so an operator can set the sidecar policy once for a
     /// deployment instead of per call. An explicit argument always wins.
@@ -47,12 +61,16 @@ impl Verbatim {
     /// for anyone who does not set it.
     fn from_env() -> Verbatim {
         match std::env::var("TANUKI_VERBATIM") {
-            Ok(e) if e.eq_ignore_ascii_case("lazy") => Verbatim::Lazy,
-            Ok(e) if e.eq_ignore_ascii_case("off") || e.eq_ignore_ascii_case("false") => Verbatim::Off,
-            _ => Verbatim::Full,
+            Ok(e) => Verbatim::word(&e),
+            Err(_) => Verbatim::Full,
         }
     }
 
+    /// Booleans are accepted although the schema no longer advertises them:
+    /// the wire contract is a closed string enum (issue #1), but callers
+    /// written against the old union, and the CLI's own --no-verbatim flag,
+    /// still pass true/false. Dropping them from the schema must not drop
+    /// them from the door.
     pub fn parse(v: &Value) -> Verbatim {
         match v {
             // Only an ABSENT argument consults the environment. An explicit
@@ -60,9 +78,20 @@ impl Verbatim {
             // TANUKI_VERBATIM=lazy, or the env stops being a default and
             // becomes an override the caller cannot escape.
             Value::Null => Verbatim::from_env(),
+            Value::Bool(true) => Verbatim::Full,
             Value::Bool(false) => Verbatim::Off,
-            Value::String(s) if s.eq_ignore_ascii_case("lazy") => Verbatim::Lazy,
+            Value::String(s) => Verbatim::word(s),
             _ => Verbatim::Full,
+        }
+    }
+
+    /// The advertised wire word, so the CLI can hand the tool layer the same
+    /// closed enum an MCP caller would send.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verbatim::Full => "full",
+            Verbatim::Lazy => "lazy",
+            Verbatim::Off => "off",
         }
     }
 }

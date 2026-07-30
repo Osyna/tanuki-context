@@ -10,6 +10,46 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.19.5
+
+### Fixed: the tool list failed to register on Moonshot/Kimi ([#1](https://github.com/Osyna/tanuki-context/issues/1), reported by @cousined1)
+
+- `verbatim` was advertised as a type union, `{"type":["boolean","string"],"enum":[true,false,"lazy"]}`. Anthropic accepts it; Kimi rejects the **entire** tools list, so the server did not lose one knob, it became unusable with that provider. It is now a closed string enum, `full | lazy | off`. Booleans are still accepted **on input**, so callers written against the old union and the CLI's own `--no-verbatim` keep working.
+- **Found while fixing it: `verbatim:"off"` did the opposite of what it said.** The parser only understood the boolean `false`; the *string* `"off"` fell through to the default and shipped the **full** sidecar. Harmless while the schema advertised booleans, live the moment `off` became a documented value - so `--verbatim off` on the CLI had never worked. The argument and `TANUKI_VERBATIM` now share one fold, because they had drifted.
+- The union shape is now **unrepresentable** in the TS registry rather than merely unused, and both engines grew tests that walk *every* advertised parameter. Nothing in our own stack complains about a union, which is why it shipped.
+
+### Then we went looking for the same two bug classes everywhere, and found nine more
+
+Class A is a wire shape a strict provider rejects. Class B is an advertised value whose behaviour does not match what it says. Every fix below landed in both engines; each was reproduced first and re-measured after.
+
+- **The weak-reader safety gate could be bypassed by respelling the model id.** `weakReader` matched case-sensitively by prefix while the price table matched case-insensitively by substring - one string, two vocabularies. `anthropic/claude-haiku-4-5` (how OpenRouter, Bedrock and LiteLLM spell it) was **priced** as haiku yet not **flagged** as weak, so the router answered `image` for a reader measured at 0% read-back. That is the exact failure the 0.17 gate exists to prevent, reachable by typing the same model a different way. Both engines agreed, so the parity harness could never have caught it.
+- **`tanuki_stats` advertised `{"properties":{}}`, which Gemini hard-rejects** ("should be non-empty for OBJECT type") - the same whole-request failure as #1, on a different provider. A no-argument tool now emits `{"type":"object"}`, the one shape valid for all six providers: Kimi and Mistral require the schema field to exist, Gemini requires `properties` not to be empty.
+- **The CLI wrote pages into the wrong directory.** `render f.log 2 --verbatim off out/` created `./off` and ignored `out/`, because the positional scan dropped tokens starting with `--` but not their values. Same for `--font tiny out/` -> `./tiny`.
+- **`--verbatim <word>` was silently ignored by CLI `estimate` and `render`** while `fetch` and `proxy` accepted it - issue #1's bug wearing a different hat, on two more subcommands.
+- **`level` 256 meant NO compression while 255 meant maximum.** `% 256` mirrored Rust's `as u8`; both now clamp to the advertised ceiling of 4.
+- **`lines` diverged between engines in two ways** the harness could not see, because it only ever exercised `"3-40"`: `0-0` returned an empty string here and the first line there; an end bound past 2^53 returned the whole stash here and an error there. Both now saturate at a shared cap and clamp both ends.
+- **`required` was advertised and never enforced.** `tanuki_estimate({})` answered with a confident verdict for zero bytes, and `{"text": 42}` silently became `""` - a caller's bug came back as advice. Empty string stays legal; only absent or wrong-typed values are refused.
+- **The proxy's numbers parsed differently in each engine.** JS `Number()` accepts `""`, `" 3 "` and `"0x1F"`; Rust rejects all three. `TANUKI_RECENCY=" 3 "` - one stray space from a `.env` - kept three messages as text here and one there. TS now uses Rust's stricter rule.
+- **An env var set to the empty string now means unset, everywhere.** `TANUKI_STASH` already worked that way; `TANUKI_EVENTS=` resolved the events path to `""` and `TANUKI_UPSTREAM=` was accepted as an upstream URL. `docker run -e TANUKI_UPSTREAM` is enough to hit it.
+
+### Documentation that described things the code does not do
+
+- `TANUKI_TOOL_BRIEF` was documented three times and **exists in neither engine**; the real knob is `TANUKI_TOOL_VERBOSE=1`, and the polarity was inverted (briefs are the default).
+- `tanuki_compress` defaults `level` to 1, not 0 as its published hint claimed.
+- `TANUKI_RATES` only matches the five family names plus `default`; a key of your own invention was merged and never consulted. Documented, with `{"default":{...}}` named as the way to price an unlisted model.
+- Two claims **we** wrote in the #1 fix were checked against primary sources and were wrong: Gemini rejects type unions in `parameters` *always* (its `type` is a scalar enum), not only in a strict mode, and the "OpenAI deprecates type arrays" claim had no primary source and is gone.
+
+### Deliberately not changed
+
+- **`additionalProperties` stays absent.** OpenAI-strict and DeepSeek-strict require `false` on every object; Gemini's `parameters` rejects the key outright. Irreconcilable in one payload, and we never set `strict`, so the caller that wants it should add it.
+- **`TANUKI_RATES` custom keys stay unmatched.** Supporting them means changing `resolve_rate`'s `&'static str` return across both engines for a case `{"default":{...}}` already covers.
+
+
+- **Fixed: the tool list failed to register on Moonshot/Kimi** ([#1](https://github.com/Osyna/tanuki-context/issues/1), reported by @cousined1). `verbatim` was advertised as a type union, `{"type":["boolean","string"],"enum":[true,false,"lazy"]}`. Anthropic accepts it; Kimi rejects the **entire** tools list, so the server did not lose one knob, it became unusable with that provider. Gemini strict rejects mixed unions too; OpenAI deprecates them. It is now a closed string enum, `full | lazy | off`, which every major provider accepts. Booleans are still accepted **on input**, so callers written against the old union and the CLI's own `--no-verbatim` keep working.
+- **Found while fixing it: `verbatim:"off"` did the opposite of what it said.** The parser only understood the boolean `false`; the *string* `"off"` fell through to the default and shipped the **full** sidecar. Harmless while the schema advertised booleans, live the moment `off` became a documented enum value — so `--verbatim off` on the CLI had never worked either. The argument and `TANUKI_VERBATIM` now share one fold, because they had drifted: the env understood `off`/`false`, the argument did not.
+- The union shape is now **unrepresentable** in the registry rather than merely unused: `Knob.type` no longer admits an array, so the next union is a type error instead of a silent provider outage. Both engines grew a test that walks *every* advertised parameter, not just this one — nothing in our own stack complains about a union, which is why it shipped.
+- Verified: 6 TS and 3 Rust tests fail against the 0.19.4 code and pass after; all 7 argument forms (`absent`, `"full"`, `"lazy"`, `"off"`, `"OFF"`, `true`, `false`) produce byte-identical results on both engines over MCP and the CLI.
+
 ## 0.19.4
 
 - **The pitch says what it saves.** The old tagline described the architecture ("a content-addressed store... park bytes, fetch precise slices") which told a reader nothing about why they should care. It now leads with the cost: the bulky parts of a conversation are what you actually pay for, and imaging cuts those input tokens **79-91%**. The npm description and keywords match, since that is what search results render.

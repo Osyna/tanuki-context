@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "tanuki-context"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "base64",
  "miniz_oxide",
