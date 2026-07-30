@@ -105,9 +105,7 @@ function tbShape(params: Knob[]): TSchema {
     const opts: Record<string, unknown> = {};
     if (p.hint !== undefined) opts.description = p.hint;
     let t: TSchema;
-    if (Array.isArray(p.type)) {
-      t = Type.Union([Type.Boolean(), Type.String()], opts);
-    } else if (p.type === "boolean") {
+    if (p.type === "boolean") {
       t = Type.Boolean(opts);
     } else if (p.type === "integer") {
       if (p.min !== undefined) opts.minimum = p.min;

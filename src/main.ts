@@ -22,9 +22,9 @@ import { estimateText, parseFont, renderText, type Page, type Rendered } from ".
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
 import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
-import { TOOLS, visibleTools } from "./tools.ts";
+import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.19.4";
+export const VERSION = "0.19.5";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -106,7 +106,10 @@ interface PipeArgs {
 function pipeArgs(args: unknown): PipeArgs {
   return {
     text: asStr(jget(args, "text")) ?? "",
-    level: (asU64(jget(args, "level")) ?? 0) % 256, // `as u8` wraps
+    // Clamp, do not wrap: `% 256` mirrored Rust's `as u8`, so level 256 meant
+    // NO compression while 255 meant maximum - non-monotonic, and the schema
+    // advertises maximum 4. Both engines now clamp to the advertised ceiling.
+    level: Math.min(asU64(jget(args, "level")) ?? 0, 4),
     distill: asBool(jget(args, "distill")) ?? false,
     query: asStr(jget(args, "query")),
     reflow: asBool(jget(args, "reflow")) ?? true,
@@ -321,7 +324,7 @@ export function toolRender(args: unknown): unknown[] {
     return [
       {
         type: "text",
-        text: `[tanuki-context: refused to render — ${side.more} of ${side.needles.length + side.more} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:false to opt out knowingly]`,
+        text: `[tanuki-context: refused to render — ${side.more} of ${side.needles.length + side.more} exact strings do not fit the verbatim sidecar and would ride as unverifiable pixels; keep this block as text, split it smaller, or pass verbatim:"off" to opt out knowingly]`,
       },
     ];
   }
@@ -416,7 +419,7 @@ export function toolDistill(args: unknown): unknown[] {
 
 export function toolCompress(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
-  const level = (asU64(jget(args, "level")) ?? 1) % 256; // `as u8` wraps
+  const level = Math.min(asU64(jget(args, "level")) ?? 1, 4); // clamp, never wrap
   const c = compressText(text, level);
   const [name, loss, desc] = LEVELS[c.level];
   const origChars = charCount(text);
@@ -534,13 +537,18 @@ export function toolVerify(args: unknown): unknown[] {
 /// MCP tools/list, projected from the registry. The JSON schema layout is
 /// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
 /// of it (the pi/SDK projections carry them).
-function toolsList(): Record<string, unknown> {
+/// `tools` defaults to the slim advertised surface. The schema tests pass the
+/// FULL registry instead: the default surface hides three tools, and a bad
+/// shape in a hidden one breaks a provider just as hard the moment
+/// TANUKI_ALL_TOOLS=1. Taking it as an argument beats having the test mutate a
+/// global that other tests in the same file read.
+export function toolsList(tools: readonly ToolMeta[] = visibleTools()): Record<string, unknown> {
   // Brief one-line descriptions by default (~4x smaller furniture the model
   // pays for on every request); TANUKI_TOOL_VERBOSE=1 restores the full
   // contracts. The slim default surface (visibleTools) is applied here too.
   const verbose = process.env.TANUKI_TOOL_VERBOSE === "1";
   return {
-    tools: visibleTools().map((t) => {
+    tools: tools.map((t) => {
       const properties: Record<string, unknown> = {};
       const required: string[] = [];
       for (const p of t.params) {
@@ -551,11 +559,40 @@ function toolsList(): Record<string, unknown> {
         properties[p.key] = s;
         if (p.required === true) required.push(p.key);
       }
-      const inputSchema: Record<string, unknown> = { type: "object", properties };
+      const inputSchema: Record<string, unknown> = { type: "object" };
+      // Omit `properties` entirely for a no-argument tool. `{"properties":{}}`
+      // is accepted by Kimi, OpenAI, Mistral, DeepSeek and Anthropic and
+      // REJECTED by Gemini ("parameters.properties: should be non-empty for
+      // OBJECT type"), which fails the WHOLE request exactly the way issue #1
+      // did. `{"type":"object"}` satisfies all six, and is a legal MCP
+      // inputSchema - the spec mandates only `type`. Kimi and Mistral require
+      // the field itself to exist, so dropping the schema is not an option.
+      if (Object.keys(properties).length > 0) inputSchema.properties = properties;
       if (required.length > 0) inputSchema.required = required;
       return { name: t.name, description: verbose ? t.description : t.brief, inputSchema };
     }),
   };
+}
+
+/// Enforce the `required` list the schema advertises. It was advertised and
+/// never checked, so `tanuki_estimate({})` answered with a confident verdict
+/// for zero bytes and `{"text": 42}` silently became "" - a caller's bug came
+/// back as advice instead of an error, which is how the `verbatim:"off"` class
+/// of bug hurts. `tanuki_fetch`/`tanuki_verify` already refused their missing
+/// arguments; the five text tools were the outliers.
+///
+/// An EMPTY STRING stays legal: it is a real, if pointless, input, and parity
+/// case 29 pins the estimator's behaviour on it. Only absent or wrong-typed
+/// values are refused.
+function missingRequired(name: string, args: unknown): string | null {
+  const meta = TOOLS.find((t) => t.name === name);
+  if (meta === undefined) return null;
+  for (const p of meta.params) {
+    if (p.required !== true) continue;
+    const v = jget(args, p.key);
+    if (p.type === "string" && asStr(v) === null) return `${name}: "${p.key}" is required and must be a string`;
+  }
+  return null;
 }
 
 function toolsCall(
@@ -563,6 +600,8 @@ function toolsCall(
 ): { ok: true; value: unknown } | { ok: false; error: string } {
   const name = asStr(jget(params, "name")) ?? "";
   const args = jget(params, "arguments");
+  const missing = missingRequired(name, args);
+  if (missing !== null) return { ok: false, error: missing };
   let content: unknown;
   switch (name) {
     case "tanuki_render":
@@ -709,6 +748,74 @@ function flagVal(argv: string[], flag: string): string | null {
   return i !== -1 && argv[i + 1] !== undefined ? argv[i + 1] : null;
 }
 
+/// Rust `f64::from_str` semantics, which is the stricter of the two engines.
+/// JS `Number()` also accepts "", " 3 ", "0x1F", "0b101" and "1_000"; Rust
+/// rejects every one of them and falls back to the default. `TANUKI_RECENCY=
+/// " 3 "` - one trailing space out of a .env or YAML file - kept three
+/// messages as text here and one in Rust, so the two binaries imaged
+/// DIFFERENT messages of the same request. Converge on the strict engine.
+const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+function parseNum(s: string | null | undefined, dflt: number): number {
+  if (s === undefined || s === null || !DECIMAL.test(s)) return dflt;
+  const v = Number(s);
+  return Number.isFinite(v) ? v : dflt;
+}
+
+/// An env var set to the EMPTY STRING means unset, everywhere. TANUKI_STASH
+/// already worked this way and the other two did not: TANUKI_EVENTS resolved
+/// the events path to "" and TANUKI_UPSTREAM was accepted as an upstream URL,
+/// which then threw inside `new URL("")`. `docker run -e TANUKI_UPSTREAM`,
+/// with no value, is enough to hit it.
+export function envOr(name: string, dflt: string): string {
+  const v = process.env[name];
+  return v === undefined || v === "" ? dflt : v;
+}
+
+/// Flags that consume the NEXT token. A positional scan that does not know
+/// them swallows the value as a positional: `render f.log 2 --verbatim off
+/// out/` read "off" as the output directory and wrote the pages into ./off,
+/// silently ignoring out/. Same for `--font tiny out/` -> ./tiny.
+const VALUE_FLAGS: Record<string, true> = {
+  "--font": true,
+  "--level": true,
+  "--lines": true,
+  "--max-pages": true,
+  "--min-chars": true,
+  "--min-save": true,
+  "--model": true,
+  "--port": true,
+  "--query": true,
+  "--ratio": true,
+  "--recency": true,
+  "--upstream": true,
+  "--verbatim": true,
+};
+
+/** Positional arguments from `from` on, skipping flags AND their values. */
+function positionals(argv: string[], from: number): string[] {
+  const out: string[] = [];
+  for (let i = from; i < argv.length; i++) {
+    if (argv[i].startsWith("--")) {
+      if (VALUE_FLAGS[argv[i]] === true) i++;
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  return out;
+}
+
+/// One verbatim vocabulary for every CLI subcommand. `fetch` and `proxy` took
+/// `--verbatim <word>` while `estimate` and `render` understood only the
+/// boolean `--no-verbatim` and SILENTLY IGNORED `--verbatim off` - issue #1's
+/// bug wearing a different hat. Absent flags return null so TANUKI_VERBATIM
+/// still supplies the default, exactly as on the MCP path.
+function cliVerbatim(argv: string[]): Verbatim {
+  const word = flagVal(argv, "--verbatim");
+  if (word !== null) return parseVerbatim(word);
+  return parseVerbatim(argv.includes("--no-verbatim") ? false : null);
+}
+
 /// Write pages as page<N>.png under dir (CLI render/fetch).
 function writePages(dir: string, pages: Page[]): void {
   try {
@@ -757,10 +864,10 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook] [--model <id>] [--cached]",
+          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
         );
       const text = readFileOrDie(file);
-      const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
+      const pos = positionals(argv, 3);
       const level = pos.length > 0 ? (parseUint(pos[0], U64_MAX) ?? 0) : 0;
       const font = flagVal(argv, "--font") ?? "normal";
       const model = flagVal(argv, "--model");
@@ -772,7 +879,7 @@ export function main(): void {
         font,
         codebook: argv.includes("--codebook"),
         table: argv.includes("--table"),
-        verbatim: !argv.includes("--no-verbatim"),
+        verbatim: cliVerbatim(argv),
         model,
         cached: argv.includes("--cached"),
       });
@@ -783,11 +890,14 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--no-verbatim] [--font tiny] [--codebook]",
+          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook]",
         );
       const text = readFileOrDie(file);
-      const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
-      const level = pos.length > 0 ? (parseUint(pos[0], U8_MAX) ?? 0) : 0;
+      const pos = positionals(argv, 3);
+      // Same parse bound as `estimate`, whose contract is "the same arguments
+      // as render": U8_MAX here made `estimate f.log 300` report level 4 while
+      // `render f.log 300` produced level-0 pixels.
+      const level = pos.length > 0 ? (parseUint(pos[0], U64_MAX) ?? 0) : 0;
       const pack = !argv.includes("--no-pack");
       const useCb = argv.includes("--codebook");
       const font = parseFont(flagVal(argv, "--font") ?? "normal");
@@ -798,7 +908,8 @@ export function main(): void {
       }
       const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
-      const side = argv.includes("--no-verbatim") ? null : scanNeedles(p.compressed, charCount(text));
+      const vb = cliVerbatim(argv);
+      const side = vb === "off" ? null : scanNeedles(p.compressed, charCount(text));
       const tok = r.tokens;
       process.stdout.write(
         jstring(
@@ -807,7 +918,10 @@ export function main(): void {
             imageTokens: tok,
             dropped: r.dropped,
             rawTextTokens: textTokens(text),
-            verbatimTokens: side === null ? 0 : side.tokens,
+            // Price what would actually ship: `lazy` sends one pointer line,
+            // not the sidecar. Reporting side.tokens here would quote the
+            // cost of a block the caller asked us not to send.
+            verbatimTokens: side === null ? 0 : vb === "lazy" ? textTokens(lazyPointer(side, null)) : side.tokens,
           },
           false,
         ) + "\n",
@@ -866,18 +980,10 @@ export function main(): void {
       break;
     }
     case "proxy": {
-      const num = (flag: string, dflt: number): number => {
-        const s = flagVal(argv, flag);
-        if (s === null) return dflt;
-        const v = Number(s);
-        return Number.isFinite(v) ? v : dflt;
-      };
+      const num = (flag: string, dflt: number): number => parseNum(flagVal(argv, flag), dflt);
       startProxy({
         port: num("--port", 8484),
-        upstream:
-          flagVal(argv, "--upstream") ??
-          process.env.TANUKI_UPSTREAM ??
-          "https://api.anthropic.com",
+        upstream: flagVal(argv, "--upstream") ?? envOr("TANUKI_UPSTREAM", "https://api.anthropic.com"),
         level: num("--level", PROXY_DEFAULTS.level),
         distill: argv.includes("--distill"),
         table: argv.includes("--table"),
@@ -887,12 +993,7 @@ export function main(): void {
         ratio: num("--ratio", PROXY_DEFAULTS.ratio),
         minSave: num("--min-save", PROXY_DEFAULTS.minSave),
         maxPages: num("--max-pages", PROXY_DEFAULTS.maxPages),
-        recencyWindow: num(
-          "--recency",
-          Number.isFinite(Number(process.env.TANUKI_RECENCY))
-            ? Number(process.env.TANUKI_RECENCY)
-            : PROXY_DEFAULTS.recencyWindow,
-        ),
+        recencyWindow: num("--recency", parseNum(process.env.TANUKI_RECENCY, PROXY_DEFAULTS.recencyWindow)),
         cache: !argv.includes("--no-cache"),
         verbatim: parseVerbatim(flagVal(argv, "--verbatim")),
       });

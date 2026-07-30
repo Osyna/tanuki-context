@@ -42,30 +42,40 @@ export interface Sidecar {
 /// pointer line instead, for callers that read the bulk and never quote an id.
 export type Verbatim = "full" | "lazy" | "off";
 
-/// `false` opts out, `"lazy"` withholds, anything else (absent included) is
-/// the full sidecar. Rust eq_ignore_ascii_case: fold ASCII letters only.
+/// One fold from word to policy, shared by the argument and the environment
+/// default. They used to carry separate matches and disagreed: the env
+/// understood "off"/"false", the argument understood only the boolean `false`,
+/// so a caller passing the string `"off"` silently got the FULL sidecar. That
+/// was unreachable while the schema advertised booleans; issue #1 made "off" a
+/// documented enum value, which turns a dormant mismatch into a live one.
+/// Rust eq_ignore_ascii_case: fold ASCII letters only.
+function verbatimWord(s: string): Verbatim {
+  const lower = s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  if (lower === "lazy") return "lazy";
+  if (lower === "off" || lower === "false") return "off";
+  return "full";
+}
+
 /// `TANUKI_VERBATIM` sets the default for callers that do not pass `verbatim`,
 /// so an operator can set the sidecar policy once for a deployment instead of
 /// per call. An explicit argument always wins. Unset or unrecognised = "full",
 /// the shipped default, so nothing changes for anyone who does not set it.
 function envVerbatim(): Verbatim {
   const e = process.env.TANUKI_VERBATIM;
-  if (e === undefined) return "full";
-  const lower = e.replace(/[A-Z]/g, (c) => c.toLowerCase());
-  if (lower === "lazy") return "lazy";
-  if (lower === "off" || lower === "false") return "off";
-  return "full";
+  return e === undefined ? "full" : verbatimWord(e);
 }
 
+/// Booleans are accepted although the schema no longer advertises them: the
+/// wire contract is a closed string enum (issue #1), but callers written
+/// against the old union, and the CLI's own --no-verbatim flag, still pass
+/// true/false. Dropping them from the schema must not drop them from the door.
 export function parseVerbatim(v: unknown): Verbatim {
   // Only an ABSENT argument consults the environment. An explicit `true` must
   // mean the full sidecar even under TANUKI_VERBATIM=lazy, or the env stops
   // being a default and becomes an override the caller cannot escape.
   if (v === undefined || v === null) return envVerbatim();
-  if (v === false) return "off";
-  return typeof v === "string" && v.length === 4 && v.replace(/[A-Z]/g, (c) => c.toLowerCase()) === "lazy"
-    ? "lazy"
-    : "full";
+  if (typeof v === "boolean") return v ? "full" : "off";
+  return typeof v === "string" ? verbatimWord(v) : "full";
 }
 
 /// The lazy sidecar: what was withheld and how to get it back. `id` is the

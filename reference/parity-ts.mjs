@@ -278,6 +278,28 @@ const requests = [
   { jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "\u00e9\u00fc\u4e2d\u6587 \u2603 mixed \u{1f600} unicode ".repeat(200), level: 0 } } },
   { jsonrpc: "2.0", id: 31, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: Buffer.from(Array.from({ length: 6000 }, (_, i) => (i * 37) % 251)).toString("base64"), level: 0 } } },
   { jsonrpc: "2.0", id: 32, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "someLongCamelCaseIdentifierNumber42 = anotherCamelCaseValue126;\n".repeat(120), level: 0 } } },
+  // 0.19.5 regression pins. Two kinds, and the difference matters:
+  //
+  // 33/34 GENUINELY DIVERGED and this harness could not see it, because
+  // `lines` was only ever exercised as "3-40".
+  //   33 `0-0`      - TS clamped only the low end -> "", Rust clamped both -> line 1
+  //   34 overflow   - TS let Number() round past 2^53 -> whole stash, Rust errored
+  //
+  // 35/36/37 were broken IDENTICALLY in both engines, so parity passed over
+  // them and always would have. They are pinned here not to catch the old bug
+  // - nothing byte-comparing two engines ever could - but so a future one-
+  // sided change to any of them shows up as a divergence instead of silently.
+  //   35 level 256  - `% 256` / `as u8` wrapped to 0 (NO compression) while 255 gave 4
+  //   36 model id   - the weak-reader gate matched case-sensitively by prefix
+  //                   while pricing matched case-insensitively by substring, so
+  //                   this spelling was priced as haiku and routed to `image`
+  //   37 required   - `text` was advertised required and never enforced; a
+  //                   wrong-typed value silently became "" and got a verdict
+  { jsonrpc: "2.0", id: 33, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "0-0" } } },
+  { jsonrpc: "2.0", id: 34, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, lines: "1-99999999999999999999" } } },
+  { jsonrpc: "2.0", id: 35, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "the router compares estimated token counts before deciding. ".repeat(80), level: 256 } } },
+  { jsonrpc: "2.0", id: 36, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "poll ok latency=3ms shard=7\n".repeat(400), model: "anthropic/claude-haiku-4-5" } } },
+  { jsonrpc: "2.0", id: 37, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: 42 } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
