@@ -174,6 +174,9 @@ describe("stash", () => {
 });
 
 describe("run wrapper (rtk-style)", () => {
+  // Real node subprocess: cold start on a shared CI runner has blown bun's
+  // 5s default (5,266ms on GitHub Actions) while the logic passes in ~70ms
+  // locally - the generous ceiling guards the runner, not the code.
   test("exit code passes through; frames collapse; errors verbatim", () => {
     const script = 'for i in 1 2 3 4 5 6 7 8; do echo "copied file_$i.dat ok"; done; printf "pull: 10%%\\rpull: 99%%\\rpull: done\\n"; echo "ERROR real failure" >&2; exit 3';
     const r = Bun.spawnSync(["node", "dist/cli.js", "run", "--", "sh", "-c", script]);
@@ -184,7 +187,7 @@ describe("run wrapper (rtk-style)", () => {
     expect(out).not.toContain("pull: 10%");
     expect(out).toContain("ERROR real failure");
     expect(out).toContain("×8 (template)");
-  });
+  }, 20000);
 
   test("huge output is stashed with a fetch pointer", () => {
     const script = 'i=0; while [ $i -lt 3000 ]; do echo "line $i of much repeated output padding padding"; i=$((i+1)); done';
@@ -195,7 +198,7 @@ describe("run wrapper (rtk-style)", () => {
     const out = r.stdout.toString();
     expect(out).toContain("stashed");
     expect(out).toMatch(/fetch [0-9a-f]{12}|tanuki_fetch \{"id"/);
-  });
+  }, 20000);
 });
 
 describe("verify: disk-grounded exact check", () => {
