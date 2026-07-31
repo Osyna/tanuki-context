@@ -30,6 +30,12 @@ pub fn px_stats() -> Value {
     let (mut requests, mut compressed, mut orig_chars, mut images) = (0u64, 0u64, 0u64, 0u64);
     let (mut baseline, mut actual, mut output) = (0u64, 0u64, 0u64);
     let mut saved_ca = 0i64;
+    // F4 diagnostic accumulators
+    let (mut break_count, mut break_rebilled) = (0u64, 0u64);
+    let mut last_break: Option<(u64, String)> = None;
+    let (mut tax_requests, mut tax_tokens) = (0u64, 0u64);
+    let mut last_tax_unused: Vec<String> = Vec::new();
+    let mut volatile_count = 0u64;
     for l in content.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(e) = serde_json::from_str::<Value>(l) else {
             continue;
@@ -46,6 +52,26 @@ pub fn px_stats() -> Value {
             + e["cache_read_tokens"].as_u64().unwrap_or(0)
             + e["cache_create_tokens"].as_u64().unwrap_or(0);
         output += e["output_tokens"].as_u64().unwrap_or(0);
+        // F4: collect cache break / tool tax / volatile prompt stats
+        if e["cacheBreak"].is_object() {
+            break_count += 1;
+            break_rebilled += e["cacheBreak"]["rebilled"].as_u64().unwrap_or(0);
+            if let (Some(i), Some(k)) =
+                (e["cacheBreak"]["index"].as_u64(), e["cacheBreak"]["kind"].as_str())
+            {
+                last_break = Some((i, k.to_string()));
+            }
+        }
+        if e["toolTax"].is_object() {
+            tax_requests += 1;
+            tax_tokens += e["toolTax"]["tokens"].as_u64().unwrap_or(0);
+            if let Some(u) = e["toolTax"]["unused"].as_array() {
+                last_tax_unused = u.iter().filter_map(|n| n.as_str()).map(str::to_string).collect();
+            }
+        }
+        if e["volatileSystem"].as_bool() == Some(true) {
+            volatile_count += 1;
+        }
     }
     let saved = if baseline > 0 && actual > 0 {
         Some(((1.0 - actual as f64 / baseline as f64) * 1000.0).round() / 10.0)
@@ -58,7 +84,7 @@ pub fn px_stats() -> Value {
     } else {
         None
     };
-    json!({
+    let mut out = json!({
         "available": true, "requests": requests, "compressedRequests": compressed,
         "imagedChars": orig_chars, "imagesEmitted": images,
         "baselineTokens": baseline, "actualInputTokens": actual,
@@ -75,5 +101,29 @@ pub fn px_stats() -> Value {
         } else {
             Value::Null
         },
-    })
+    });
+    if break_count > 0 {
+        if let Some((i, k)) = &last_break {
+            out["cacheBreaks"] = json!(format!(
+                "cache breaks: {break_count}/{requests} requests \u{b7} {break_rebilled} tok rebilled \u{b7} last: block {i} {k}"
+            ));
+        }
+    }
+    if tax_requests > 0 {
+        // same half-away-from-zero rnd convention as the TS engine
+        let per = crate::cost::rnd(tax_tokens as f64 / tax_requests as f64);
+        let first3: Vec<&str> = last_tax_unused.iter().take(3).map(String::as_str).collect();
+        let extra = last_tax_unused.len() as i64 - 3;
+        let names = if extra > 0 {
+            format!("{} +{extra} more", first3.join(","))
+        } else {
+            first3.join(",")
+        };
+        out["toolTax"] = json!(format!("tool tax: {per} tok/request never invoked ({names})"));
+    }
+    if volatile_count > 0 {
+        out["volatileSystem"] =
+            json!("volatile system prompt: uuid/timestamp/jwt content busts the prefix cache");
+    }
+    out
 }

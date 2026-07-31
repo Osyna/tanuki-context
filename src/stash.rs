@@ -67,15 +67,125 @@ fn overview(id: &str, text: &str) -> String {
     out.join("\n")
 }
 
-/// Pull a slice of a stashed text: `query` (regex -> distilled slice) or
-/// `lines` "a-b" (1-based inclusive segments, clamped) — exactly one of them.
-pub fn fetch_slice(id: &str, query: Option<&str>, lines: Option<&str>) -> Result<String, String> {
-    if query.is_some() == lines.is_some() {
-        return Err("give exactly one of query or lines".to_string());
+/// Pull a slice of a stashed text: `query` (regex -> distilled slice), `lines`
+/// "a-b" (1-based inclusive segments, clamped), or `find` (relevance search) —
+/// exactly one of them.
+pub fn fetch_slice(
+    id: &str,
+    query: Option<&str>,
+    lines: Option<&str>,
+    find: Option<&str>,
+    top: usize,
+) -> Result<String, String> {
+    let non_null = [query.is_some(), lines.is_some(), find.is_some()].iter().filter(|&&x| x).count();
+    if non_null != 1 {
+        return Err("give exactly one of query, lines or find".to_string());
     }
     let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
         return Err(format!("unknown stash id: {id}"));
     };
+    // F3: find mode
+    if let Some(f) = find {
+        let raw_words: Vec<&str> = f.split_whitespace().collect();
+        if raw_words.is_empty() {
+            return Err("find needs at least one word".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut words = Vec::new();
+        for w in raw_words {
+            let lower = w.to_lowercase();
+            if !seen.contains(&lower) {
+                seen.insert(lower.clone());
+                words.push(lower);
+                if words.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        let segments: Vec<&str> = text.split('\n').collect();
+        let n = segments.len();
+        
+        // Score each line
+        struct Anchor {
+            line: usize,
+            score: usize,
+        }
+        let mut anchors = Vec::new();
+        for (i, raw) in segments.iter().enumerate() {
+            let lower = raw.to_lowercase();
+            let mut score = 0;
+            for word in &words {
+                // ASCII word boundary check
+                let mut found = false;
+                if let Some(pos) = raw.to_lowercase().find(word) {
+                    let before_ok = pos == 0 || !raw.as_bytes()[pos - 1].is_ascii_alphanumeric() && raw.as_bytes()[pos - 1] != b'_';
+                    let after_pos = pos + word.len();
+                    let after_ok = after_pos >= raw.len() || !raw.as_bytes()[after_pos].is_ascii_alphanumeric() && raw.as_bytes()[after_pos] != b'_';
+                    if before_ok && after_ok {
+                        score += 3;
+                        found = true;
+                    }
+                }
+                if !found && lower.contains(word) {
+                    score += 1;
+                }
+            }
+            if score > 0 {
+                anchors.push(Anchor { line: i + 1, score });
+            }
+        }
+        
+        let h = anchors.len();
+        if h == 0 {
+            return Ok(format!("·find· {} words · 0 lines matched", words.len()));
+        }
+        
+        // Top K anchors by (score desc, line asc)
+        let k = top.clamp(1, 32);
+        anchors.sort_by(|a, b| {
+            if a.score != b.score {
+                b.score.cmp(&a.score)
+            } else {
+                a.line.cmp(&b.line)
+            }
+        });
+        let top_anchors: Vec<_> = anchors.into_iter().take(k).collect();
+        
+        // Build windows: each anchor -> [max(1,n-2), min(N,n+2)]
+        struct Window {
+            start: usize,
+            end: usize,
+            score: usize,
+        }
+        let mut windows = Vec::new();
+        for anc in &top_anchors {
+            let start = 1.max(anc.line.saturating_sub(2));
+            let end = n.min(anc.line + 2);
+            windows.push(Window { start, end, score: anc.score });
+        }
+        
+        // Merge overlapping/adjacent windows
+        windows.sort_by_key(|w| w.start);
+        let mut merged: Vec<Window> = Vec::new();
+        for win in windows {
+            if merged.is_empty() || win.start > merged.last().unwrap().end + 1 {
+                merged.push(win);
+            } else {
+                let last = merged.last_mut().unwrap();
+                last.end = last.end.max(win.end);
+                last.score = last.score.max(win.score);
+            }
+        }
+        
+        // Output
+        let mut parts = Vec::new();
+        for win in &merged {
+            parts.push(format!("·find· L{}-{} score {}", win.start, win.end, win.score));
+            parts.push(segments[win.start - 1..win.end].join("\n"));
+        }
+        parts.push(format!("·find· {} words · {} lines matched · {} windows", words.len(), h, merged.len()));
+        return Ok(parts.join("\n"));
+    }
     if let Some(q) = query {
         return Ok(distill::distill_log(&text, Some(q), 2).distilled);
     }
@@ -259,14 +369,14 @@ mod tests {
         with_test_dir("lines", || {
             let text = (1..=9).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
             let (id, _) = stash_text(&text).unwrap();
-            assert_eq!(fetch_slice(&id, None, Some("2-4")).unwrap(), "line 2\nline 3\nline 4");
-            assert_eq!(fetch_slice(&id, None, Some("9-9")).unwrap(), "line 9");
+            assert_eq!(fetch_slice(&id, None, Some("2-4"), None, 8).unwrap(), "line 2\nline 3\nline 4");
+            assert_eq!(fetch_slice(&id, None, Some("9-9"), None, 8).unwrap(), "line 9");
             // clamped into range on both ends
-            assert_eq!(fetch_slice(&id, None, Some("7-99")).unwrap(), "line 7\nline 8\nline 9");
-            assert_eq!(fetch_slice(&id, None, Some("0-1")).unwrap(), "line 1");
-            assert_eq!(fetch_slice(&id, None, Some("5-2")).unwrap_err(), "bad lines range");
-            assert_eq!(fetch_slice(&id, None, Some("x-2")).unwrap_err(), "bad lines range");
-            assert_eq!(fetch_slice(&id, None, Some("3")).unwrap_err(), "bad lines range");
+            assert_eq!(fetch_slice(&id, None, Some("7-99"), None, 8).unwrap(), "line 7\nline 8\nline 9");
+            assert_eq!(fetch_slice(&id, None, Some("0-1"), None, 8).unwrap(), "line 1");
+            assert_eq!(fetch_slice(&id, None, Some("5-2"), None, 8).unwrap_err(), "bad lines range");
+            assert_eq!(fetch_slice(&id, None, Some("x-2"), None, 8).unwrap_err(), "bad lines range");
+            assert_eq!(fetch_slice(&id, None, Some("3"), None, 8).unwrap_err(), "bad lines range");
         })
     }
 
@@ -282,7 +392,7 @@ mod tests {
                 text.push_str(&format!("2026-07-26T02:00:02Z INFO worker {i} heartbeat ok\n"));
             }
             let (id, _) = stash_text(&text).unwrap();
-            let got = fetch_slice(&id, Some("exploded"), None).unwrap();
+            let got = fetch_slice(&id, Some("exploded"), None, None, 8).unwrap();
             assert_eq!(got, distill::distill_log(&text, Some("exploded"), 2).distilled);
             assert!(got.contains("ERROR worker 7 exploded"));
         })
@@ -293,15 +403,15 @@ mod tests {
         with_test_dir("errs", || {
             let (id, _) = stash_text("abc").unwrap();
             assert_eq!(
-                fetch_slice(&id, None, None).unwrap_err(),
-                "give exactly one of query or lines"
+                fetch_slice(&id, None, None, None, 8).unwrap_err(),
+                "give exactly one of query, lines or find"
             );
             assert_eq!(
-                fetch_slice(&id, Some("a"), Some("1-1")).unwrap_err(),
-                "give exactly one of query or lines"
+                fetch_slice(&id, Some("a"), Some("1-1"), None, 8).unwrap_err(),
+                "give exactly one of query, lines or find"
             );
             assert_eq!(
-                fetch_slice("cafebabe0000", Some("a"), None).unwrap_err(),
+                fetch_slice("cafebabe0000", Some("a"), None, None, 8).unwrap_err(),
                 "unknown stash id: cafebabe0000"
             );
         })
@@ -372,4 +482,26 @@ mod count_tests {
             assert!(match_count(&id, "[unclosed").is_err());
         })
     }
+    #[test]
+    fn find_output_is_never_imaged() {
+        // Mirrors the TS guard: the gate lives in main.rs tool_fetch/CLI, but
+        // the premise it needs is pinned here - a find over a corpus whose
+        // windows are big enough that the imaging gate WOULD win must still
+        // come back as ·find· text windows from fetch_slice.
+        let text: String = (0..300)
+            .map(|i| {
+                if (i + 1) % 6 == 0 {
+                    format!("entry {} ERROR request failed with a long explanatory tail that pads the window bytes", i + 1)
+                } else {
+                    format!("entry {} quiet routine heartbeat line with a long explanatory tail that pads the window", i + 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (id, _o) = stash_text(&text).unwrap();
+        let got = fetch_slice(&id, None, None, Some("ERROR request failed"), 32).unwrap();
+        assert!(got.starts_with("\u{b7}find\u{b7} "));
+        assert!(got.contains(" windows"));
+    }
+
 }

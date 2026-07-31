@@ -15,8 +15,10 @@
 mod atlas;
 mod codebook;
 mod cost;
+mod crush;
 mod distill;
 mod fidelity;
+mod gate;
 mod ladder;
 mod needles;
 mod png;
@@ -34,7 +36,6 @@ use std::io::{BufRead, Write};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_INLINE_PAGES: usize = 6;
 const RUN_INLINE_MAX: usize = 8000; // chars (~2k tokens) the run wrapper prints inline
-
 struct PipelineOut {
     stage0: Option<Value>,
     compressed: String,
@@ -42,19 +43,28 @@ struct PipelineOut {
     level: u8,
     cb_entries: usize,
     table: Option<(usize, usize)>, // (rows, cols) when the table codec applied
+    crush: Option<(usize, usize, String)>, // F2: (kept, rows, id) when crushRows applied
 }
 
-/// Stages 0 + 0.5 + 1: optional columnar table, optional distill, optional
+/// Stages 0 + 0.25 + 0.5 + 1: optional crush, optional columnar table, optional distill, optional
 /// codebook, then ladder level.
 fn stage01(
     text: &str,
     level: u8,
+    use_crush: bool,
     use_distill: bool,
     query: Option<&str>,
     use_codebook: bool,
     use_table: bool,
 ) -> PipelineOut {
     let mut working = std::borrow::Cow::Borrowed(text);
+    let mut crush = None;
+    if use_crush {
+        if let Some(c) = table::crush_rows(&working) {
+            crush = Some((c.kept, c.rows, c.id.clone()));
+            working = std::borrow::Cow::Owned(c.text);
+        }
+    }
     let mut table = None;
     if use_table {
         if let Some(t) = table::table_encode(&working) {
@@ -75,13 +85,23 @@ fn stage01(
         cb_entries = cb.entries;
     }
     let c = ladder::compress_text(&working, level);
+    let mut compressed = c.compressed;
+    // Marker AFTER the ladder, as the final line: it names the stash id, and
+    // running it through L2+ prose rules could rewrite the very pointer the
+    // caller needs byte-exact. Mirrors the TS stage01.
+    if let Some((kept, rows, id)) = &crush {
+        compressed.push_str(&format!(
+            "\n\u{b7}crushed\u{b7} kept {kept} of {rows} rows - full set: fetch {id} (--query re | --lines a-b)"
+        ));
+    }
     PipelineOut {
         stage0,
-        compressed: c.compressed,
+        compressed,
         protected_lines: c.protected_lines,
         level: c.level,
         cb_entries,
         table,
+        crush,
     }
 }
 
@@ -157,9 +177,6 @@ fn pct(from: u64, to: u64) -> i64 {
     }
     ((1.0 - to as f64 / from as f64) * 100.0).round() as i64
 }
-
-// ---------------------------------------------------------------- MCP tools
-
 /// Shared arguments of the pipeline tools (render/estimate).
 struct PipeArgs<'a> {
     text: &'a str,
@@ -168,26 +185,25 @@ struct PipeArgs<'a> {
     query: Option<&'a str>,
     reflow: bool,
     pack: bool,
-    font: &'a str,
+    font: render::Font,
     codebook: bool,
     table: bool,
+    crush: bool,
     verbatim: needles::Verbatim,
 }
 
 fn pipe_args(args: &'_ Value) -> PipeArgs<'_> {
     PipeArgs {
         text: args["text"].as_str().unwrap_or(""),
-        // Clamp, do not truncate: `as u8` made level 256 mean NO compression
-        // while 255 meant maximum - non-monotonic, and the schema advertises
-        // maximum 4. Both engines now clamp to the advertised ceiling.
         level: args["level"].as_u64().unwrap_or(0).min(4) as u8,
         distill: args["distill"].as_bool().unwrap_or(false),
         query: args["query"].as_str(),
         reflow: args["reflow"].as_bool().unwrap_or(true),
         pack: args["pack"].as_bool().unwrap_or(true),
-        font: args["font"].as_str().unwrap_or("normal"),
+        font: render::Font::parse(args["font"].as_str().unwrap_or("normal")),
         codebook: args["codebook"].as_bool().unwrap_or(false),
         table: args["table"].as_bool().unwrap_or(false),
+        crush: args["crush"].as_bool().unwrap_or(false),
         verbatim: needles::Verbatim::parse(&args["verbatim"]),
     }
 }
@@ -242,7 +258,7 @@ fn recommend_for(text: &str) -> Value {
     let ws_tok = text_tokens(&ladder::compress_text(text, 1).compressed);
     let ws_wins = ws_tok < raw_text_tok;
     let text_tok = if ws_wins { ws_tok } else { raw_text_tok };
-    json!({
+    let mut result = json!({
         "codebook": cb,
         "imageTokens": est.tokens,
         "pages": est.pages,
@@ -255,7 +271,35 @@ fn recommend_for(text: &str) -> Value {
             "savedPct": pct(raw_text_tok, text_tok),
             "withDistill": text_tokens(&distilled),
         },
-    })
+    });
+
+    // Probe crush: if it hits, price the crushed text through the imaging walk
+    if let Some(cr) = table::crush_rows_select(text) {
+        let crush_text_tok = text_tokens(&cr.text);
+        let (mut crush_cb, cr_est, _) = walk(&cr.text);
+        let mut crush_img_tok = cr_est.tokens;
+        let mut crush_table = false;
+        if let Some(ct) = table::table_encode(&cr.text) {
+            let (ct_cb, ct_est, _) = walk(&ct.text);
+            if ct_est.tokens < crush_img_tok {
+                crush_cb = ct_cb;
+                crush_img_tok = ct_est.tokens;
+                crush_table = true;
+            }
+        }
+        let crush_saved_pct = pct(raw_text_tok, crush_text_tok.min(crush_img_tok));
+        result["crush"] = json!({
+            "rows": cr.rows,
+            "kept": cr.kept,
+            "textTokens": crush_text_tok,
+            "imageTokens": crush_img_tok,
+            "codebook": crush_cb,
+            "table": crush_table,
+            "savedPct": crush_saved_pct,
+        });
+    }
+
+    result
 }
 
 /// The hybrid pick: ONE recommended route over the candidates `recommend`
@@ -294,13 +338,35 @@ fn route_for(raw_tok: u64, rec: &Value, side_tok: u64, creds: bool, cost_cheaper
     } else {
         (text_pick, text_tok, "exact", "the text side is already the cheaper route; imaging adds no real save")
     };
-    json!({ "pick": pick, "tokens": tokens, "savedPct": pct(raw_tok, tokens), "fidelity": fidelity_s, "reason": reason })
+    
+    // Steer, don't relabel: when crush wins, append the steering message to reason
+    // but leave pick/tokens/fidelity pointing to the loss classes we can actually
+    // label (raw/text/image with their fidelity bands). The caller sees the crush
+    // alternative in recommend.crush and can override if the stashed reference suits.
+    let mut final_reason = reason.to_string();
+    if !creds {
+        if let Some(crush) = rec.get("crush") {
+            let crush_text = crush["textTokens"].as_u64().unwrap();
+            let crush_img = crush["imageTokens"].as_u64().unwrap();
+            let crush_tok = crush_text.min(crush_img);
+            let kept = crush["kept"].as_u64().unwrap();
+            let rows = crush["rows"].as_u64().unwrap();
+            if crush_tok < tokens {
+                final_reason.push_str(&format!(
+                    "; crush: true would keep {} of {} rows for ~{} tok, full set stashed (recommend.crush)",
+                    kept, rows, crush_tok
+                ));
+            }
+        }
+    }
+    
+    json!({ "pick": pick, "tokens": tokens, "savedPct": pct(raw_tok, tokens), "fidelity": fidelity_s, "reason": final_reason })
 }
 
 fn tool_estimate(args: &Value) -> Value {
     let a = pipe_args(args);
-    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
-    let font = render::Font::parse(a.font);
+    let p = stage01(a.text, a.level, a.crush, a.distill, a.query, a.codebook, a.table);
+    let font = a.font;
     let est = render::estimate_text(&p.compressed, a.reflow, a.pack, font);
     let side = if a.verbatim == needles::Verbatim::Off { None } else { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) };
     // `lazy` ships the pointer line instead of the strings, so price what
@@ -344,6 +410,10 @@ fn tool_estimate(args: &Value) -> Value {
         "pack": a.pack,
         "font": if font == render::Font::Tiny { "tiny" } else { "normal" },
         "codebook": if a.codebook { json!(p.cb_entries) } else { json!(false) },
+        "crush": match p.crush {
+            Some((kept, rows, _)) => json!({ "kept": kept, "rows": rows }),
+            None => json!(false),
+        },
         "table": match p.table {
             Some((rows, cols)) => json!({ "rows": rows, "cols": cols }),
             None => json!(false),
@@ -367,12 +437,12 @@ fn tool_estimate(args: &Value) -> Value {
 
 fn tool_render(args: &Value) -> Value {
     let a = pipe_args(args);
+    let p = stage01(a.text, a.level, a.crush, a.distill, a.query, a.codebook, a.table);
     let creds = needles::scan_credentials(a.text);
     if !creds.is_empty() {
         return json!([{ "type": "text", "text": format!("[tanuki-context: refused to render — {} credential-shaped secret(s) detected ({}); kept as text so a secret is never silently misread from pixels]", creds.len(), creds.join(", ")) }]);
     }
-    let p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
-    let font = render::Font::parse(a.font);
+    let font = a.font;
     let r = render::render_text(&p.compressed, a.reflow, a.pack, font);
     let side = if a.verbatim == needles::Verbatim::Off { None } else { Some(needles::scan_needles_sized(&p.compressed, a.text.chars().count())) };
     if let Some(s) = &side {
@@ -528,7 +598,7 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     let query = args["query"].as_str();
     let redact = args["redact"].as_bool().unwrap_or(true);
     let verbatim = needles::Verbatim::parse(&args["verbatim"]);
-    let slice = stash::fetch_slice(id, query, args["lines"].as_str())?;
+    let slice = stash::fetch_slice(id, query, args["lines"].as_str(), args["find"].as_str(), args["top"].as_u64().unwrap_or(8) as usize)?;
     let r = render::render_text(&slice, true, true, render::Font::Normal);
     let chars = slice.chars().count();
     let raw_tok = text_tokens(&slice);
@@ -551,7 +621,11 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
     };
     // `lazy` withholds the strings but never the refusal: a needle-dense slice
     // still stays text, exactly as it does under the full sidecar.
-    if !stash_pages_win(cost, r.pages.len(), raw_tok)
+    // find mode NEVER images: its output is small ranked windows whose value
+    // is byte-exactness - a relevance result read back off pixels is the exact
+    // failure retrieval-report.mjs counts as a miss (caught there first).
+    if args["find"].as_str().is_some()
+        || !stash_pages_win(cost, r.pages.len(), raw_tok)
         || !needles::scan_credentials(&slice).is_empty()
         || (side.dense && verbatim != needles::Verbatim::Off)
     {
@@ -636,17 +710,17 @@ fn all_tools() -> Value {
         {
             "name": "tanuki_render",
             "description": "Token-cut pipeline: optional columnar table (whole-JSON input: keys stated once in a ·cols· header, rows as tab-separated JSON cells — value-lossless), optional log distillation (dedupe noise, keep errors verbatim, optional query filter), optional codebook (repeated long tokens/path prefixes -> 1-cell sigils + a ·legend· line), then a ladder level, then dense PNG page(s) via the pxpipe imaging engine. level 0 raw · 1 whitespace (lossless) · 2 prose · 3 dense · 4 caveman (gist only). From level 2 up code/IDs/hashes/paths stay verbatim. pack (default true) = lossless tight reflow (single-cell tabs, ⇥N indent runs, width-trimmed pages). font 'tiny' = 4x6 cell, ~40% fewer image-tokens (opt-in). Image tokens are pixel-priced, so every earlier cut compounds. Returns image blocks + a breakdown.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "crush": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["text"] }
         },
         {
             "name": "tanuki_estimate",
             "description": "Estimate tokens for the pipeline (table -> distill -> codebook -> level -> pxpipe imaging) vs sending the raw text as text. Exact page geometry, no image data returned. Compare levels/pack/font/codebook to pick a loss/size tradeoff. The result's 'recommend' field prices the reversible knobs (pack/codebook, and table for whole-JSON input — keys stated once, value-lossless) and, separately under 'withDistill', the lossy-but-counted log route; its 'text' sub-field prices the best stays-as-text cut (lossless whitespace, plus a distill sibling) for when imaging loses — cached, small, or credential content. Pass 'model' (e.g. claude-opus-4, gpt-5, gemini-2.5) and/or cached:true to add a 'cost' field that prices the decision in real dollars with provider-correct image counting (Anthropic 28px patches, OpenAI 512px tiles, Gemini 768px tiles) and cache-read rates (a cached text token costs ~0.1x a fresh one on Anthropic), so imaging already-cached content usually loses even when it has fewer tokens. The 'fidelity' field maps the imaged density ratio to expected read-back accuracy (DeepSeek-OCR's cliff: ~98% under 8x text/vision tokens, ~60% by 20x; the 4x6 tiny font is capped lower), a signal to keep exact-recall in the verbatim sidecar and reserve lossy tiers for comprehension. The top-level 'route' field then makes the hybrid call for you — one recommended pick (image / text / raw) weighing real cost AND the read-back fidelity band, not just token count: image only when it clears the clean band and genuinely saves, else the lossless text side (cached, credential, or past-the-cliff content). One call replaces manual knob probing.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "verbatim": verbatim_schema(), "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "level": level_schema(), "distill": { "type": "boolean" }, "query": { "type": "string" }, "reflow": { "type": "boolean" }, "pack": { "type": "boolean" }, "font": { "type": "string", "enum": ["normal", "tiny"] }, "codebook": { "type": "boolean" }, "table": { "type": "boolean" }, "crush": { "type": "boolean" }, "verbatim": verbatim_schema(), "model": { "type": "string" }, "cached": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_distill",
             "description": "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. table:true first columnar-encodes whole-JSON input (keys stated once) so identical rows collapse harder. Deterministic, order-preserving.",
-            "inputSchema": { "type": "object", "properties": { "text": text_prop, "query": { "type": "string" }, "table": { "type": "boolean" } }, "required": ["text"] }
+            "inputSchema": { "type": "object", "properties": { "text": text_prop, "query": { "type": "string" }, "crush": { "type": "boolean" }, "table": { "type": "boolean" } }, "required": ["text"] }
         },
         {
             "name": "tanuki_compress",
@@ -665,8 +739,8 @@ fn all_tools() -> Value {
         },
         {
             "name": "tanuki_fetch",
-            "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context) or lines 'a-b'. Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text. Credential-shaped values (API keys, tokens, private-key headers) in the returned slice are replaced by a '[redacted:<kind>]' placeholder and counted in a '[N credential(s) redacted]' line - the stash keeps the original bytes, so redact:false returns them verbatim when you actually need the secret.",
-            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" }, "redact": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["id"] }
+            "description": "Pull a slice of stashed text by id: query (regex, distill-powered: matches + error/warn lines + context), lines 'a-b', or find (free-word relevance search). Big slices come back as dense PNG pages automatically when they clearly win (>=25% and >=300 tokens cheaper, <=6 pages); small ones stay text. Credential-shaped values (API keys, tokens, private-key headers) in the returned slice are replaced by a '[redacted:<kind>]' placeholder and counted in a '[N credential(s) redacted]' line - the stash keeps the original bytes, so redact:false returns them verbatim when you actually need the secret.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string" }, "lines": { "type": "string" }, "find": { "type": "string" }, "top": { "type": "integer", "minimum": 1, "maximum": 32 }, "redact": { "type": "boolean" }, "verbatim": verbatim_schema() }, "required": ["id"] }
         },
         {
             "name": "tanuki_verify",
@@ -885,9 +959,25 @@ fn main() {
         Some("distill") => {
             let file = args
                 .get(2)
-                .expect("usage: tanuki-context distill <file> [query] [--table]");
+                .expect("usage: tanuki-context distill <file> [query] [--table] [--crush] [--allow-sensitive]");
+            if !args.iter().any(|a| a == "--allow-sensitive") {
+                if let Some(msg) = gate::check_path(file) {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            }
             let text = std::fs::read_to_string(file).expect("read file");
             let mut working = text;
+            // stage 0.25 before 0.5, same order as stage01: crush selects
+            // rows, table lays them out. The stash id rides the stats JSON
+            // (this arm prints stats only, so a marker line has nowhere to go).
+            let mut crush: Option<(String, usize, usize)> = None;
+            if args.iter().any(|a| a == "--crush") {
+                if let Some(c) = table::crush_rows(&working) {
+                    working = c.text;
+                    crush = Some((c.id, c.kept, c.rows));
+                }
+            }
             if args.iter().any(|a| a == "--table") {
                 if let Some(t) = table::table_encode(&working) {
                     working = t.text;
@@ -895,11 +985,15 @@ fn main() {
             }
             let pos = positionals(&args, 3);
             let d = distill::distill_log(&working, pos.first().map(|s| s.as_str()), 2);
-            println!("{}", serde_json::to_string(&d.stats).unwrap());
+            let mut stats = d.stats;
+            if let Some((id, kept, rows)) = crush {
+                stats["crush"] = json!({ "id": id, "kept": kept, "rows": rows });
+            }
+            println!("{}", serde_json::to_string(&stats).unwrap());
         }
         Some("estimate") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
+                "usage: tanuki-context estimate <file> [level] [--distill] [--crush] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
             );
             let text = std::fs::read_to_string(file).expect("read file");
             let pos = positionals(&args, 3);
@@ -919,6 +1013,7 @@ fn main() {
             let mut req = json!({
                 "text": text, "level": level,
                 "distill": flag("--distill"),
+                "crush": flag("--crush"),
                 "pack": !flag("--no-pack"),
                 "font": font,
                 "codebook": flag("--codebook"),
@@ -932,8 +1027,14 @@ fn main() {
         }
         Some("render") => {
             let file = args.get(2).expect(
-                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook]",
+                "usage: tanuki-context render <file> [level] [outdir] [--distill] [--crush] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--allow-sensitive]",
             );
+            if !args.iter().any(|a| a == "--allow-sensitive") {
+                if let Some(msg) = gate::check_path(file) {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            }
             let text = std::fs::read_to_string(file).expect("read file");
             let creds = needles::scan_credentials(&text);
             if !creds.is_empty() {
@@ -941,9 +1042,6 @@ fn main() {
                 return;
             }
             let pos = positionals(&args, 3);
-            // Same parse width as `estimate`, whose contract is "the same
-            // arguments as render": u8 here made `estimate f.log 300` report
-            // level 4 while `render f.log 300` produced level-0 pixels.
             let level: u8 = pos.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0).min(4) as u8;
             let flag = |n: &str| args.iter().any(|a| a == n);
             let pack = !flag("--no-pack");
@@ -955,13 +1053,14 @@ fn main() {
                     .map(String::as_str)
                     .unwrap_or("normal"),
             );
-            let p = stage01(
+            let mut p = stage01(
                 &text,
                 level,
-                args.iter().any(|a| a == "--distill"),
+                flag("--crush"),
+                flag("--distill"),
                 None,
                 use_cb,
-                args.iter().any(|a| a == "--table"),
+                flag("--table"),
             );
             let r = render::render_text(&p.compressed, true, pack, font);
             let vb = cli_verbatim(&args);
@@ -971,8 +1070,6 @@ fn main() {
                 "{}",
                 json!({ "pages": r.pages.len(), "imageTokens": tok, "dropped": r.dropped,
                         "rawTextTokens": text_tokens(&text),
-                        // Price what would actually ship: `lazy` sends one
-                        // pointer line, not the sidecar.
                         "verbatimTokens": side.as_ref().map_or(0, |s| if vb == needles::Verbatim::Lazy { text_tokens(&needles::lazy_pointer(s, None)) } else { s.tokens }) })
             );
             if let Some(dir) = pos.get(1).map(|s| s.as_str()) {
@@ -1009,7 +1106,7 @@ fn main() {
                         result = d.stats;
                     }
                     _ => {
-                        let p = stage01(&text, level, use_distill, None, false, false);
+                        let p = stage01(&text, level, false, use_distill, None, false, false);
                         let r = render::render_text(&p.compressed, true, false, render::Font::Normal);
                         result = json!({
                             "pages": r.pages.len(),
@@ -1030,18 +1127,25 @@ fn main() {
             );
         }
         Some("stash") => {
-            let file = args.get(2).expect("usage: tanuki-context stash <file>");
+            let file = args.get(2).expect("usage: tanuki-context stash <file> [--allow-sensitive]");
+            if !args.iter().any(|a| a == "--allow-sensitive") {
+                if let Some(msg) = gate::check_path(file) {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            }
             let text = std::fs::read_to_string(file).expect("read file");
             let (_id, overview) = stash::stash_text(&text).expect("write stash");
             println!("{overview}");
         }
         Some("fetch") => {
-            // tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]
+            // tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--find "words"] [--top k] [--no-redact] [--verbatim lazy]
             let id = args
                 .get(2)
-                .expect("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]");
+                .expect("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--find \"words\"] [--top k] [--no-redact] [--verbatim lazy]");
             let mut outdir: Option<&str> = None;
-            let (mut query, mut lines) = (None, None);
+            let (mut query, mut lines, mut find) = (None, None, None);
+            let mut top = 8usize;
             let mut redact = true;
             let mut vflag: Option<&str> = None;
             let mut i = 3;
@@ -1053,6 +1157,14 @@ fn main() {
                     }
                     "--lines" => {
                         lines = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    "--find" => {
+                        find = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    "--top" => {
+                        top = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(8);
                         i += 2;
                     }
                     "--no-redact" => {
@@ -1069,7 +1181,7 @@ fn main() {
                     }
                 }
             }
-            let slice = stash::fetch_slice(id, query, lines).unwrap_or_else(|e| {
+            let slice = stash::fetch_slice(id, query, lines, find, top).unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1)
             });
@@ -1084,7 +1196,9 @@ fn main() {
                 needles::Verbatim::Lazy => text_tokens(&needles::lazy_pointer(&side, Some(id))),
                 needles::Verbatim::Full => side.tokens,
             };
-            if stash_pages_win(r.tokens + side_tok, r.pages.len(), raw_tok)
+            // find mode never images - same rule as tool_fetch above.
+            if find.is_none()
+                && stash_pages_win(r.tokens + side_tok, r.pages.len(), raw_tok)
                 && needles::scan_credentials(&slice).is_empty()
                 && !(side.dense && verbatim != needles::Verbatim::Off)
             {
@@ -1203,12 +1317,22 @@ fn main() {
                 format!("{stdout}\n--- stderr ---\n{stderr}")
             };
             let code = out.status.code().unwrap_or(0);
-            let d = distill::distill_log(&captured, query, 2);
+            let cmd_vec: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
+            let crushed = crush::crush_output(&cmd_vec, &captured, code);
+            let d = distill::distill_log(&crushed.text, query, 2);
             let s = &d.stats;
-            let mut lines = vec![format!(
-                "[tanuki run] exit {code} · {} -> {} lines · {}% of chars removed",
-                s["origLines"], s["outLines"], s["savedPct"]
-            )];
+            // split('\n').count(), not lines().count(): TS split("\n").length
+            // counts the trailing empty segment and this header must match it.
+            let captured_lines = captured.split('\n').count();
+            let saved_pct = pct(captured.chars().count() as u64, d.distilled.chars().count() as u64);
+            let mut header = format!(
+                "[tanuki run] exit {code} · {captured_lines} -> {} lines · {saved_pct}% of chars removed",
+                s["outLines"]
+            );
+            if let Some(rule) = &crushed.rule {
+                header.push_str(&format!(" · rule {rule}"));
+            }
+            let mut lines = vec![header];
             // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
             // if real usage ever wants one.
             if d.distilled.chars().count() <= RUN_INLINE_MAX
@@ -1381,7 +1505,7 @@ mod tests {
 
             // opt-out returns the stashed bytes, with no notice line
             let plain = tool_fetch(&json!({ "id": id, "lines": "1-3", "redact": false })).unwrap();
-            let slice = stash::fetch_slice(&id, None, Some("1-3")).unwrap();
+            let slice = stash::fetch_slice(&id, None, Some("1-3"), None, 8).unwrap();
             assert_eq!(plain, json!([{ "type": "text", "text": slice }]));
             assert!(slice.contains(secret));
         })
@@ -1398,7 +1522,7 @@ mod tests {
             let arr = content.as_array().unwrap();
 
             // recompute the gate inputs independently
-            let slice = stash::fetch_slice(&id, None, Some("1-400")).unwrap();
+            let slice = stash::fetch_slice(&id, None, Some("1-400"), None, 8).unwrap();
             let r = render::render_text(&slice, true, true, render::Font::Normal);
             let chars = slice.chars().count();
             let raw = text_tokens(&slice);
@@ -1467,7 +1591,7 @@ mod tests {
         stash::with_test_dir("gate-errs", || {
             // neither arg
             let e = tools_call(&json!({ "name": "tanuki_fetch", "arguments": { "id": "x" } }));
-            assert_eq!(e.unwrap_err(), "give exactly one of query or lines");
+            assert_eq!(e.unwrap_err(), "give exactly one of query, lines or find");
             // unknown id
             let e = tools_call(&json!({
                 "name": "tanuki_fetch", "arguments": { "id": "000000000000", "lines": "1-2" },
@@ -1533,6 +1657,99 @@ mod tests {
             tabled_distilled["imageTokens"].as_u64().unwrap()
                 < tabled_only["imageTokens"].as_u64().unwrap()
         );
+    }
+
+    fn thin_row_fixture() -> String {
+        (0..60)
+            .map(|i| {
+                json!({
+                    "id": i,
+                    "seq": i * 100,
+                    "status": if i == 20 { "error timeout gateway" } else { "ok" },
+                    "unit": format!("svc-{}", i % 7),
+                })
+            })
+            .map(|v| serde_json::to_string(&v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn fat_row_fixture() -> String {
+        (0..60)
+            .map(|i| {
+                let blob: String = (0..15)
+                    .map(|j| format!("token-{}-", (i * 31 + j * 7) % 997))
+                    .chain((0..40).map(|_| "x ".to_string()))
+                    .collect::<Vec<_>>()
+                    .join("");
+                json!({
+                    "id": i,
+                    "blob": blob.trim(),
+                    "status": if i % 9 == 0 { "error" } else { "ok" },
+                })
+            })
+            .map(|v| serde_json::to_string(&v).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn recommend_crush_thin_rows_saves_ninety_percent() {
+        stash::with_test_dir("crush-thin", || {
+            let text = thin_row_fixture();
+            let v = tool_estimate(&json!({ "text": text }));
+            let r = &v["recommend"];
+            
+            // Must have crush key
+            assert!(r.get("crush").is_some());
+            let crush = &r["crush"];
+            assert_eq!(crush["rows"], 60);
+            assert!(crush["kept"].as_u64().unwrap() < 60);
+            assert!(crush["savedPct"].as_i64().unwrap() >= 90);
+            
+            // Route reason should mention crush
+            let route = &v["route"];
+            let reason = route["reason"].as_str().unwrap();
+            assert!(reason.contains("recommend.crush"), "route reason missing crush steering: {}", reason);
+        });
+    }
+
+    #[test]
+    fn recommend_crush_fat_rows_imaging_beats_text_by_four_x() {
+        stash::with_test_dir("crush-fat", || {
+            let text = fat_row_fixture();
+            let v = tool_estimate(&json!({ "text": text }));
+            let r = &v["recommend"];
+            
+            assert!(r.get("crush").is_some());
+            let crush = &r["crush"];
+            let text_tok = crush["textTokens"].as_u64().unwrap();
+            let img_tok = crush["imageTokens"].as_u64().unwrap();
+            
+            // Fat rows: imaging should beat text by at least 4x
+            assert!(img_tok * 4 < text_tok, "imageTokens {} * 4 should be < textTokens {}", img_tok, text_tok);
+        });
+    }
+
+    #[test]
+    fn recommend_crush_does_not_hit_on_small_or_prose() {
+        stash::with_test_dir("crush-miss", || {
+            // 29 rows: below CRUSH_MIN
+            let small: String = (0..29)
+                .map(|i| json!({"id": i, "val": i * 2}))
+                .map(|v| serde_json::to_string(&v).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let v = tool_estimate(&json!({ "text": small }));
+            assert!(v["recommend"].get("crush").is_none());
+            assert!(!v["route"]["reason"].as_str().unwrap().contains("recommend.crush"));
+            
+            // Prose
+            let prose = "The quick brown tanuki jumps over the lazy log line.\nAnother line of prose.\nAnd yet another.";
+            let v2 = tool_estimate(&json!({ "text": prose }));
+            assert!(v2["recommend"].get("crush").is_none());
+            assert!(!v2["route"]["reason"].as_str().unwrap().contains("recommend.crush"));
+        });
     }
 }
 
