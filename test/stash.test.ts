@@ -9,6 +9,7 @@ process.env.TANUKI_STASH = DIR;
 
 const { stashText, fetchSlice, verifyValue } = await import("../src/stash.ts");
 const { toolFetch, toolStash } = await import("../src/main.ts");
+const { redactCredentials } = await import("../src/needles.ts");
 
 const LOG = Array.from(
   { length: 400 },
@@ -159,8 +160,8 @@ describe("stash", () => {
     expect(() => fetchSlice("000000000000", "x", null)).toThrow("unknown stash id: 000000000000");
     expect(() => fetchSlice(id, null, "9-1")).toThrow("bad lines range");
     expect(() => fetchSlice(id, null, "abc")).toThrow("bad lines range");
-    expect(() => fetchSlice(id, "x", "1-2")).toThrow("give exactly one of query or lines");
-    expect(() => fetchSlice(id, null, null)).toThrow("give exactly one of query or lines");
+    expect(() => fetchSlice(id, "x", "1-2")).toThrow("give exactly one of query, lines or find");
+    expect(() => fetchSlice(id, null, null)).toThrow("give exactly one of query, lines or find");
   });
 
   test("toolStash returns the overview as a single text block", () => {
@@ -255,7 +256,6 @@ describe("verify: disk-grounded exact check", () => {
 // through `fetch` until the named rule existed - the same "allowlist with an
 // unbounded complement" failure the sidecar classifier had. Bounds here are
 // measured against 19.7 MB of real logs: 2 hits in 166,985 lines, both real.
-const { redactCredentials } = await import("../src/needles.ts");
 
 describe("named-secret redaction", () => {
 
@@ -302,5 +302,161 @@ describe("named-secret redaction", () => {
     // `password=password`: an indexOf-based splice masks the key instead of
     // the value and silently diverges from the Rust engine
     expect(redactCredentials("password=password").text).toBe("password=[redacted:named-secret]");
+  });
+});
+
+describe("find mode", () => {
+  test("word boundary scores 3, substring scores 1, tie breaks by line asc", () => {
+    // Line 1: "error_code" - substring match for "error" = 1
+    // Line 3: "error occurred" - word boundary match for "error" = 3
+    // Line 5: "ERROR log" - word boundary match for "error" (case insensitive) = 3
+    // Line 7: "the error" - word boundary match = 3
+    const text = [
+      "error_code=500",      // 1: substring only
+      "info message",        // 2: no match
+      "error occurred",      // 3: word boundary
+      "debug trace",         // 4: no match
+      "ERROR log",           // 5: word boundary
+      "warning here",        // 6: no match
+      "the error",           // 7: word boundary
+      "another line",        // 8: no match
+      "final error_msg",     // 9: substring only
+    ].join("\n");
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "error", 3);
+    // Top 3 by score: lines 3,5,7 (all score 3), tie-break by line asc
+    // Windows: 3 -> [1,5], 5 -> [3,7], 7 -> [5,9]
+    // Merged: [1,9] (all adjacent/overlapping)
+    expect(result).toContain("·find· L1-9 score 3");
+    expect(result).toContain("error_code=500");
+    expect(result).toContain("final error_msg");
+    expect(result).toContain("·find· 1 words · 5 lines matched · 1 windows");
+  });
+
+  test("substring-only scoring would change ranking (mutation guard)", () => {
+    // If all hits scored 1, line 1 and 9 would rank equally with 3,5,7
+    // and might be selected instead, proving word-boundary logic matters
+    const text = [
+      "error_code=500",
+      "info message",
+      "error occurred",
+    ].join("\n");
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "error", 1);
+    // With correct scoring, line 3 (score 3) wins over line 1 (score 1)
+    expect(result).toContain("error occurred");
+    // Line 1 might be included via context window, but not as the anchor
+    // The key is that the window is centered on line 3, not line 1
+    expect(result).toContain("·find· L1-3 score 3");
+  });
+
+  test("window merge: adjacent windows collapse", () => {
+    const text = [
+      "line 1",
+      "line 2",
+      "error at 3",    // 3: word match
+      "line 4",
+      "line 5",
+      "error at 6",    // 6: word match
+      "line 7",
+    ].join("\n");
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "error", 2);
+    // Anchors: 3,6 -> windows [1,5] and [4,7] -> merged to [1,7]
+    expect(result).toContain("·find· L1-7 score 3");
+    expect(result).toContain("·find· 1 words · 2 lines matched · 1 windows");
+  });
+
+  test("h==0: no matches returns zero-match message", () => {
+    const text = "alpha\nbeta\ngamma";
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "notfound xyz", 8);
+    expect(result).toBe("·find· 2 words · 0 lines matched");
+  });
+
+  test("exclusivity: cannot mix find with query or lines", () => {
+    const { id } = stashText("test");
+    expect(() => fetchSlice(id, "x", null, "word", 8)).toThrow("give exactly one of query, lines or find");
+    expect(() => fetchSlice(id, null, "1-2", "word", 8)).toThrow("give exactly one of query, lines or find");
+    expect(() => fetchSlice(id, "x", "1-2", "word", 8)).toThrow("give exactly one of query, lines or find");
+    expect(() => fetchSlice(id, null, null, null, 8)).toThrow("give exactly one of query, lines or find");
+  });
+
+  test("top clamp: 1..32, default 8", () => {
+    // Anchors 6 lines apart: windows [n-2, n+2] never touch (gap of 1 line),
+    // so window count == anchor count and the clamp is observable. A fixture
+    // of CONSECUTIVE matches would merge into one window and prove nothing.
+    const text = Array.from({ length: 200 }, (_, i) =>
+      (i + 1) % 6 === 0 ? `error line ${i + 1}` : `quiet line ${i + 1}`,
+    ).join("\n");
+    const { id } = stashText(text);
+    // top = 0 clamps to 1
+    expect(fetchSlice(id, null, null, "error", 0)).toContain("· 1 windows");
+    // top = 100 clamps to 32 (33 matching lines exist)
+    expect(fetchSlice(id, null, null, "error", 100)).toContain("· 32 windows");
+    // default = 8
+    expect(fetchSlice(id, null, null, "error")).toContain("· 8 windows");
+  });
+
+  test("redaction still applied in find mode", () => {
+    // Redaction lives in the CALLER (toolFetch/CLI), same as the query and
+    // lines paths - fetchSlice itself returns the raw bytes.
+    const text = ["line 1", 'api_key="AKIAIOSFODNN7EXAMPLE"', "error occurred key nearby"].join("\n");
+    const { id } = stashText(text);
+    expect(fetchSlice(id, null, null, "error key", 8)).toContain("AKIAIOSFODNN7EXAMPLE");
+    const out = toolFetch({ id, find: "error key" }) as { type: string; text?: string }[];
+    const joined = out.map((c) => c.text ?? "").join("\n");
+    expect(joined).toContain("[redacted:aws-key]");
+    expect(joined).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  });
+
+  test("find output is never imaged, even when pages would win", () => {
+    // 300 long prose-ish lines, every 6th matching: enough window bytes that
+    // the fetch imaging gate WOULD fire (this exact case shipped as pixels
+    // first - retrieval-report.mjs scored the answer ABSENT and caught it).
+    const text = Array.from({ length: 300 }, (_, i) =>
+      (i + 1) % 6 === 0
+        ? `entry ${i + 1} ERROR request failed with a long explanatory tail that pads the window bytes`
+        : `entry ${i + 1} quiet routine heartbeat line with a long explanatory tail that pads the window`,
+    ).join("\n");
+    const { id } = stashText(text);
+    const out = toolFetch({ id, find: "ERROR request failed", top: 32 }) as { type: string; text?: string }[];
+    expect(out.some((c) => c.type === "image")).toBe(false);
+    expect(out.map((c) => c.text ?? "").join("\n")).toContain("·find·");
+  });
+
+  test("find needs at least one word", () => {
+    const { id } = stashText("test");
+    expect(() => fetchSlice(id, null, null, "", 8)).toThrow("find needs at least one word");
+    expect(() => fetchSlice(id, null, null, "   ", 8)).toThrow("find needs at least one word");
+  });
+
+  test("multiple words: scores accumulate", () => {
+    const text = [
+      "error occurred",      // 1: "error" 3 + "occurred" 3 = 6
+      "the error",          // 2: "error" 3 = 3
+      "line occurred here", // 3: "occurred" 3 = 3
+    ].join("\n");
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "error occurred", 1);
+    // Line 1 has highest score (6)
+    expect(result).toContain("error occurred");
+    expect(result).toContain("·find· 2 words · 3 lines matched · 1 windows");
+  });
+
+  test("redaction path: find result contains credentials that will be redacted by caller", () => {
+    const text = [
+      "line 1",
+      'api_key="AKIAIOSFODNN7EXAMPLE"',
+      "error occurred",
+    ].join("\n");
+    const { id } = stashText(text);
+    const result = fetchSlice(id, null, null, "error", 8);
+    // The slice contains the credential
+    expect(result).toContain("AKIAIOSFODNN7EXAMPLE");
+    // When passed through redactCredentials (same path as query/lines), it gets masked
+    const redacted = redactCredentials(result);
+    expect(redacted.text).toContain("[redacted:aws-key]");
+    expect(redacted.text).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
 });

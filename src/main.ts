@@ -13,9 +13,11 @@ import process from "node:process";
 import { apply as codebookApply } from "./codebook.ts";
 import { costVerdict } from "./cost.ts";
 import { fidelity, weakReader } from "./fidelity.ts";
-import { tableEncode } from "./table.ts";
+import { crushRows, crushRowsSelect, tableEncode } from "./table.ts";
+import { crushOutput } from "./crush.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
+import { isSensitivePath } from "./gate.ts";
 import { lazyPointer, parseVerbatim, scanNeedles, scanCredentials, redactCredentials, type Sidecar, type Verbatim } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
@@ -24,7 +26,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.19.5";
+export const VERSION = "0.20.0";
 const MAX_INLINE_PAGES = 6;
 const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
@@ -37,18 +39,30 @@ interface PipelineOut {
   level: number;
   cbEntries: number;
   table: { rows: number; cols: number } | null;
+  crush: { kept: number; rows: number } | null;
 }
 
 /** Stages 0 + 0.5 + 1: optional distill, optional codebook, then ladder level. */
 function stage01(
   text: string,
   level: number,
+  useCrush: boolean,
   useDistill: boolean,
   query: string | null,
   useCodebook: boolean,
   useTable: boolean,
 ): PipelineOut {
   let working = text;
+  let crush: { kept: number; rows: number } | null = null;
+  let crushId: string | null = null;
+  if (useCrush) {
+    const c = crushRows(working);
+    if (c !== null) {
+      working = c.text;
+      crush = { kept: c.kept, rows: c.rows };
+      crushId = c.id;
+    }
+  }
   let table: { rows: number; cols: number } | null = null;
   if (useTable) {
     const t = tableEncode(working);
@@ -70,13 +84,19 @@ function stage01(
     cbEntries = cb.entries;
   }
   const c = compressText(working, level);
+  let compressed = c.compressed;
+  // Append crush marker after compress
+  if (crushId !== null && crush !== null) {
+    compressed += `\n·crushed· kept ${crush.kept} of ${crush.rows} rows - full set: fetch ${crushId} (--query re | --lines a-b)`;
+  }
   return {
     stage0,
-    compressed: c.compressed,
+    compressed,
     protectedLines: c.protectedLines,
     level: c.level,
     cbEntries,
     table,
+    crush,
   };
 }
 
@@ -88,8 +108,6 @@ function pct(from: number, to: number): number {
 }
 
 // ---------------------------------------------------------------- MCP tools
-
-/** Shared arguments of the pipeline tools (render/estimate). */
 interface PipeArgs {
   text: string;
   level: number;
@@ -99,6 +117,7 @@ interface PipeArgs {
   pack: boolean;
   font: string;
   codebook: boolean;
+  crush: boolean;
   table: boolean;
   verbatim: Verbatim;
 }
@@ -116,6 +135,7 @@ function pipeArgs(args: unknown): PipeArgs {
     pack: asBool(jget(args, "pack")) ?? true,
     font: asStr(jget(args, "font")) ?? "normal",
     codebook: asBool(jget(args, "codebook")) ?? false,
+    crush: asBool(jget(args, "crush")) ?? false,
     table: asBool(jget(args, "table")) ?? false,
     verbatim: parseVerbatim(jget(args, "verbatim")),
   };
@@ -164,7 +184,7 @@ function recommendFor(text: string): Record<string, unknown> {
   const wsTok = textTokens(compressText(text, 1).compressed);
   const wsWins = wsTok < rawTextTok;
   const textTok = wsWins ? wsTok : rawTextTok;
-  return {
+  const out: Record<string, unknown> = {
     codebook: rev.codebook,
     imageTokens: rev.tokens,
     pages: rev.pages,
@@ -178,6 +198,39 @@ function recommendFor(text: string): Record<string, unknown> {
       withDistill: textTokens(disDistilled),
     },
   };
+  // The composed route, priced unprompted like `table`: headroom-style row
+  // selection first, then the same walk (columnar table x codebook) over the
+  // kept rows, priced BOTH as text and as pages. Thin rows collapse to a tiny
+  // text route; fat rows leave enough bulk that imaging the crushed remainder
+  // stacks a second cut on top (the DeepSeek-OCR route applied after the
+  // selection). Selection only - crushRowsSelect stashes nothing, because a
+  // price probe must not write to the store; the stash happens when a caller
+  // actually passes `crush: true`.
+  const cr = crushRowsSelect(text);
+  if (cr !== null) {
+    let cw = walk(cr.text);
+    let ctable = false;
+    const ctbl = tableEncode(cr.text);
+    if (ctbl !== null) {
+      const wt = walk(ctbl.text);
+      if (wt.tokens < cw.tokens) {
+        cw = wt;
+        ctable = true;
+      }
+    }
+    const crushTextTok = textTokens(cr.text);
+    const best = crushTextTok < cw.tokens ? crushTextTok : cw.tokens;
+    out.crush = {
+      rows: cr.rows,
+      kept: cr.kept,
+      textTokens: crushTextTok,
+      imageTokens: cw.tokens,
+      codebook: cw.codebook,
+      table: ctable,
+      savedPct: pct(rawTextTok, best),
+    };
+  }
+  return out;
 }
 
 /// The hybrid pick: ONE recommended route over the candidates `recommend`
@@ -235,12 +288,25 @@ function routeFor(
     pick = textPick; tokens = text.tokens; fid = "exact";
     reason = "the text side is already the cheaper route; imaging adds no real save";
   }
+  // Steer, don't relabel: the route only ever picks a loss class it can name
+  // honestly (exact text or a banded image), so crush - lossy by omission,
+  // recoverable via the stash - never becomes `pick`. But when the composed
+  // route beats the pick on tokens, the reason says so, pointing at the
+  // priced candidate in recommend.crush. Credential inputs keep the plain
+  // never-imaged story.
+  const crush = rec.crush as { kept: number; rows: number; textTokens: number; imageTokens: number } | undefined;
+  if (crush !== undefined && creds === 0) {
+    const crushTok = crush.textTokens < crush.imageTokens ? crush.textTokens : crush.imageTokens;
+    if (crushTok < tokens) {
+      reason += `; crush: true would keep ${crush.kept} of ${crush.rows} rows for ~${crushTok} tok, full set stashed (recommend.crush)`;
+    }
+  }
   return { pick, tokens, savedPct: pct(rawTok, tokens), fidelity: fid, reason };
 }
 
 export function toolEstimate(args: unknown): Record<string, unknown> {
   const a = pipeArgs(args);
-  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
+  const p = stage01(a.text, a.level, a.crush, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const est = estimateText(p.compressed, a.reflow, a.pack, font);
   const side = a.verbatim === "off" ? null : scanNeedles(p.compressed, charCount(a.text));
@@ -281,6 +347,7 @@ export function toolEstimate(args: unknown): Record<string, unknown> {
     font: font === "tiny" ? "tiny" : "normal",
     codebook: a.codebook ? p.cbEntries : false,
     table: p.table !== null ? p.table : false,
+    crush: p.crush !== null ? p.crush : false,
     verbatim: side === null ? false : { more: side.more, dense: side.dense, needles: side.needles.length + side.more, tokens: sideTok },
     verdict: creds.length > 0 ? "TEXT cheaper (credentials)" : side !== null && side.dense ? "TEXT cheaper (needle-dense)" : imgTok + sideTok < rawTok ? "PIPELINE cheaper" : "TEXT cheaper",
     credentials: creds.length > 0 ? creds : false,
@@ -313,7 +380,7 @@ export function toolRender(args: unknown): unknown[] {
   if (creds.length > 0) {
     return [{ type: "text", text: `[tanuki-context: refused to render — ${creds.length} credential-shaped secret(s) detected (${creds.join(", ")}); kept as text so a secret is never silently misread from pixels]` }];
   }
-  const p = stage01(a.text, a.level, a.distill, a.query, a.codebook, a.table);
+  const p = stage01(a.text, a.level, a.crush, a.distill, a.query, a.codebook, a.table);
   const font = parseFont(a.font);
   const r = renderText(p.compressed, a.reflow, a.pack, font);
   const side = a.verbatim === "off" ? null : scanNeedles(p.compressed, charCount(a.text));
@@ -400,6 +467,16 @@ export function toolRender(args: unknown): unknown[] {
 export function toolDistill(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
   let working = text;
+  let crush: { kept: number; rows: number } | null = null;
+  let crushId: string | null = null;
+  if (asBool(jget(args, "crush")) ?? false) {
+    const c = crushRows(working);
+    if (c !== null) {
+      working = c.text;
+      crush = { kept: c.kept, rows: c.rows };
+      crushId = c.id;
+    }
+  }
   let table: { rows: number; cols: number } | null = null;
   if (asBool(jget(args, "table")) ?? false) {
     const t = tableEncode(working);
@@ -409,11 +486,18 @@ export function toolDistill(args: unknown): unknown[] {
     }
   }
   const d = distillLog(working, asStr(jget(args, "query")), 2);
+  let distilled = d.distilled;
+  // Append crush marker if crushRows fired
+  if (crushId !== null && crush !== null) {
+    distilled += `\n·crushed· kept ${crush.kept} of ${crush.rows} rows - full set: fetch ${crushId} (--query re | --lines a-b)`;
+  }
   const stats =
     table !== null ? { ...(d.stats as Record<string, unknown>), table } : d.stats;
+  const finalStats =
+    crush !== null ? { ...stats, crush } : stats;
   return [
-    { type: "text", text: jstring(stats, true) },
-    { type: "text", text: d.distilled },
+    { type: "text", text: jstring(finalStats, true) },
+    { type: "text", text: distilled },
   ];
 }
 
@@ -467,8 +551,8 @@ interface FetchResult {
 /// manual recommends for large references — and an agent that cannot read an
 /// id off the page just fetches again, which is the loop thrash in EVALS §6.
 /// Sidecar tokens count against the win, and a needle-dense slice stays text.
-function fetchRendered(id: string, query: string | null, lines: string | null, verbatim: Verbatim): FetchResult {
-  const slice = fetchSlice(id, query, lines);
+function fetchRendered(id: string, query: string | null, lines: string | null, find: string | null, top: number, verbatim: Verbatim): FetchResult {
+  const slice = fetchSlice(id, query, lines, find, top);
   const rawTok = textTokens(slice);
   const r = renderText(slice, true, true, "normal");
   const side = scanNeedles(slice, charCount(slice));
@@ -477,7 +561,11 @@ function fetchRendered(id: string, query: string | null, lines: string | null, v
   const cost = r.tokens + sideTok;
   // `lazy` withholds the strings but never the refusal: a needle-dense slice
   // still stays text, exactly as it does under the full sidecar.
+  // find mode NEVER images: its output is small ranked windows whose value is
+  // byte-exactness - a relevance result read back off pixels is the exact
+  // failure retrieval-report.mjs counts as a miss (caught there first).
   const wins =
+    find === null &&
     cost <= rawTok * 0.75 &&
     rawTok - cost >= 300 &&
     r.pages.length <= 6 &&
@@ -485,13 +573,15 @@ function fetchRendered(id: string, query: string | null, lines: string | null, v
     (verbatim === "off" || !side.dense);
   return { slice, rawTok, r, side, sideTok, wins };
 }
-
 export function toolFetch(args: unknown): unknown[] {
   const id = asStr(jget(args, "id")) ?? "";
   const query = asStr(jget(args, "query"));
+  const lines = asStr(jget(args, "lines"));
+  const find = asStr(jget(args, "find"));
+  const top = asU64(jget(args, "top")) ?? 8;
   const redact = asBool(jget(args, "redact")) ?? true;
   const verbatim = parseVerbatim(jget(args, "verbatim"));
-  const f = fetchRendered(id, query, asStr(jget(args, "lines")), verbatim);
+  const f = fetchRendered(id, query, lines, find, top, verbatim);
   // A query fetch reports how many raw lines matched. The slice is distilled
   // and context-padded, so counting it is wrong - and without a real count an
   // agent cannot answer "which unit logged the most errors" at all: it can
@@ -848,23 +938,38 @@ export function main(): void {
   const argv = process.argv.slice(1); // argv[0] = program, argv[1] = command (like env::args)
   switch (argv[1]) {
     case "distill": {
-      const file = argv[2] ?? fatal("usage: tanuki-context distill <file> [query] [--table]");
+      const file = argv[2] ?? fatal("usage: tanuki-context distill <file> [query] [--table] [--crush] [--allow-sensitive]");
+      if (!argv.includes("--allow-sensitive") && isSensitivePath(file)) {
+        fatal(`refusing ${file}: filename suggests credentials; pass --allow-sensitive to override`);
+      }
       const text = readFileOrDie(file);
       let working = text;
+      // stage 0.25 before 0.5, same order as stage01: crush selects rows,
+      // table lays them out. The stash id rides the stats JSON (this arm
+      // prints stats only, so a marker line would have nowhere to go).
+      let crush: { id: string; kept: number; rows: number } | null = null;
+      if (argv.includes("--crush")) {
+        const c = crushRows(working);
+        if (c !== null) {
+          working = c.text;
+          crush = { id: c.id, kept: c.kept, rows: c.rows };
+        }
+      }
       if (argv.includes("--table")) {
         const t = tableEncode(working);
         if (t !== null) working = t.text;
       }
       const pos = argv.slice(3).filter((a) => !a.startsWith("--"));
       const d = distillLog(working, pos[0] ?? null, 2);
-      process.stdout.write(jstring(d.stats, false) + "\n");
+      const stats = crush !== null ? { ...(d.stats as Record<string, unknown>), crush } : d.stats;
+      process.stdout.write(jstring(stats, false) + "\n");
       break;
     }
     case "estimate": {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
+          "usage: tanuki-context estimate <file> [level] [--distill] [--table] [--crush] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--model <id>] [--cached]",
         );
       const text = readFileOrDie(file);
       const pos = positionals(argv, 3);
@@ -878,6 +983,7 @@ export function main(): void {
         pack: !argv.includes("--no-pack"),
         font,
         codebook: argv.includes("--codebook"),
+        crush: argv.includes("--crush"),
         table: argv.includes("--table"),
         verbatim: cliVerbatim(argv),
         model,
@@ -890,8 +996,11 @@ export function main(): void {
       const file =
         argv[2] ??
         fatal(
-          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook]",
+          "usage: tanuki-context render <file> [level] [outdir] [--distill] [--table] [--crush] [--no-pack] [--verbatim full|lazy|off] [--font tiny] [--codebook] [--allow-sensitive]",
         );
+      if (!argv.includes("--allow-sensitive") && isSensitivePath(file)) {
+        fatal(`refusing ${file}: filename suggests credentials; pass --allow-sensitive to override`);
+      }
       const text = readFileOrDie(file);
       const pos = positionals(argv, 3);
       // Same parse bound as `estimate`, whose contract is "the same arguments
@@ -906,7 +1015,7 @@ export function main(): void {
         process.stdout.write(jstring({ refused: true, credentials: creds }, false) + "\n");
         break;
       }
-      const p = stage01(text, level, argv.includes("--distill"), null, useCb, argv.includes("--table"));
+      const p = stage01(text, level, argv.includes("--crush"), argv.includes("--distill"), null, useCb, argv.includes("--table"));
       const r = renderText(p.compressed, true, pack, font);
       const vb = cliVerbatim(argv);
       const side = vb === "off" ? null : scanNeedles(p.compressed, charCount(text));
@@ -954,7 +1063,7 @@ export function main(): void {
           const d = distillLog(text, null, 2);
           result = d.stats;
         } else {
-          const p = stage01(text, level, useDistill, null, false, false);
+          const p = stage01(text, level, false, useDistill, null, false, false);
           const r = renderText(p.compressed, true, false, "normal");
           result = {
             pages: r.pages.length,
@@ -1000,17 +1109,22 @@ export function main(): void {
       break;
     }
     case "stash": {
-      const file = argv[2] ?? fatal("usage: tanuki-context stash <file>");
+      const file = argv[2] ?? fatal("usage: tanuki-context stash <file> [--allow-sensitive]");
+      if (!argv.includes("--allow-sensitive") && isSensitivePath(file)) {
+        fatal(`refusing ${file}: filename suggests credentials; pass --allow-sensitive to override`);
+      }
       const s = stashText(readFileOrDie(file));
       process.stdout.write(s.overview + "\n");
       break;
     }
     case "fetch": {
-      const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact] [--verbatim lazy]");
+      const id = argv[2] ?? fatal("usage: tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--find \"words\"] [--top k] [--no-redact] [--verbatim lazy]");
       const verbatim = parseVerbatim(flagVal(argv, "--verbatim"));
+      const topVal = flagVal(argv, "--top");
+      const top = topVal !== null ? parseNum(topVal, 8) : 8;
       let f: FetchResult;
       try {
-        f = fetchRendered(id, flagVal(argv, "--query"), flagVal(argv, "--lines"), verbatim);
+        f = fetchRendered(id, flagVal(argv, "--query"), flagVal(argv, "--lines"), flagVal(argv, "--find"), top, verbatim);
       } catch (e) {
         fatal(e instanceof Error ? e.message : String(e));
       }
@@ -1034,7 +1148,7 @@ export function main(): void {
       let dir: string | undefined;
       for (let i = 3; i < argv.length; i++) {
         if (argv[i].startsWith("--")) {
-          if (argv[i] === "--query" || argv[i] === "--lines" || argv[i] === "--verbatim") i++;
+          if (argv[i] === "--query" || argv[i] === "--lines" || argv[i] === "--find" || argv[i] === "--top" || argv[i] === "--verbatim") i++;
           continue;
         }
         dir = argv[i];
@@ -1068,9 +1182,15 @@ export function main(): void {
       const captured =
         (r.stdout ?? "") + ((r.stderr ?? "") !== "" ? `\n--- stderr ---\n${r.stderr}` : "");
       const code = r.status ?? 0;
-      const d = distillLog(captured, query, 2);
-      const s = d.stats as { origLines: number; outLines: number; savedPct: number };
-      const lines = [`[tanuki run] exit ${code} · ${s.origLines} -> ${s.outLines} lines · ${s.savedPct}% of chars removed`];
+      const crushed = crushOutput(cmd, captured, code);
+      const d = distillLog(crushed.text, query, 2);
+      const capturedLines = captured.split("\n").length;
+      const savedPct = pct(charCount(captured), charCount(d.distilled));
+      let header = `[tanuki run] exit ${code} · ${capturedLines} -> ${d.stats.outLines} lines · ${savedPct}% of chars removed`;
+      if (crushed.rule !== null) {
+        header += ` · rule ${crushed.rule}`;
+      }
+      const lines = [header];
       // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
       // if real usage ever wants one.
       if (charCount(d.distilled) <= RUN_INLINE_MAX || charCount(captured) <= RUN_INLINE_MAX) {

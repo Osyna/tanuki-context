@@ -14,7 +14,7 @@ import { isRustWhitespace, rnd, rustTrim, truncateChars } from "./serde.ts";
 // No `u` flag anywhere: the Rust spec uses `(?-u:\b)` / ASCII classes precisely
 // to match legacy JS regex semantics (\b, \w, \d are ASCII there).
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
-const IMPORTANT =
+export const IMPORTANT =
   /\b([0-9A-Za-z_]*(error|exception)s?|err|warn(ing)?s?|fail(s|ed|ure|ures)?|panic(s|ked)?|fatal|critical|traceback|denied|refused|timeouts?|timed.?out|assert(s|ed|ion|ions)?|segfault(s|ed)?)\b/i;
 const M_TS =
   /[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?/g;

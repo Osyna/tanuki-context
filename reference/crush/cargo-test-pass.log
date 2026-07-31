@@ -1,0 +1,150 @@
+warning: value assigned to `run_len` is never read
+   --> src/main.rs:127:17
+    |
+127 |                 run_len = 0;
+    |                 ^^^^^^^^^^^
+...
+149 |     flush!();
+    |     -------- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `flush` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `run_vowels` is never read
+   --> src/main.rs:128:17
+    |
+128 |                 run_vowels = 0;
+    |                 ^^^^^^^^^^^^^^
+...
+149 |     flush!();
+    |     -------- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `flush` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: variable does not need to be mutable
+   --> src/main.rs:635:9
+    |
+635 |     let mut v = json!({ "tools": [
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_needles` is never used
+   --> src/needles.rs:334:8
+    |
+334 | pub fn scan_needles(text: &str) -> Sidecar {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tools_list`
+    --> src/main.rs:1626:46
+     |
+1626 |     use super::{all_tools, missing_required, tools_list};
+     |                                              ^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tanuki-context` (bin "tanuki-context") generated 4 warnings (run `cargo fix --bin "tanuki-context" -p tanuki-context` to apply 1 suggestion)
+warning: `tanuki-context` (bin "tanuki-context" test) generated 4 warnings (3 duplicates) (run `cargo fix --bin "tanuki-context" -p tanuki-context --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/main.rs (target/release/deps/tanuki_context-6ff7d7ecb49cf899)
+
+running 82 tests
+test codebook::tests::codebook_noop_when_nothing_repeats ... ok
+test cost::tests::cache_flips_verdict ... ok
+test cost::tests::geom_switches_counting_for_non_anthropic_only ... ok
+test cost::tests::provider_math_is_exact_on_known_dims ... ok
+test cost::tests::env_override_applies ... ok
+test codebook::tests::codebook_roundtrips_paths ... ok
+test fidelity::reader_tests::only_measured_ids_are_weak ... ok
+test fidelity::reader_tests::weak_reader_floors_the_band ... ok
+test needles::verbatim_env_tests::env_is_a_default_that_an_explicit_argument_beats ... ok
+test needles::honesty_tests::header_is_plain_when_everything_fits ... ok
+test needles::named_secret_tests::does_not_fire_on_measured_false_positives ... ok
+test needles::tests::budget_scales_with_raw_size ... ok
+test needles::honesty_tests::header_counts_carried_not_found ... ok
+test fidelity::tests::bands_and_floor ... ok
+test proxy::tests::cache_control_blocks_untouched ... ok
+test needles::named_secret_tests::never_re_redacts_an_earlier_placeholder ... ok
+test needles::tests::words_durations_and_timestamps_stay_out ... ok
+test needles::named_secret_tests::leaves_the_key_name_readable ... ok
+test needles::named_secret_tests::splices_at_the_last_occurrence ... ok
+test needles::tests::ids_with_no_named_format_still_ride_as_text ... ok
+test proxy::tests::small_and_non_message_bodies_pass_through ... ok
+test needles::named_secret_tests::catches_assignment_shaped_secrets ... ok
+test needles::tests::budget_carries_real_logs_and_flags_id_dense_blocks ... ok
+test render::tests::nonpack_geometry_is_pxpipe ... ok
+test distill::cr_tests::crlf_lines_survive_as_plain_lines ... ok
+test distill::cr_tests::cr_progress_frames_collapse_to_last_frame ... ok
+test proxy::tests::latest_message_never_imaged ... ok
+test distill::order_tests::summary_tie_order_is_first_seen_and_deterministic ... ok
+test render::tests::missing_glyphs_escape_readable ... ok
+test render::tests::pack_roundtrip_preexisting_sentinels ... ok
+test render::tests::pack_shrinks_indented_code ... ok
+test render::tests::patch_grid_token_math ... ok
+test schema_tests::a_no_argument_tool_omits_properties ... ok
+test render::tests::width_trim_helps_short_input ... ok
+test schema_tests::advertised_verbatim_values_do_what_the_enum_says ... ok
+test schema_tests::every_enum_member_matches_its_declared_type ... ok
+test schema_tests::legacy_boolean_callers_still_work ... ok
+test schema_tests::every_tool_carrying_verbatim_advertises_the_same_closed_enum ... ok
+test schema_tests::no_advertised_parameter_is_a_type_union ... ok
+test sha256::tests::fips_180_4_vectors ... ok
+test stash::count_tests::match_count_is_raw_not_distilled ... ok
+test stash::tests::fetch_lines_slice_exact ... ok
+test stash::tests::fetch_arg_and_id_errors_exact ... ok
+test schema_tests::enforced_required_matches_advertised_required ... ok
+test render::tests::pack_roundtrip_code ... ok
+test table::tests::absent_keys_become_empty_cells_and_survive_the_round_trip ... ok
+test render::tests::tiny_font_cuts_pixels ... ok
+test table::tests::integral_f64_cells_print_as_integers ... ok
+test stash::tests::fetch_query_returns_distilled_slice ... ok
+test table::tests::gate_mixed_prose_stays_text_and_size_gate_decides_tiny_inputs ... ok
+test table::tests::tabs_and_newlines_inside_string_values_cannot_break_the_grammar ... ok
+test stash::tests::overview_counts_trailing_segment_and_lists_repeats ... ok
+test stash::tests::overview_deterministic_and_exact ... ok
+test stash::tests::verify_exact_corrected_ambiguous_absent ... ok
+test table::tests::keys_stated_once_materially_smaller_rows_cols_counted ... ok
+test tests::recommend_ties_break_to_fewest_knobs_on_tiny_text ... ok
+test table::tests::round_trip_preserves_every_value_ndjson_and_array_forms ... ok
+test tests::recommend_prices_distill_separately_for_repetitive_logs ... ok
+test tests::route_is_a_hybrid_pick_over_cost_and_fidelity ... ok
+test tests::recommend_ignores_requested_knobs ... ok
+test tests::estimate_table_knob_reports_rows_cols_and_recommend_probes_table ... ok
+test tests::table_and_distill_compose_identical_rows_collapse_harder ... ok
+test token_estimator_tests::chars_over_four_would_fail_this_suite ... ok
+test token_estimator_tests::degenerate_inputs_are_safe ... ok
+test token_estimator_tests::log_like_content_lands_within_12_percent ... ok
+test token_estimator_tests::tracks_the_real_tokenizer ... ok
+test proxy::tests::tool_result_text_imaged_inside_block ... ok
+test proxy::tests::opt_out_leaves_body_free_of_breakpoints ... ok
+test token_estimator_tests::word_run_is_cheaper_than_random_run ... ok
+test proxy::tests::never_exceeds_the_four_breakpoint_ceiling ... ok
+test proxy::tests::marks_last_block_of_last_imaged_message ... ok
+test tests::stash_fetch_big_slice_returns_pages_with_marker ... ok
+test tests::stash_fetch_redacts_credentials_by_default ... ok
+test tests::stash_fetch_small_slice_stays_text ... ok
+test tests::stash_tool_errors_route_through_jsonrpc_error_path ... ok
+test tests::verbatim_lazy_withholds_the_strings_behind_one_pointer ... ok
+test proxy::tests::wire_roundtrip_with_mock_upstream ... ok
+test proxy::tests::string_user_content_becomes_marker_plus_pages ... ok
+test proxy::tests::oversized_user_text_block_imaged_in_place ... ok
+test proxy::tests::byte_identical_repeat_becomes_marker_without_images ... ok
+test proxy::tests::one_byte_difference_defeats_dedupe ... ok
+test proxy::tests::session_never_changes_emitted_bytes ... ok
+
+test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/run_cli.rs (target/release/deps/run_cli-b140c6e0624c4bb3)
+
+running 2 tests
+test exit_code_passes_through_frames_collapse_errors_verbatim ... ok
+test huge_output_is_stashed_with_a_fetch_pointer ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,0 +1,40 @@
+diff --git a/b.js b/b.js
+index 5454e56..398b6b4 100644
+--- a/b.js
++++ b/b.js
+@@ -1,29 +1,29 @@
+ // Sample JavaScript file
+ function hello() {
+-  console.log("Hello World");
++  console.log("Hello Universe");
+ }
+ 
+-function add(a, b) {
++function add(x, y) {
+   return a + b;
+ }
+ 
+ function subtract(a, b) {
+-  return a - b;
++  return x - y;
+ }
+ 
+ function multiply(a, b) {
+-  return a * b;
++  return x * y;
+ }
+ 
+ function divide(a, b) {
+-  if (b === 0) {
++  if (x === 0) {
+     throw new Error("Division by zero");
+   }
+   return a / b;
+ }
+ 
+ function greet(name) {
+-  console.log("Hello, " + name);
++  console.log("Hi, " + name);
+ }
+ 
+ module.exports = {

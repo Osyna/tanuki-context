@@ -1,0 +1,9 @@
+src/index.ts(5,2): error TS2304: Cannot find name 'x'.
+src/index.ts(12,5): error TS2304: Cannot find name 'config'.
+src/utils/helper.ts(8,10): error TS2304: Cannot find name 'process'.
+src/utils/helper.ts(15,3): error TS2322: Type 'string' is not assignable to type 'number'.
+src/types.ts(22,15): error TS2304: Cannot find name 'T'.
+src/api.ts(3,18): error TS2304: Cannot find name 'fetch'.
+src/api.ts(45,9): error TS2304: Cannot find name 'undefined'.
+src/main.ts(7,1): error TS2304: Cannot find name 'app'.
+Found 8 errors in 3 files.

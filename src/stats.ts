@@ -11,7 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Float, asU64, isObj, rnd } from "./serde.ts";
+import { Float, asStr, asU64, isObj, rnd } from "./serde.ts";
 
 export function eventsPath(): string {
   // Empty means unset, the same rule TANUKI_STASH uses. Without it,
@@ -40,6 +40,15 @@ export function pxStats(): object {
   let actual = 0;
   let output = 0;
   let savedCacheAware = 0;
+  // F4 diagnostic accumulators
+  let cacheBreakCount = 0;
+  let cacheBreakRebilled = 0;
+  let lastBreak: { index: number; kind: string } | null = null;
+  let toolTaxRequests = 0;
+  let toolTaxTokens = 0;
+  let lastToolTaxUnused: string[] = [];
+  let volatileSystemCount = 0;
+  
   for (const l of content.split("\n")) {
     if (l.trim().length === 0) {
       continue;
@@ -65,6 +74,34 @@ export function pxStats(): object {
       (asU64(o["cache_read_tokens"]) ?? 0) +
       (asU64(o["cache_create_tokens"]) ?? 0);
     output += asU64(o["output_tokens"]) ?? 0;
+    
+    // F4: collect cache break stats
+    if (isObj(o["cacheBreak"])) {
+      cacheBreakCount++;
+      const brk = o["cacheBreak"];
+      const rebilled = asU64(brk["rebilled"]) ?? 0;
+      cacheBreakRebilled += rebilled;
+      const index = asU64(brk["index"]);
+      const kind = asStr(brk["kind"]);
+      if (index !== null && kind !== null) {
+        lastBreak = { index, kind };
+      }
+    }
+    
+    // F4: collect tool tax stats
+    if (isObj(o["toolTax"])) {
+      toolTaxRequests++;
+      const tax = o["toolTax"];
+      toolTaxTokens += asU64(tax["tokens"]) ?? 0;
+      if (Array.isArray(tax["unused"])) {
+        lastToolTaxUnused = tax["unused"].filter(n => typeof n === "string") as string[];
+      }
+    }
+    
+    // F4: count volatile system prompts
+    if (o["volatileSystem"] === true) {
+      volatileSystemCount++;
+    }
   }
   const saved =
     baseline > 0 && actual > 0
@@ -75,7 +112,7 @@ export function pxStats(): object {
     baselineCa > 0 && actual > 0
       ? new Float(rnd((1.0 - actual / baselineCa) * 1000.0) / 10.0)
       : null;
-  return {
+  const result: Record<string, unknown> = {
     available: true,
     requests,
     compressedRequests: compressed,
@@ -96,4 +133,27 @@ export function pxStats(): object {
     outputSharePct:
       output > 0 ? new Float(rnd((output / (actual + output)) * 1000.0) / 10.0) : null,
   };
+  
+  // F4: cache break stats line (only when applicable)
+  if (cacheBreakCount > 0 && lastBreak !== null) {
+    result.cacheBreaks = `cache breaks: ${cacheBreakCount}/${requests} requests · ${cacheBreakRebilled} tok rebilled · last: block ${lastBreak.index} ${lastBreak.kind}`;
+  }
+  
+  // F4: tool tax stats line (only when applicable)
+  if (toolTaxRequests > 0) {
+    // rnd, not Math.round: rnd is the shared half-away-from-zero convention
+    // both engines pin (Math.round differs on negative halves).
+    const tokPerRequest = rnd(toolTaxTokens / toolTaxRequests);
+    const first3 = lastToolTaxUnused.slice(0, 3);
+    const extra = lastToolTaxUnused.length - 3;
+    const names = extra > 0 ? `${first3.join(",")} +${extra} more` : first3.join(",");
+    result.toolTax = `tool tax: ${tokPerRequest} tok/request never invoked (${names})`;
+  }
+  
+  // F4: volatile system prompt warning (only when applicable)
+  if (volatileSystemCount > 0) {
+    result.volatileSystem = `volatile system prompt: uuid/timestamp/jwt content busts the prefix cache`;
+  }
+  
+  return result;
 }

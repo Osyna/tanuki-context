@@ -1,0 +1,5 @@
+CONTAINER ID   IMAGE                        COMMAND                  CREATED       STATUS                 PORTS                                NAMES
+86056476a3bf   todo-db                      "docker-entrypoint.s…"   4 days ago    Up 4 hours (healthy)   5432/tcp                             todo-db-1
+bcbd396ae96f   nginx:alpine                 "/docker-entrypoint.…"   6 days ago    Up 4 hours             127.0.0.1:8081->80/tcp               todo-ui-1
+dcf417e84ce3   postgrest/postgrest:latest   "/bin/postgrest"         6 days ago    Up 4 hours             127.0.0.1:3000->3000/tcp             todo-api-1
+fbd62d8a96cb   docker:dind                  "dockerd-entrypoint.…"   2 weeks ago   Up 4 hours             2376/tcp, 127.0.0.1:2378->2375/tcp   aisandbox-dind

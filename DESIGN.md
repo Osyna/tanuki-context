@@ -248,7 +248,7 @@ Two further properties:
   the tiny-font price for anyone willing to trade read-back accuracy. The
   same lazy-engineering rule that shaped the pipeline: stop at the
   cheapest step that suffices, applied to the protocol around it.
-- **stash + fetch: the retrieval pattern, absorbed.** Inspired directly by
+- **stash + fetch: the retrieval pattern, made native.** Inspired directly by
   [context-mode](https://www.npmjs.com/package/context-mode)'s model:
   content parked outside the window, queried on demand, after measuring it
   head to head. Retrieval's two weak spots are awareness (a blind store; the
@@ -335,7 +335,7 @@ Two further properties:
   to "why didn't my bill halve": it tells you when tanuki is the wrong
   lever, in numbers.
 - **verbatim sidecar: fidelity priced, not promised.** The needle harness
-  (`reference/needle-report.mjs`, README Table D) measured what a Reddit
+  (`reference/needle-report.mjs`, README Table D) measured what an early
   reviewer predicted: model read-back of dense random strings from pixels
   fails *silently*: 5/10 grep-targets at normal density, 3/10 at tiny,
   every miss one plausible character. pxpipe's factsheet was the fidelity

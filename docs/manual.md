@@ -261,11 +261,11 @@ All modes run the same engine and log their savings to the same file, which
 | `tanuki_distill`  | de-noises a log (`table:true` for NDJSON), output stays text | when you want greppable text, not images |
 | `tanuki_compress` | text-only compression, five levels                          | prose you'll paraphrase anyway           |
 | `tanuki_stash`    | parks text on disk, returns a ~300-token map + an id        | huge references you'll consult, not read |
-| `tanuki_fetch`    | pulls a slice by regex or line range; auto-imaged when big; credential-shaped values masked on the way out (`redact:false` for the bytes) | after a stash, when you actually need it |
+| `tanuki_fetch`    | pulls a slice by regex, line range, or free-word `find` (top-scored windows, never imaged); auto-imaged when big otherwise; credential-shaped values masked on the way out (`redact:false` for the bytes) | after a stash, when you actually need it |
 | `tanuki_verify`   | disk-grounded check of a value read off a page (exact/corrected/ambiguous/absent + line) | before quoting an id/hash you transcribed from pixels |
 | `tanuki_stats`    | totals from the session's savings log: optimistic + cache-aware bounds, output share, own furniture cost | end-of-session accounting                |
 
-### Stash: the retrieval pattern, absorbed
+### Stash: the retrieval pattern, made native
 
 Sometimes even 5,000 tokens of pages is too much. The model may only need
 two slices of that log, ever. That is retrieval territory (context-mode's
@@ -325,7 +325,12 @@ Fresh `journalctl -o json` slice, 200 KB (51,182 raw text tokens):
 | + tiny font on top | 3,192 | -94% |
 
 You do not have to know the knob exists. `recommend` prices the table route
-on every estimate call and reports `table: true` when it wins.
+on every estimate call and reports `table: true` when it wins. Since 0.20 the
+same call also prices the composed crush route unprompted (`recommend.crush`:
+row selection, then table x codebook x pages over the kept rows, as text AND
+as pages) - and `route.reason` says so whenever that composition beats the
+picked route. The probe is pure: nothing is stashed until you actually pass
+`crush: true`.
 
 ## Limits, plainly
 
@@ -417,6 +422,7 @@ Nothing disappears silently.
 | `verbatim` | uuids/hashes/hex ids/ips/versions ship as a text sidecar next to the pages | grep-targets stay byte-exact; the verdict prices the sidecar honestly |
 | `recommend` | the estimate call walks all safe knob combos server-side | saves ~590 tokens of tool-call probing |
 | `recommend.text` | the same call prices the best stays-as-text cut (lossless whitespace + a distill sibling) | token savings even when imaging loses (cached / small / secret) |
+| `recommend.crush` | the same call prices row selection composed with the image walk (crush -> table -> codebook -> pages), stashing nothing | row sets route to the composed cut; fat rows stack imaging on top of selection |
 | `route` | one hybrid pick (image / text / raw) weighing cost AND read-back fidelity | the smart default: pxpipe when it wins without losing the task, a text tier otherwise |
 | provider-real cost | `estimate {model}` counts image tokens by that provider's tile rule and prices its cache ratio | verdicts stop being Anthropic-only guesses |
 | fidelity band | `estimate` maps imaged density to DeepSeek-OCR's read-back curve (4x6 tiny floored to low) | flags a tier past the legibility cliff before you trust it |
@@ -926,8 +932,8 @@ npx tanuki-context estimate <file> [level] [--distill] [--table] [--no-pack] [--
 npx tanuki-context render <file> [level] [outdir] [--distill] [--table] [--no-pack] [--font tiny] [--codebook]
 npx tanuki-context bench <file> <distill|pipeline> [level] [runs]   # in-process timing
 npx tanuki-context stash <file>             # park text, print the map + id
-npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--no-redact]
-npx tanuki-context run [--query re] -- <command> [args...]   # rtk-style wrapper
+npx tanuki-context fetch <id> [outdir] [--query re] [--lines a-b] [--find "words"] [--top k] [--no-redact]
+npx tanuki-context run [--query re] -- <command> [args...]   # rtk-style wrapper + 0.20 rule table
 ```
 
 The example page above is one command:

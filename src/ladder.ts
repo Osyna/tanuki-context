@@ -56,6 +56,22 @@ const FILLER: [RegExp, string][] = [
   [wordPhrase("in terms of"), "for"],
   [wordPhrase("the fact that"), "that"],
 ];
+const HEDGES: [RegExp, string][] = [
+  [wordPhrase("it (?:might|may|could) (?:potentially )?be worth (?:considering|noting|mentioning) that"), ""],
+  [wordPhrase("it is worth (?:noting|mentioning) that"), ""],
+  [wordPhrase("(?:please )?keep in mind that"), ""],
+  [wordPhrase("it goes without saying that"), ""],
+  [wordPhrase("needless to say,?"), ""],
+  [wordPhrase("in my (?:personal )?opinion,?"), ""],
+  [wordPhrase("as far as i (?:can tell|know),?"), ""],
+  [wordPhrase("at the end of the day,?"), ""],
+  [wordPhrase("make sure to"), ""],
+  [wordPhrase("you (?:should|need to|must) (?:make sure|ensure) that"), "ensure"],
+  [wordPhrase("i(?:'d| would) recommend (?:using|trying)"), "use"],
+  [wordPhrase("i(?:'d| would) recommend"), ""],
+  [wordPhrase("to be honest,?"), ""],
+  [wordPhrase("it turns out(?: that)?"), ""],
+];
 // (?i)\b(the|an|a)\s+
 const ARTICLES = new RegExp(`(?<!${W})(?:the|an|a)${SP}+`, "giu");
 // (?i)\b(very|...)\s+
@@ -125,6 +141,11 @@ export function isProtectedLine(line: string): boolean {
 
 function tightenProse(line: string, level: number): string {
   let s = line.replace(SPACES, " ");
+  if (level >= 2) {
+    for (let i = 0; i < HEDGES.length; i++) {
+      s = s.replace(HEDGES[i][0], HEDGES[i][1]);
+    }
+  }
   for (let i = 0; i < FILLER.length; i++) {
     s = s.replace(FILLER[i][0], FILLER[i][1]);
   }

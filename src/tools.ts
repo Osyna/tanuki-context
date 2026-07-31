@@ -67,6 +67,7 @@ const PIPE: Knob[] = [
   { key: "font", type: "string", values: ["normal", "tiny"], hint: "tiny = 4x6 cells, ~40% fewer tokens, transcription-gated" },
   { key: "codebook", type: "boolean", hint: "repeated tokens/paths -> sigils + legend" },
   { key: "table", type: "boolean", hint: "columnar-encode whole-JSON input (keys stated once, value-lossless)" },
+  { key: "crush", type: "boolean", hint: "crush oversized JSON/NDJSON arrays: keep head/tail/error rows, stash the full set, append a fetch pointer" },
   VERBATIM,
 ];
 
@@ -110,7 +111,7 @@ export const TOOLS: readonly ToolMeta[] = [
       "Stage 0 alone: make noisy logs/output small and readable WITHOUT imaging. Strips ANSI, collapses runs of near-identical lines/blocks into '[×N similar]', suppresses global near-dupes (exact + same-template) with exact counts, always keeps error/warn/fail lines verbatim, optional query (regex) returns only the relevant slice. table:true first columnar-encodes whole-JSON input (keys stated once) so identical rows collapse harder. Deterministic, order-preserving.",
     brief:
       "Stage 0 alone: collapse repeated log lines/blocks and template near-dupes; error/warn lines kept verbatim. Output stays greppable text.",
-    params: [TEXT, QUERY, { key: "table", type: "boolean", hint: "columnar-encode whole-JSON input first (keys stated once, value-lossless)" }],
+    params: [TEXT, QUERY, { key: "table", type: "boolean", hint: "columnar-encode whole-JSON input first (keys stated once, value-lossless)" }, { key: "crush", type: "boolean", hint: "crush oversized JSON/NDJSON arrays: keep head/tail/error rows, stash the full set, append a fetch pointer" }],
   },
   {
     name: "tanuki_compress",
@@ -155,6 +156,8 @@ export const TOOLS: readonly ToolMeta[] = [
       { key: "id", type: "string", required: true, hint: "stash id from tanuki_stash" },
       { key: "query", type: "string", hint: "regex: matching lines + error/warn lines + context" },
       { key: "lines", type: "string", hint: "line range 'a-b' (1-based, inclusive)" },
+      { key: "find", type: "string", hint: "free-word relevance search over the stash: space-separated words, top windows by hit score" },
+      { key: "top", type: "integer", min: 1, max: 32, hint: "find mode: how many top windows (1-32, default 8)" },
       { key: "redact", type: "boolean", hint: "mask credential-shaped values in the returned slice (default true); false returns the original bytes" },
       VERBATIM,
     ],

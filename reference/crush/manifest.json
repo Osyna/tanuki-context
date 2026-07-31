@@ -1,0 +1,126 @@
+{
+  "fixtures": [
+    {
+      "file": "cargo-test-pass.log",
+      "cmd": [
+        "cargo",
+        "test",
+        "--release"
+      ],
+      "exit": 0,
+      "lines": 150
+    },
+    {
+      "file": "cargo-build-fail.log",
+      "cmd": [
+        "cargo",
+        "build",
+        "--release"
+      ],
+      "exit": 101,
+      "lines": 11
+    },
+    {
+      "file": "pytest-pass.log",
+      "cmd": [
+        "pytest"
+      ],
+      "exit": 0,
+      "lines": 10
+    },
+    {
+      "file": "pytest-fail.log",
+      "cmd": [
+        "pytest"
+      ],
+      "exit": 1,
+      "lines": 31
+    },
+    {
+      "file": "go-test-pass.log",
+      "cmd": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "exit": 0,
+      "lines": 2
+    },
+    {
+      "file": "go-test-fail.log",
+      "cmd": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "exit": 1,
+      "lines": 6
+    },
+    {
+      "file": "npm-install.log",
+      "cmd": [
+        "npm",
+        "install",
+        "lodash"
+      ],
+      "exit": 0,
+      "lines": 2
+    },
+    {
+      "file": "git-status.log",
+      "cmd": [
+        "git",
+        "status"
+      ],
+      "exit": 0,
+      "lines": 14
+    },
+    {
+      "file": "git-diff.log",
+      "cmd": [
+        "git",
+        "diff"
+      ],
+      "exit": 0,
+      "lines": 40
+    },
+    {
+      "file": "docker-ps.log",
+      "cmd": [
+        "docker",
+        "ps"
+      ],
+      "exit": 0,
+      "lines": 5
+    },
+    {
+      "file": "find-list.log",
+      "cmd": [
+        "find",
+        "/usr/share/licenses",
+        "-type",
+        "f"
+      ],
+      "exit": 0,
+      "lines": 400
+    },
+    {
+      "file": "tsc-fail.log",
+      "cmd": [
+        "tsc"
+      ],
+      "exit": 2,
+      "lines": 9,
+      "synthetic": true
+    },
+    {
+      "file": "eslint-pass.log",
+      "cmd": [
+        "eslint"
+      ],
+      "exit": 0,
+      "lines": 0,
+      "synthetic": true
+    }
+  ]
+}

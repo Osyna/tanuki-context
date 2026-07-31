@@ -18,7 +18,9 @@
 //! ponytail: whole-input tables only — mixed prose+JSON stays text; add
 //! block detection if a real corpus ever demands it.
 
+import { IMPORTANT } from "./distill.ts";
 import { charCount, cmpCodepoints } from "./serde.ts";
+import { stashText } from "./stash.ts";
 
 export const COLS_MARK = "·cols·";
 
@@ -46,6 +48,7 @@ function jcell(v: unknown): string {
   const keys = Object.keys(o).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${jcell(o[k])}`).join(",")}}`;
 }
+
 
 function parseRows(text: string): Record<string, unknown>[] | null {
   const isRow = (v: unknown): v is Record<string, unknown> =>
@@ -75,6 +78,85 @@ function parseRows(text: string): Record<string, unknown>[] | null {
   return rows.length >= 2 ? rows : null;
 }
 
+export interface CrushSelect {
+  text: string;
+  kept: number;
+  rows: number;
+}
+
+export interface CrushRows extends CrushSelect {
+  id: string;
+}
+
+const CRUSH_MIN = 30;
+const CRUSH_HEAD = 10;
+const CRUSH_TAIL = 5;
+const IMPORTANT_CAP = 40;
+
+/**
+ * crushRowsSelect: the pure selection half of crushRows - keep head/tail/
+ * important rows of an oversized JSON/NDJSON row set, stash NOTHING. This is
+ * what `recommend` prices (a probe must not write to the store). null = not
+ * applicable (parse failed, too small, or nothing saved).
+ */
+export function crushRowsSelect(text: string): CrushSelect | null {
+  const rows = parseRows(text);
+  if (rows === null || rows.length < CRUSH_MIN) return null;
+
+  // Canonicalize and dedupe
+  const canonical = rows.map((r) => jcell(r));
+  const seen = new Map<string, number>();
+  const deduped: number[] = [];
+  for (let i = 0; i < canonical.length; i++) {
+    const c = canonical[i];
+    if (!seen.has(c)) {
+      seen.set(c, deduped.length);
+      deduped.push(i);
+    }
+  }
+
+  // Build kept set: head + tail + important
+  const kept = new Set<number>();
+  for (let i = 0; i < Math.min(CRUSH_HEAD, deduped.length); i++) {
+    kept.add(deduped[i]);
+  }
+  for (let i = Math.max(0, deduped.length - CRUSH_TAIL); i < deduped.length; i++) {
+    kept.add(deduped[i]);
+  }
+
+  // Important rows
+  let importantCount = 0;
+  for (let i = 0; i < deduped.length && importantCount < IMPORTANT_CAP; i++) {
+    const idx = deduped[i];
+    if (IMPORTANT.test(canonical[idx])) {
+      kept.add(idx);
+      importantCount++;
+    }
+  }
+
+  // Nothing saved?
+  if (kept.size >= rows.length) return null;
+
+  // Build output: kept canonical rows in original order
+  const keptIndices = Array.from(kept).sort((a, b) => a - b);
+  const outText = keptIndices.map((i) => canonical[i]).join("\n");
+
+  return { text: outText, kept: kept.size, rows: rows.length };
+}
+
+/**
+ * crushRows: selection + the stash of the full original, so the marker line
+ * can name a real fetchable id. null exactly when crushRowsSelect is null.
+ */
+export function crushRows(text: string): CrushRows | null {
+  const sel = crushRowsSelect(text);
+  if (sel === null) return null;
+  const stashed = stashText(text);
+  return { ...sel, id: stashed.id };
+}
+
+/** Canonical compact JSON for parity (shared with proxy diagnostics). */
+export const canonJson = jcell;
 /**
  * Encode when the whole input is structured rows AND the table is actually
  * smaller (header overhead can lose on tiny inputs). null = leave text alone.

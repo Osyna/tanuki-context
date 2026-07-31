@@ -1,0 +1,31 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/fixgen/py
+plugins: anyio-4.9.0, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2 items
+
+test_fail.py FF                                                          [100%]
+
+=================================== FAILURES ===================================
+________________________________ test_fail_one _________________________________
+
+    def test_fail_one():
+>       assert helper() == 2
+E       assert 1 == 2
+E        +  where 1 = helper()
+
+test_fail.py:6: AssertionError
+________________________________ test_fail_two _________________________________
+
+    def test_fail_two():
+        x = 10
+>       assert x == 5
+E       assert 10 == 5
+
+test_fail.py:10: AssertionError
+=========================== short test summary info ============================
+FAILED test_fail.py::test_fail_one - assert 1 == 2
+ +  where 1 = helper()
+FAILED test_fail.py::test_fail_two - assert 10 == 5
+============================== 2 failed in 0.01s ===============================

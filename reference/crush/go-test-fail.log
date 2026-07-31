@@ -1,0 +1,6 @@
+--- FAIL: TestAdd (0.00s)
+    main_test.go:7: Add(2,2) = 4, want 5
+FAIL
+FAIL	example.com/m/a	0.001s
+ok  	example.com/m/b	(cached)
+FAIL

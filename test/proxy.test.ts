@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { PROXY_DEFAULTS, newSession, startProxy, transformRequestBody, type ProxyCfg } from "../src/proxy.ts";
+import { PROXY_DEFAULTS, attributeBreak, newSession, startProxy, transformRequestBody, type ProxyCfg } from "../src/proxy.ts";
 
 const CFG: ProxyCfg = { ...PROXY_DEFAULTS, port: 0, upstream: "http://127.0.0.1:1" };
 
@@ -62,7 +62,7 @@ describe("transform rules", () => {
 
   test("latest message is never imaged even when oversized", () => {
     const body = JSON.stringify({ messages: [msg("user", BIG)] });
-    expect(transformRequestBody(body, CFG)).toBeNull();
+    expect(transformRequestBody(body, CFG)!.changed).toBe(false);
   });
 
   test("cache_control blocks pass through untouched", () => {
@@ -72,11 +72,11 @@ describe("transform rules", () => {
         msg("user", "latest"),
       ],
     });
-    expect(transformRequestBody(body, CFG)).toBeNull(); // rule 4
+    expect(transformRequestBody(body, CFG)!.changed).toBe(false); // rule 4
   });
 
   test("small blocks and non-message bodies pass through", () => {
-    expect(transformRequestBody(JSON.stringify({ messages: [msg("user", SMALL), msg("user", "x")] }), CFG)).toBeNull();
+    expect(transformRequestBody(JSON.stringify({ messages: [msg("user", SMALL), msg("user", "x")] }), CFG)!.changed).toBe(false);
     expect(transformRequestBody(JSON.stringify({ model: "m" }), CFG)).toBeNull();
     expect(transformRequestBody("not json", CFG)).toBeNull();
   });
@@ -302,5 +302,266 @@ describe("cache breakpoint on the imaged prefix", () => {
     expect(r!.cached).toBe(false);
     const c = parse(r).messages[0].content as Block[];
     expect(c.some((b) => b.cache_control !== undefined)).toBe(false);
+  });
+});
+
+// ------------------------------------------------ F4 diagnostics
+
+describe("attributeBreak classifier", () => {
+  test("pure append returns null (cache intact)", () => {
+    const prev = ["a", "b", "c"];
+    const cur = ["a", "b", "c", "d", "e"];
+    expect(attributeBreak(prev, cur)).toBeNull();
+  });
+
+  test("pure append non-vacuity: naive first-divergence would fail", () => {
+    // Guard: a naive "first difference" check would wrongly classify pure append
+    const prev = ["a", "b"];
+    const cur = ["a", "b", "c"];
+    const result = attributeBreak(prev, cur);
+    // Pure append MUST be null, not { index: 2, kind: <anything> }
+    expect(result).toBeNull();
+    // The naive approach would set index=2 (first index where lengths differ)
+    // and try to classify, failing the prefix-check contract.
+  });
+  test("identical lists are not a break", () => {
+    // Regression for the `>=` in the prefix short-circuit: identical lists
+    // used to fall through both prefix checks and come back as a bogus
+    // "modified" at index len (the Rust engine panicked on the same case).
+    const a = ["aaa", "bbb", "ccc"];
+    expect(attributeBreak(a, [...a])).toBeNull();
+  });
+
+
+  test("modified: neither block found in opposite tail", () => {
+    const prev = ["a", "b", "OLD"];
+    const cur = ["a", "b", "NEW"];
+    expect(attributeBreak(prev, cur)).toEqual({ index: 2, kind: "modified" });
+  });
+
+  test("added: current block appears later in previous", () => {
+    const prev = ["a", "c", "d"];
+    const cur = ["a", "b", "c", "d"];
+    expect(attributeBreak(prev, cur)).toEqual({ index: 1, kind: "added" });
+  });
+
+  test("evicted: previous block appears later in current", () => {
+    const prev = ["a", "b", "c", "d"];
+    const cur = ["a", "c", "d"];
+    expect(attributeBreak(prev, cur)).toEqual({ index: 1, kind: "evicted" });
+  });
+
+  test("evicted: current is proper prefix of previous", () => {
+    const prev = ["a", "b", "c", "d"];
+    const cur = ["a", "b"];
+    expect(attributeBreak(prev, cur)).toEqual({ index: 2, kind: "evicted" });
+  });
+
+  test("reordered: both blocks found in opposite tails", () => {
+    const prev = ["a", "b", "c"];
+    const cur = ["a", "c", "b"];
+    expect(attributeBreak(prev, cur)).toEqual({ index: 1, kind: "reordered" });
+  });
+});
+
+describe("F4 proxy diagnostics", () => {
+  test("block hashes computed correctly", () => {
+    const body = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: [{ type: "text", text: "hi there" }] },
+      ],
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.blocks).toHaveLength(2);
+    // Hashes should be 12-char hex strings
+    expect(result!.blocks[0]).toMatch(/^[0-9a-f]{12}$/);
+    expect(result!.blocks[1]).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  test("cacheBreak detected on modified block", () => {
+    const session = newSession();
+    const body1 = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "original message" }],
+    };
+    transformRequestBody(JSON.stringify(body1), CFG, session);
+    
+    const body2 = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "modified message" }],
+    };
+    const result = transformRequestBody(JSON.stringify(body2), CFG, session);
+    expect(result).not.toBeNull();
+    expect(result!.cacheBreak).not.toBeNull();
+    expect(result!.cacheBreak!.kind).toBe("modified");
+    expect(result!.cacheBreak!.index).toBe(0);
+    expect(result!.cacheBreak!.rebilled).toBeGreaterThan(0);
+  });
+
+  test("cacheBreak null on pure append", () => {
+    const session = newSession();
+    const body1 = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "first" }],
+    };
+    transformRequestBody(JSON.stringify(body1), CFG, session);
+    
+    const body2 = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "response" },
+      ],
+    };
+    const result = transformRequestBody(JSON.stringify(body2), CFG, session);
+    expect(result).not.toBeNull();
+    expect(result!.cacheBreak).toBeNull();
+  });
+
+  test("cacheBreak evicted kind", () => {
+    const session = newSession();
+    const body1 = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "a" },
+        { role: "user", content: "b" },
+        { role: "user", content: "c" },
+      ],
+    };
+    transformRequestBody(JSON.stringify(body1), CFG, session);
+    
+    const body2 = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "a" },
+        { role: "user", content: "c" },
+      ],
+    };
+    const result = transformRequestBody(JSON.stringify(body2), CFG, session);
+    expect(result).not.toBeNull();
+    expect(result!.cacheBreak).not.toBeNull();
+    expect(result!.cacheBreak!.kind).toBe("evicted");
+  });
+
+  test("toolTax only when tools advertised AND tool_use exists", () => {
+    // No tools advertised -> no toolTax
+    const body1 = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    let result = transformRequestBody(JSON.stringify(body1), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.toolTax).toBeNull();
+    
+    // Tools advertised but no tool_use -> no toolTax
+    const body2 = {
+      model: "claude-sonnet-4",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [
+        { name: "search", input_schema: { type: "object" } },
+        { name: "calculate", input_schema: { type: "object" } },
+      ],
+    };
+    result = transformRequestBody(JSON.stringify(body2), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.toolTax).toBeNull();
+    
+    // Tools advertised AND tool_use exists -> toolTax computed
+    const body3 = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "1", name: "search", input: {} }],
+        },
+      ],
+      tools: [
+        { name: "search", description: "search the web", input_schema: { type: "object" } },
+        { name: "calculate", description: "calculate math", input_schema: { type: "object" } },
+        { name: "unused", description: "never called", input_schema: { type: "object" } },
+      ],
+    };
+    result = transformRequestBody(JSON.stringify(body3), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.toolTax).not.toBeNull();
+    expect(result!.toolTax!.unused).toContain("calculate");
+    expect(result!.toolTax!.unused).toContain("unused");
+    expect(result!.toolTax!.unused).not.toContain("search");
+    expect(result!.toolTax!.tokens).toBeGreaterThan(0);
+  });
+
+  test("toolTax first 8 unused tools", () => {
+    const tools = Array.from({ length: 12 }, (_, i) => ({
+      name: `tool${i}`,
+      input_schema: { type: "object" },
+    }));
+    const body = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "test" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "1", name: "tool0", input: {} }],
+        },
+      ],
+      tools,
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.toolTax).not.toBeNull();
+    expect(result!.toolTax!.unused.length).toBe(8); // capped at 8
+  });
+
+  test("volatileSystem detects UUID", () => {
+    const body = {
+      model: "claude-sonnet-4",
+      system: "Request ID: a1b2c3d4-e5f6-4789-abcd-ef0123456789",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.volatileSystem).toBe(true);
+  });
+
+  test("volatileSystem detects timestamp", () => {
+    const body = {
+      model: "claude-sonnet-4",
+      system: "Current time: 2026-07-31T12:34:56Z",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.volatileSystem).toBe(true);
+  });
+
+  test("volatileSystem detects JWT", () => {
+    const body = {
+      model: "claude-sonnet-4",
+      system: [
+        {
+          type: "text",
+          text: "Auth token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.",
+        },
+      ],
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.volatileSystem).toBe(true);
+  });
+
+  test("volatileSystem false on normal system prompt", () => {
+    const body = {
+      model: "claude-sonnet-4",
+      system: "You are a helpful assistant.",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const result = transformRequestBody(JSON.stringify(body), CFG);
+    expect(result).not.toBeNull();
+    expect(result!.volatileSystem).toBe(false);
   });
 });
