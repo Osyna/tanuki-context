@@ -28,6 +28,45 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 
+
+/// F4: classify cache break kind. Exported for unit tests. Pure append -> None (cache intact).
+pub(crate) fn attribute_break(
+    prev: &[String],
+    cur: &[String],
+) -> Option<(usize, String)> {
+    // Pure append OR identical: previous is a (possibly complete) prefix of
+    // current, so the cached prefix is intact. `>=` matters: two identical
+    // consecutive requests fell through both prefix checks and came back as a
+    // bogus "modified" at index len (the TS engine lied, this one panicked).
+    if cur.len() >= prev.len() && prev.iter().zip(cur.iter()).all(|(p, c)| p == c) {
+        return None;
+    }
+    // Find first divergence
+    let min_len = prev.len().min(cur.len());
+    let mut i = 0;
+    while i < min_len && prev[i] == cur[i] {
+        i += 1;
+    }
+    // Current is proper prefix of previous -> evicted
+    if i == cur.len() && cur.len() < prev.len() {
+        return Some((i, "evicted".to_string()));
+    }
+    // Classify at divergence point
+    let p_block = &prev[i];
+    let c_block = &cur[i];
+    let p_in_c = cur[i..].contains(p_block);
+    let c_in_p = prev[i..].contains(c_block);
+    
+    if p_in_c && c_in_p {
+        Some((i, "reordered".to_string()))
+    } else if p_in_c {
+        Some((i, "added".to_string()))
+    } else if c_in_p {
+        Some((i, "evicted".to_string()))
+    } else {
+        Some((i, "modified".to_string()))
+    }
+}
 pub struct ProxyCfg {
     pub port: u16,
     pub upstream: String, // e.g. https://api.anthropic.com
@@ -173,8 +212,35 @@ fn maybe_image(text: &str, cfg: &ProxyCfg) -> Option<ImagedBlock> {
     })
 }
 
+/// Volatile prompt shapes, same patterns as distill.rs's masks (F4). The
+/// headroom CacheAligner insight: a uuid/timestamp/jwt in the SYSTEM prompt
+/// means the client busts its own prefix cache on every new session.
+static M_UUID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
+});
+static M_TS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?").unwrap()
+});
+static M_JWT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.").unwrap()
+});
+
+pub struct CacheBreak {
+    pub index: usize,
+    pub kind: String,
+    pub rebilled: u64,
+}
+
+pub struct ToolTax {
+    pub unused: Vec<String>,
+    pub tokens: u64,
+}
+
 pub struct TransformResult {
+    /// rewritten body when `changed`, else the caller must forward the original bytes.
     pub body: String,
+    /// false = no block was imaged; result exists only for the diagnostics.
+    pub changed: bool,
     #[allow(dead_code)] // part of the TS TransformResult shape; asserted in tests
     pub imaged_blocks: usize,
     pub orig_chars: u64,
@@ -185,6 +251,11 @@ pub struct TransformResult {
     pub saved_tokens_cache_aware: i64,
     /// whether a cache_control breakpoint was placed on the imaged prefix.
     pub cached: bool,
+    // F4 diagnostics
+    pub blocks: Vec<String>,
+    pub cache_break: Option<CacheBreak>,
+    pub tool_tax: Option<ToolTax>,
+    pub volatile_system: bool,
 }
 
 /// Cross-request memory, LEDGER-ONLY by construction: it never changes the
@@ -209,11 +280,19 @@ pub struct ProxySession {
     pub seen_blocks: std::collections::HashSet<String>,
     /// a prior response showed cache traffic (cache_read/cache_creation > 0).
     pub caching_seen: bool,
+    /// F4: the previous request's block hashes. Single-conversation assumption:
+    /// Anthropic exposes no conversation id, so the proxy compares consecutive
+    /// requests as-is; typical clients run one proxy per conversation.
+    pub prev_blocks: Vec<String>,
 }
 
 impl ProxySession {
     pub fn new() -> Self {
-        ProxySession { seen_blocks: std::collections::HashSet::new(), caching_seen: false }
+        ProxySession {
+            seen_blocks: std::collections::HashSet::new(),
+            caching_seen: false,
+            prev_blocks: Vec::new(),
+        }
     }
 }
 
@@ -411,8 +490,129 @@ pub fn transform_request_body(
     }
     drop(funnel);
 
+    // F4 diagnostics run on EVERY parseable request, transform or not: a cache
+    // break is most often caused by a request the proxy left alone. Hashes are
+    // taken AFTER imaging (these are the bytes the API cache sees) but BEFORE
+    // our own cache_control placement below - the breakpoint moves forward as
+    // later content gets imaged, and hashing it would forge a false "modified"
+    // attribution at the old holder on every advance.
+    let mut blocks: Vec<String> = Vec::new();
+    // Per-block text-token cost, aligned with `blocks`: string-content
+    // messages count whole, typed blocks count only when type == "text".
+    let mut block_tokens: Vec<u64> = Vec::new();
+    if let Some(ms) = body["messages"].as_array() {
+        for m in ms {
+            let role = m["role"].as_str().unwrap_or("");
+            let content = &m["content"];
+            if let Some(s) = content.as_str() {
+                let h = crate::sha256::hex(
+                    format!("{role}\u{0}{}", table::canon_string(content)).as_bytes(),
+                );
+                blocks.push(h[..12].to_string());
+                block_tokens.push(crate::text_tokens(s));
+                continue;
+            }
+            if let Some(arr) = content.as_array() {
+                for block in arr {
+                    let h = crate::sha256::hex(
+                        format!("{role}\u{0}{}", table::canon_string(block)).as_bytes(),
+                    );
+                    blocks.push(h[..12].to_string());
+                    let tok = if block["type"] == "text" {
+                        block["text"].as_str().map_or(0, crate::text_tokens)
+                    } else {
+                        0
+                    };
+                    block_tokens.push(tok);
+                }
+            }
+        }
+    }
+
+    // cacheBreak vs the previous request of this (single-conversation) session
+    let mut cache_break: Option<CacheBreak> = None;
+    if let Some(s) = session.as_deref_mut() {
+        if !s.prev_blocks.is_empty() {
+            if let Some((index, kind)) = attribute_break(&s.prev_blocks, &blocks) {
+                let rebilled: u64 = block_tokens.iter().skip(index).sum();
+                cache_break = Some(CacheBreak { index, kind, rebilled });
+            }
+        }
+        s.prev_blocks = blocks.clone();
+    }
+
+    // toolTax - only when tools are advertised AND at least one tool_use exists
+    let mut tool_tax: Option<ToolTax> = None;
+    if let Some(tools) = body["tools"].as_array() {
+        if !tools.is_empty() {
+            let mut used: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            if let Some(ms) = body["messages"].as_array() {
+                for m in ms {
+                    if let Some(arr) = m["content"].as_array() {
+                        for block in arr {
+                            if block["type"] == "tool_use" {
+                                if let Some(n) = block["name"].as_str() {
+                                    used.insert(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !used.is_empty() {
+                let mut unused: Vec<String> = tools
+                    .iter()
+                    .filter_map(|t| t["name"].as_str())
+                    .filter(|n| !used.contains(n))
+                    .map(str::to_string)
+                    .collect();
+                if !unused.is_empty() {
+                    unused.sort();
+                    let tokens: u64 = tools
+                        .iter()
+                        .filter(|t| t["name"].as_str().is_some_and(|n| unused.iter().any(|u| u == n)))
+                        .map(|t| crate::text_tokens(&table::canon_string(t)))
+                        .sum();
+                    unused.truncate(8);
+                    tool_tax = Some(ToolTax { unused, tokens });
+                }
+            }
+        }
+    }
+
+    // volatileSystem: uuid/timestamp/jwt shapes in the system prompt bust the
+    // prefix cache the client is paying to keep warm (headroom's CacheAligner).
+    let system_text = match &body["system"] {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    };
+    let volatile_system = !system_text.is_empty()
+        && (M_UUID.is_match(&system_text)
+            || M_TS.is_match(&system_text)
+            || M_JWT.is_match(&system_text));
+
     if imaged_blocks == 0 {
-        return None;
+        // Nothing imaged: the caller forwards the ORIGINAL bytes; this result
+        // exists only to carry the diagnostics into the event log.
+        return Some(TransformResult {
+            body: raw.to_string(),
+            changed: false,
+            imaged_blocks,
+            orig_chars,
+            image_count,
+            saved_tokens,
+            saved_tokens_cache_aware,
+            cached: false,
+            blocks,
+            cache_break,
+            tool_tax,
+            volatile_system,
+        });
     }
 
     // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
@@ -441,12 +641,17 @@ pub fn transform_request_body(
     }
     Some(TransformResult {
         body: body.to_string(),
+        changed: true,
         imaged_blocks,
         orig_chars,
         image_count,
         saved_tokens,
         saved_tokens_cache_aware,
         cached,
+        blocks,
+        cache_break,
+        tool_tax,
+        volatile_system,
     })
 }
 
@@ -553,7 +758,9 @@ fn handle(
             .unwrap_or(None);
         }
         if let Some(s) = &tstats {
-            body_buf = s.body.clone().into_bytes();
+            if s.changed {
+                body_buf = s.body.clone().into_bytes();
+            }
         }
     }
 
@@ -639,10 +846,10 @@ fn handle(
             }
             guard.caching_seen
         };
-        log_event(&json!({
+        let mut ev = json!({
             "ts": now_ms(),
             "tool": "proxy",
-            "compressed": tstats.is_some(),
+            "compressed": tstats.as_ref().is_some_and(|s| s.changed),
             "orig_chars": tstats.as_ref().map_or(0, |s| s.orig_chars),
             "image_count": tstats.as_ref().map_or(0, |s| s.image_count),
             // baseline names its denominator: what Anthropic billed plus
@@ -660,7 +867,34 @@ fn handle(
             "cache_read_tokens": cache_read,
             "cache_create_tokens": cache_create,
             "output_tokens": output,
-        }));
+            // F4 diagnostics
+            "blocks": tstats.as_ref().map_or_else(Vec::new, |s| s.blocks.clone()),
+        });
+        if let Some(s) = &tstats {
+            if let Some(cb) = &s.cache_break {
+                ev["cacheBreak"] = json!({ "index": cb.index, "kind": cb.kind, "rebilled": cb.rebilled });
+            }
+            if let Some(tt) = &s.tool_tax {
+                ev["toolTax"] = json!({ "unused": tt.unused, "tokens": tt.tokens });
+            }
+            if s.volatile_system {
+                ev["volatileSystem"] = json!(true);
+            }
+        }
+        log_event(&ev);
+        // F4: per-request diagnostic stdout, mirrored with the TS engine
+        if let Some(s) = &tstats {
+            let mut diag = String::new();
+            if let Some(cb) = &s.cache_break {
+                diag.push_str(&format!(" \u{b7} break@{} {}", cb.index, cb.kind));
+            }
+            if let Some(tt) = &s.tool_tax {
+                diag.push_str(&format!(" \u{b7} toolTax {}tok", tt.tokens));
+            }
+            if !diag.is_empty() {
+                eprintln!("[tanuki proxy]{diag}");
+            }
+        }
     } else {
         let _ = request.respond(tiny_http::Response::new(
             tiny_http::StatusCode(status),
@@ -815,7 +1049,8 @@ mod tests {
     #[test]
     fn latest_message_never_imaged() {
         let body = json!({ "messages": [msg("user", json!(big()))] }).to_string();
-        assert!(transform_request_body(&body, &cfg(), None).is_none());
+        let r = transform_request_body(&body, &cfg(), None).expect("diagnostics still returned");
+        assert!(!r.changed);
     }
 
     #[test]
@@ -825,15 +1060,35 @@ mod tests {
             msg("user", json!("latest")),
         ] })
         .to_string();
-        assert!(transform_request_body(&body, &cfg(), None).is_none()); // rule 4
+        let r = transform_request_body(&body, &cfg(), None).expect("diagnostics still returned");
+        assert!(!r.changed); // rule 4
     }
 
     #[test]
     fn small_and_non_message_bodies_pass_through() {
         let small = json!({ "messages": [msg("user", json!("just a short note")), msg("user", json!("x"))] });
-        assert!(transform_request_body(&small.to_string(), &cfg(), None).is_none());
+        let r = transform_request_body(&small.to_string(), &cfg(), None).expect("parseable body");
+        assert!(!r.changed);
+        // Unparseable / message-less bodies stay None: nothing to analyze.
         assert!(transform_request_body(r#"{"model":"m"}"#, &cfg(), None).is_none());
         assert!(transform_request_body("not json", &cfg(), None).is_none());
+    }
+
+    #[test]
+    fn identical_consecutive_requests_are_not_a_break() {
+        // Regression for the `>=` in attribute_break: identical lists used to
+        // fall through both prefix checks - the TS engine reported a bogus
+        // "modified" at index len, this engine panicked on prev[len].
+        let a = vec!["aaa".to_string(), "bbb".to_string(), "ccc".to_string()];
+        assert!(attribute_break(&a, &a.clone()).is_none());
+        // and a session-driven repeat produces no cacheBreak field
+        let b = big();
+        let body = json!({ "messages": [msg("user", json!(b)), msg("user", json!("latest"))] })
+            .to_string();
+        let mut s = ProxySession::new();
+        let _first = transform_request_body(&body, &cfg(), Some(&mut s)).expect("must transform");
+        let second = transform_request_body(&body, &cfg(), Some(&mut s)).expect("must transform");
+        assert!(second.cache_break.is_none());
     }
 
     #[test]

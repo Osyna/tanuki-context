@@ -1,4 +1,4 @@
-//! Columnar codec for structured JSON — the one domain where retrieval-store
+//! Columnar codec for structured JSON + F2 crushRows (headroom SmartCrusher-style).
 //! compressors (Headroom's SmartCrusher) beat tanuki's line tools, done
 //! tanuki-style instead: deterministic, no model in the loop, decode grammar
 //! documented. An array of objects (or NDJSON — journalctl -o json, docker
@@ -17,7 +17,10 @@
 //! ponytail: whole-input tables only — mixed prose+JSON stays text; add
 //! block detection if a real corpus ever demands it.
 
+use crate::distill::IMPORTANT;
+use crate::stash;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 pub const COLS_MARK: &str = "\u{b7}cols\u{b7}"; // ·cols·
 
@@ -47,6 +50,13 @@ fn canon(v: &mut Value) {
     }
 }
 
+/// F2: expose canonical serializer for proxy diagnostics.
+pub(crate) fn canon_string(v: &Value) -> String {
+    let mut v = v.clone();
+    canon(&mut v);
+    v.to_string()
+}
+
 fn parse_rows(text: &str) -> Option<Vec<Value>> {
     // whole input = one JSON array of objects
     if let Ok(v) = serde_json::from_str::<Value>(text) {
@@ -73,6 +83,105 @@ fn parse_rows(text: &str) -> Option<Vec<Value>> {
         rows.push(v);
     }
     if rows.len() >= 2 { Some(rows) } else { None }
+}
+
+// F2: crushRows constants
+const CRUSH_MIN: usize = 30;
+const CRUSH_HEAD: usize = 10;
+const CRUSH_TAIL: usize = 5;
+const IMPORTANT_CAP: usize = 40;
+
+pub struct CrushSelect {
+    pub text: String,
+    pub kept: usize,
+    pub rows: usize,
+}
+
+pub struct CrushRows {
+    pub text: String,
+    pub kept: usize,
+    pub rows: usize,
+    pub id: String,
+}
+
+/// F2: pure selection — dedupe by canonical JSON, keep head/tail/important. None =
+/// not applicable (parse failed, too small, or nothing saved). No stash side effect.
+pub fn crush_rows_select(text: &str) -> Option<CrushSelect> {
+    let rows = parse_rows(text)?;
+    if rows.len() < CRUSH_MIN {
+        return None;
+    }
+
+    // Canonicalize and dedupe
+    let mut canonical: Vec<String> = Vec::new();
+    for r in &rows {
+        let mut v = r.clone();
+        canon(&mut v);
+        canonical.push(v.to_string());
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<usize> = Vec::new();
+    for (i, c) in canonical.iter().enumerate() {
+        if !seen.contains_key(c) {
+            seen.insert(c.clone(), deduped.len());
+            deduped.push(i);
+        }
+    }
+
+    // Build kept set: head + tail + important
+    let mut kept: HashSet<usize> = HashSet::new();
+    for i in 0..CRUSH_HEAD.min(deduped.len()) {
+        kept.insert(deduped[i]);
+    }
+    let tail_start = deduped.len().saturating_sub(CRUSH_TAIL);
+    for i in tail_start..deduped.len() {
+        kept.insert(deduped[i]);
+    }
+
+    // Important rows
+    let mut important_count = 0;
+    for &idx in &deduped {
+        if important_count >= IMPORTANT_CAP {
+            break;
+        }
+        if IMPORTANT.is_match(&canonical[idx]) {
+            kept.insert(idx);
+            important_count += 1;
+        }
+    }
+
+    // Nothing saved?
+    if kept.len() >= rows.len() {
+        return None;
+    }
+
+    // Build output: kept canonical rows in original order
+    let mut kept_indices: Vec<usize> = kept.into_iter().collect();
+    kept_indices.sort_unstable();
+    let out_text = kept_indices.iter()
+        .map(|&i| canonical[i].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(CrushSelect {
+        text: out_text,
+        kept: kept_indices.len(),
+        rows: rows.len(),
+    })
+}
+
+/// F2: reduce oversized JSON/NDJSON arrays by keeping head/tail/important
+/// rows, stashing the full set. None = not applicable (parse failed, too small,
+/// or nothing saved).
+pub fn crush_rows(text: &str) -> Option<CrushRows> {
+    let sel = crush_rows_select(text)?;
+    let (id, _) = stash::stash_text(text).ok()?;
+    Some(CrushRows {
+        text: sel.text,
+        kept: sel.kept,
+        rows: sel.rows,
+        id,
+    })
 }
 
 /// Encode when the whole input is structured rows AND the table is actually
@@ -243,5 +352,36 @@ mod tests {
         assert_eq!(lines.next().unwrap(), format!("{COLS_MARK}\t\"v\"\t\"w\""));
         assert_eq!(lines.next().unwrap(), "50\t1.5");
         assert_eq!(lines.next().unwrap(), "2\t0.25");
+    }
+
+    #[test]
+    fn crush_rows_select_writes_nothing_to_stash() {
+        use crate::stash;
+        stash::with_test_dir("crush-select", || {
+            let rows: Vec<_> = (0..60).map(|i| {
+                json!({
+                    "id": i,
+                    "seq": i * 100,
+                    "status": if i == 20 { "error timeout gateway" } else { "ok" },
+                    "unit": format!("svc-{}", i % 7),
+                })
+            }).collect();
+            let text = rows.iter().map(|r| serde_json::to_string(r).unwrap()).collect::<Vec<_>>().join("\n");
+            
+            // Select doesn't write
+            let sel = crush_rows_select(&text).expect("select");
+            assert_eq!(sel.rows, 60);
+            assert!(sel.kept < 60);
+            let stash_dir = stash::stash_dir();
+            let entries = std::fs::read_dir(&stash_dir).map(|r| r.count()).unwrap_or(0);
+            assert_eq!(entries, 0);
+            
+            // crush_rows does write
+            let cr = crush_rows(&text).expect("crush");
+            assert_eq!(cr.rows, sel.rows);
+            assert_eq!(cr.kept, sel.kept);
+            let entries_after = std::fs::read_dir(&stash_dir).map(|r| r.count()).unwrap_or(0);
+            assert_eq!(entries_after, 1);
+        });
     }
 }

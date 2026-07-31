@@ -10,6 +10,113 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.20.0
+
+### Five text-side techniques from neighbouring tools, reimplemented and measured
+
+rtk, headroom, caveman, context-mode and ctxdiff each do one text-side thing
+tanuki did not. This release closes that gap: each technique is reimplemented
+from scratch - no pxpipe, no model in the loop, no floats in anything
+parity-pinned - measured, and credited (README "Prior art", each entry
+with its own EVALS section). Both engines, byte-identical, 37 parity cases.
+
+- **`run` grew rtk's rule table** ([rtk](https://github.com/rtk-ai/rtk),
+  Apache-2.0). Nine command families (cargo, npm/pnpm/yarn/bun install,
+  pytest, go test, git status/diff, tsc, eslint, list-cap), success elision on
+  exit 0, noise strips on any exit, a never-worse guard, exit codes passed
+  through, and the untouched original always stashed. Measured on committed
+  REAL command outputs replayed through tool-named shims in both engines:
+  **79% of chars removed, weighted** (32,242 → 6,631 over 13 fixtures);
+  cargo-test 89%, find 96%, failures near-neutral because error context is
+  kept verbatim. `npm run crush` is the harness; it fails if the rules stop
+  beating plain distill.
+- **The `crush` knob** ([headroom](https://github.com/chopratejas/headroom),
+  Apache-2.0). Whole-JSON/NDJSON row sets ≥30 rows keep head 10 + tail 5 +
+  every error-shaped row (cap 40), the FULL set is stashed, and one pointer
+  line names the id: 500-row NDJSON **33,179 → 1,881 tokens (94%)**, 1,294
+  with `table`. Headroom's statistical outlier pass was deliberately not
+  ported: it needs floats, and a parity-pinned selection cannot have them.
+- **`fetch` grew `find`** ([context-mode](https://github.com/mksglu/context-mode),
+  Elastic-2.0 - independent reimplementation, integer scoring, no FTS5, no
+  code shared). Free words, 3 points for a word-boundary hit, 1 for a
+  substring, top-k anchors, merged ±2-line windows. Retrieval precision moves
+  **66.7% → 73.3%**, and find is the only strategy of five that carries a
+  bare English word (`ingest`, the dominant-error-unit answer every other
+  strategy loses to pixels) back as text. The harness caught the first
+  version imaging its own windows - the answer scored ABSENT - so the rule
+  is now pinned in both engines: **find output is never imaged.**
+- **L2+ grew caveman's hedge rewrites, and the CLI its filename gate**
+  ([caveman](https://github.com/JuliusBrussee/caveman), MIT). Fourteen
+  hedging/recommendation rewrites: hedge-dense prose at L2 goes **0% → 27%**
+  (L3 10→36%, L4 25→42%) while this repo's README compresses byte-identically
+  to 0.19.5 - the rules fire on hedges, not on technical prose. `render`,
+  `distill` and `stash` now refuse `.env*`, `id_rsa`, `*.pem`, `*credential*`,
+  `.aws/`... paths before reading them (`--allow-sensitive` overrides;
+  deliberately overcautious, `secretary-notes.md` refuses too).
+- **The proxy answers ctxdiff's questions live**
+  ([ctxdiff](https://github.com/salmanzafar949/ctxdiff), Apache-2.0; the
+  volatile-prompt check is headroom's CacheAligner). Per request, without
+  changing one forwarded byte: `cacheBreak` (first-divergence attribution:
+  modified/added/evicted/reordered, rebilled tokens, pure append correctly
+  NOT a break), `toolTax` (schemas advertised but never invoked, priced per
+  request), `volatileSystem` (uuid/timestamp/JWT in the system prompt busts
+  the client's own cache). `tanuki_stats` renders all three. Diagnosis, not
+  savings: none of it is ever added to a savings figure.
+
+### The new routes compose with the old ones
+
+The point of putting five techniques in one engine instead of five tools is
+that they multiply. `recommend` now prices the crush selection unprompted -
+the way it has always priced `table` - and keeps composing: the kept rows go
+through the same walk (columnar table × codebook) and are priced both as
+text and as pages, so the 0.20 selection feeds the imaging route that has
+been here since 0.1. `route.reason` names the composition whenever it beats
+the picked route; `pick` itself never relabels (the router only picks loss
+classes it can name honestly - crush is opt-in via `crush: true`).
+
+Measured, deterministic, both engines byte-identical (`npm run combined`,
+EVALS §15): a 500-row thin NDJSON the old router billed at 14,247 tok routes
+composed at **112** (99%); 60 fat rows go 44,804 → 14,880 as selection-only
+text → **1,008** as selection + table + pages - imaging is a further 14.8×
+cut on exactly the case where selection alone stalls. Controls: real logs
+and sub-30-row inputs reply byte-identically to 0.19 (parity ids 43-45).
+The probe is pure - `crushRowsSelect` (new, both engines) stashes nothing;
+the harness proves the purity counter works by watching `crush: true` write
+exactly one entry.
+
+### Found while building it
+
+- **Two identical consecutive requests produced a bogus cache-break.** The
+  classifier's append short-circuit used `>` where it needed `>=`: the TS
+  engine reported `modified` at index len, the Rust engine panicked on the
+  same input - the panic is what caught the lie. Pinned with a mutation guard
+  in both suites.
+- **Rust `.lines()` vs TS `split("\n")` disagree about a trailing newline.**
+  Every real command output ends with one, so every crush fixture diverged by
+  one line count until the Rust side switched to split semantics. The crush
+  harness byte-compares engines per fixture precisely so this class cannot
+  ship.
+- **`tanuki_stats`'s stats renderer used an unimported helper** (`asStr`) on a
+  path only reachable once cacheBreak events exist - a latent crash shipped
+  green because no test produced such an event. It does now.
+- Diagnostics forced an honest contract change: `transformRequestBody` now
+  returns a result for EVERY parseable request (`changed: false` when nothing
+  was imaged) because a cache break is most often caused by a request the
+  proxy left alone. Unparseable bodies still return null and forward
+  untouched - the fail-open path did not move.
+
+### Deliberately not ported
+
+- headroom's Kompress (a neural token classifier: a model in the loop is the
+  one thing every tanuki transform promises not to have) and its tree-sitter
+  AST code compression (a dependency tree, and tanuki's contract is that code
+  is protected verbatim, not summarized).
+- context-mode's BM25/FTS5 ranking as-is (floats and SQLite against a
+  byte-parity invariant; the integer scorer keeps the shape and loses the
+  dependencies) and its 24h URL fetch cache (tanuki does not fetch URLs).
+- rtk's TOML filter DSL (a config language is a second parser to hold at
+  parity; the rule table is code, tested in both engines).
+
 ## 0.19.5
 
 ### Fixed: the tool list failed to register on Moonshot/Kimi ([#1](https://github.com/Osyna/tanuki-context/issues/1), reported by @cousined1)

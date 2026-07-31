@@ -15,16 +15,16 @@ use std::sync::LazyLock;
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
 // ASCII boundaries/classes throughout: matches JS regex semantics (\b, \d, \w are
 // ASCII there) and is dramatically faster than the crate's Unicode-aware defaults.
-static IMPORTANT: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static IMPORTANT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?-u:\b)([0-9A-Za-z_]*(error|exception)s?|err|warn(ing)?s?|fail(s|ed|ure|ures)?|panic(s|ked)?|fatal|critical|traceback|denied|refused|timeouts?|timed.?out|assert(s|ed|ion|ions)?|segfault(s|ed)?)(?-u:\b)").unwrap()
 });
-static M_TS: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static M_TS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?").unwrap()
 });
 static M_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?-u:\b)[0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(?-u:\b)").unwrap()
 });
-static M_UUID: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static M_UUID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?-u:\b)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?-u:\b)")
         .unwrap()
 });
