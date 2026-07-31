@@ -1,6 +1,6 @@
 ---
 name: tanuki-context
-version: 0.8.0
+version: 0.20.0
 description: |
   Cut input-token cost by rendering bulky text (logs, command output, long
   docs) as dense PNG pages the model reads at a fraction of the price, or by
@@ -38,8 +38,10 @@ verbatim, and every drop is counted.
      `tanuki_render` with the recommended knobs. Use the returned pages
      instead of pasting the text.
    - You only need parts of it, now or later -> `tanuki_stash { text }`
-     (returns a ~300-token map + id), then `tanuki_fetch { id, query }` or
-     `{ id, lines: "a-b" }`. Big slices arrive as pages automatically, and
+     (returns a ~300-token map + id), then `tanuki_fetch { id, query }`,
+     `{ id, lines: "a-b" }`, or - when you only have plain words, not an
+     exact string - `{ id, find: "free words" }` (top-scored windows, always
+     text). Big query/lines slices arrive as pages automatically, and
      credential-shaped values come back as `[redacted:<kind>]` with a count
      line - pass `redact: false` only when you actually need the secret.
    - **Verify before you quote.** Any id/hash/version/path you read off a

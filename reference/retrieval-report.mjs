@@ -107,6 +107,8 @@ const ANSWERS = [
     near: "ERROR",
     alt: "502",
     lines: "1-200",
+    // what an agent asking "which unit logs the most errors" would type
+    words: "ERROR request failed",
   },
   {
     key: "version",
@@ -117,6 +119,7 @@ const ANSWERS = [
     near: "rollback",
     alt: "pinned",
     lines: "701-900",
+    words: "pinned rollback canary",
   },
   {
     key: "reqId",
@@ -127,6 +130,7 @@ const ANSWERS = [
     near: "request-id",
     alt: "502",
     lines: "301-500",
+    words: "upstream 502 request-id",
   },
 ];
 const STRATS = [
@@ -134,6 +138,10 @@ const STRATS = [
   { col: "near-keyword", kind: "query", pick: (a) => a.near },
   { col: "alt-keyword", kind: "query", pick: (a) => a.alt },
   { col: "line-range", kind: "lines", pick: (a) => a.lines },
+  // 0.20: free-word relevance search (context-mode-shaped, integer-scored).
+  // The words are what an agent would type WITHOUT knowing the exact string -
+  // the same realism rule the near/alt keywords follow.
+  { col: "find-words", kind: "find", pick: (a) => a.words },
 ];
 
 const NOMATCH = hex(lcg(9001), 12); // deterministic useless query
@@ -177,7 +185,10 @@ const countCalls = UNITS.map((u) => ({ name: "tanuki_fetch", arguments: { id: ID
 const calls = [
   ...pairs.map((p) => ({
     name: "tanuki_fetch",
-    arguments: p.s.kind === "query" ? { id: ID, query: p.arg } : { id: ID, lines: p.arg },
+    arguments:
+      p.s.kind === "query" ? { id: ID, query: p.arg }
+      : p.s.kind === "find" ? { id: ID, find: p.arg }
+      : { id: ID, lines: p.arg },
   })),
   ...queryPairs.map((p) => ({ name: "tanuki_distill", arguments: { text: LOG, query: p.arg } })),
   ...countCalls,
@@ -201,6 +212,11 @@ const SLICES = pairs.map((p) => {
   if (p.s.kind === "lines") {
     const [lo, hi] = p.arg.split("-").map(Number);
     return LINES.slice(lo - 1, hi).join("\n");
+  }
+  if (p.s.kind === "find") {
+    // find returns its windows as the reply text itself; the windows ARE the
+    // slice. If a future change images them, truth lands PIXELS via classify.
+    return pairReplies[pairs.indexOf(p)].text;
   }
   const blocks = oracleReplies[queryPairs.indexOf(p)].blocks.filter((b) => b.type === "text");
   return blocks.length < 2 ? "" : blocks[1].text;

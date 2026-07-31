@@ -23,7 +23,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import http from "node:http";
 import https from "node:https";
-import { tableEncode } from "./table.ts";
+import { canonJson, tableEncode } from "./table.ts";
 import { URL } from "node:url";
 import { distillLog } from "./distill.ts";
 import { apply as codebookApply } from "./codebook.ts";
@@ -34,6 +34,48 @@ import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
 import { charCount, isObj, rnd, textTokens } from "./serde.ts";
+
+// Volatile prompt shapes, same patterns as distill.ts's masks (F4). Declared
+// WITHOUT the g flag: .test() on a g-regex is stateful (lastIndex carries
+// over), which turns "volatile" into a coin flip on alternate calls.
+const M_UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+const M_TS =
+  /[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?/;
+const M_JWT = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\./;
+
+/** F4: classify cache break kind. Exported for unit tests. Pure append -> null (cache intact). */
+export function attributeBreak(
+  prev: string[],
+  cur: string[],
+): { index: number; kind: string } | null {
+  // Pure append OR identical: previous is a (possibly complete) prefix of
+  // current, so the cached prefix is intact. `>=` matters: two identical
+  // consecutive requests fell through both prefix checks and came back as a
+  // bogus "modified" at index len (this engine lied, the Rust one panicked).
+  if (cur.length >= prev.length && prev.every((p, i) => p === cur[i])) {
+    return null;
+  }
+  // Find first divergence
+  const minLen = Math.min(prev.length, cur.length);
+  let i = 0;
+  while (i < minLen && prev[i] === cur[i]) i++;
+  
+  // Current is proper prefix of previous -> evicted
+  if (i === cur.length && cur.length < prev.length) {
+    return { index: i, kind: "evicted" };
+  }
+  
+  // Classify at divergence point
+  const pBlock = prev[i];
+  const cBlock = cur[i];
+  const pInC = cur.slice(i).includes(pBlock);
+  const cInP = prev.slice(i).includes(cBlock);
+  
+  if (pInC && cInP) return { index: i, kind: "reordered" };
+  if (pInC) return { index: i, kind: "added" };
+  if (cInP) return { index: i, kind: "evicted" };
+  return { index: i, kind: "modified" };
+}
 
 export interface ProxyCfg {
   port: number;
@@ -144,7 +186,10 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
 }
 
 export interface TransformResult {
+  /** rewritten body when `changed`, else the caller must forward the original bytes. */
   body: string;
+  /** false = no block was imaged; result exists only for the diagnostics. */
+  changed: boolean;
   imagedBlocks: number;
   origChars: number;
   imageCount: number;
@@ -154,13 +199,13 @@ export interface TransformResult {
   savedTokensCacheAware: number;
   /** whether a cache_control breakpoint was placed on the imaged prefix. */
   cached: boolean;
+  // F4 diagnostics
+  blocks: string[];
+  cacheBreak: { index: number; kind: string; rebilled: number } | null;
+  toolTax: { unused: string[]; tokens: number } | null;
+  volatileSystem: boolean;
 }
 
-/// Cross-request memory, LEDGER-ONLY by construction: it never changes the
-/// emitted bytes (a cross-request rewrite would bust the client's prompt
-/// cache). It exists so the savings log can price a replayed block at the
-/// cache-read rate instead of pretending every avoided token was full-price
-/// input — the counterfactual-accounting hole the rakuen post names.
 export interface ProxySession {
   /// sha256 of block texts imaged in EARLIER requests this session.
   ///
@@ -178,11 +223,22 @@ export interface ProxySession {
   seenBlocks: Set<string>;
   /// a prior response showed cache traffic (cache_read/cache_creation > 0).
   cachingSeen: boolean;
+  /// F4: previous request's block hashes for cacheBreak analysis.
+  /// Single-conversation assumption documented: multi-conversation detection
+  /// would require tracking conversation IDs (Anthropic doesn't expose them),
+  /// expensive semantic comparison (breaks the lightweight proxy contract), or
+  /// a length-change heuristic (false positives on edits). Stated limitation:
+  /// sessions spanning multiple conversations misattribute the first request of
+  /// conversation N>1 as a cache break of conversation 1, inflating rebilled
+  /// tokens once per conversation switch. The proxy is process-scoped and most
+  /// clients spawn one per conversation, so this is rare.
+  prevBlocks: string[];
 }
 
 export function newSession(): ProxySession {
-  return { seenBlocks: new Set(), cachingSeen: false };
+  return { seenBlocks: new Set(), cachingSeen: false, prevBlocks: [] };
 }
+
 
 /// Cache-aware tokens saved by one replaced block. Rules, mirrored in the
 /// Rust engine byte-for-byte:
@@ -368,7 +424,158 @@ export function transformRequestBody(
     if (imagedBlocks > before) lastImagedMsg = i;
   }
 
-  if (imagedBlocks === 0) return null;
+  // F4 diagnostics run on EVERY parseable request, transform or not: a cache
+  // break is most often caused by a request the proxy left alone. Hashes are
+  // taken AFTER imaging (these are the bytes the API cache sees) but BEFORE
+  // our own cache_control placement below - the breakpoint moves forward as
+  // later content gets imaged, and hashing it would forge a false "modified"
+  // attribution at the old holder on every advance.
+
+  // F4 diagnostics: collect block hashes for all content blocks
+  const blocks: string[] = [];
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      if (!isObj(m)) continue;
+      const role = typeof m.role === "string" ? m.role : "";
+      const content = m.content;
+      
+      // Handle string content
+      if (typeof content === "string") {
+        const hash = createHash("sha256")
+          .update(`${role}\x00${canonJson(content)}`, "utf8")
+          .digest("hex")
+          .slice(0, 12);
+        blocks.push(hash);
+        continue;
+      }
+      
+      // Handle array content
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const hash = createHash("sha256")
+            .update(`${role}\x00${canonJson(block)}`, "utf8")
+            .digest("hex")
+            .slice(0, 12);
+          blocks.push(hash);
+        }
+      }
+    }
+  }
+  
+  // F4: cacheBreak analysis vs previous request
+  let cacheBreak: { index: number; kind: string; rebilled: number } | null = null;
+  if (session !== undefined && session.prevBlocks.length > 0) {
+    const brk = attributeBreak(session.prevBlocks, blocks);
+    if (brk !== null) {
+      // Calculate rebilled tokens from text blocks starting at break index
+      let rebilled = 0;
+      let blockIdx = 0;
+      if (Array.isArray(body.messages)) {
+        for (const m of body.messages) {
+          if (!isObj(m)) continue;
+          const content = m.content;
+          
+          if (typeof content === "string") {
+            if (blockIdx >= brk.index) {
+              rebilled += textTokens(content);
+            }
+            blockIdx++;
+            continue;
+          }
+          
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (blockIdx >= brk.index && isObj(block) && block.type === "text" && typeof block.text === "string") {
+                rebilled += textTokens(block.text);
+              }
+              blockIdx++;
+            }
+          }
+        }
+      }
+      cacheBreak = { index: brk.index, kind: brk.kind, rebilled };
+    }
+  }
+  
+  // F4: toolTax - only when tools advertised AND at least one tool_use exists
+  let toolTax: { unused: string[]; tokens: number } | null = null;
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    // Check if any tool_use blocks exist
+    let hasToolUse = false;
+    if (Array.isArray(body.messages)) {
+      for (const m of body.messages) {
+        if (!isObj(m) || !Array.isArray(m.content)) continue;
+        for (const block of m.content) {
+          if (isObj(block) && block.type === "tool_use") {
+            hasToolUse = true;
+            break;
+          }
+        }
+        if (hasToolUse) break;
+      }
+    }
+    
+    if (hasToolUse) {
+      // Collect advertised tool names
+      const advertised = new Set<string>();
+      for (const t of body.tools) {
+        if (isObj(t) && typeof t.name === "string") {
+          advertised.add(t.name);
+        }
+      }
+      
+      // Collect used tool names
+      const used = new Set<string>();
+      if (Array.isArray(body.messages)) {
+        for (const m of body.messages) {
+          if (!isObj(m) || !Array.isArray(m.content)) continue;
+          for (const block of m.content) {
+            if (isObj(block) && block.type === "tool_use" && typeof block.name === "string") {
+              used.add(block.name);
+            }
+          }
+        }
+      }
+      
+      // Calculate unused
+      const unused: string[] = [];
+      for (const name of advertised) {
+        if (!used.has(name)) unused.push(name);
+      }
+      
+      if (unused.length > 0) {
+        unused.sort();
+        const first8 = unused.slice(0, 8);
+        let tokens = 0;
+        for (const t of body.tools) {
+          if (isObj(t) && typeof t.name === "string" && unused.includes(t.name)) {
+            tokens += textTokens(canonJson(t));
+          }
+        }
+        toolTax = { unused: first8, tokens };
+      }
+    }
+  }
+  
+  // F4: volatileSystem - scan system prompt for uuid/timestamp/jwt
+  let volatileSystem = false;
+  const systemText = Array.isArray(body.system)
+    ? body.system.map(b => isObj(b) && typeof b.text === "string" ? b.text : "").join("")
+    : typeof body.system === "string" ? body.system : "";
+  if (systemText.length > 0 && (M_UUID.test(systemText) || M_TS.test(systemText) || M_JWT.test(systemText))) {
+    volatileSystem = true;
+  }
+  
+  // Update session prevBlocks for next request
+  if (session !== undefined) {
+    session.prevBlocks = blocks;
+  }
+
+  if (imagedBlocks === 0) {
+    // Nothing imaged: the caller forwards the ORIGINAL bytes; this result
+    // exists only to carry the diagnostics into the event log.
+    return { body: raw, changed: false, imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached: false, blocks, cacheBreak, toolTax, volatileSystem };
+  }
 
   // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
   // the render tests) and re-sent verbatim on every later turn. The proxy has
@@ -391,7 +598,8 @@ export function transformRequestBody(
       }
     }
   }
-  return { body: JSON.stringify(body), imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached };
+
+  return { body: JSON.stringify(body), changed: true, imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached, blocks, cacheBreak, toolTax, volatileSystem };
 }
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
@@ -458,7 +666,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
         // exception and take the whole proxy down with every in-flight call.
         try {
           stats = transformRequestBody(bodyBuf.toString("utf8"), cfg, session);
-          if (stats) bodyBuf = Buffer.from(stats.body, "utf8");
+          if (stats !== null && stats.changed) bodyBuf = Buffer.from(stats.body, "utf8");
         } catch {
           stats = null; // bodyBuf is untouched unless the transform succeeded
         }
@@ -497,10 +705,9 @@ export function startProxy(cfg: ProxyCfg): http.Server {
               logEvent({
                 ts: Date.now(),
                 tool: "proxy",
-                compressed: stats !== null,
                 orig_chars: stats?.origChars ?? 0,
                 image_count: stats?.imageCount ?? 0,
-                // baseline names its denominator: what Anthropic billed plus
+                compressed: stats !== null && stats.changed,
                 // what the imaged blocks would have added as text (estimate).
                 baseline_tokens: actual + (stats?.savedTokens ?? 0),
                 // the same estimate with the session's observed cache state
@@ -515,7 +722,25 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 cache_read_tokens: usage.cacheRead,
                 cache_create_tokens: usage.cacheCreate,
                 output_tokens: usage.output,
+                // F4 diagnostics
+                blocks: stats?.blocks ?? [],
+                ...(stats?.cacheBreak && { cacheBreak: stats.cacheBreak }),
+                ...(stats?.toolTax && { toolTax: stats.toolTax }),
+                ...(stats?.volatileSystem && { volatileSystem: stats.volatileSystem }),
               });
+              // F4: per-request diagnostic stdout
+              if (stats !== null) {
+                let diagLine = "";
+                if (stats.cacheBreak) {
+                  diagLine += ` · break@${stats.cacheBreak.index} ${stats.cacheBreak.kind}`;
+                }
+                if (stats.toolTax) {
+                  diagLine += ` · toolTax ${stats.toolTax.tokens}tok`;
+                }
+                if (diagLine.length > 0) {
+                  process.stderr.write(`[tanuki proxy]${diagLine}\n`);
+                }
+              }
             });
           } else {
             ur.pipe(res);

@@ -157,7 +157,7 @@ The model now has five tools it can reach for on its own:
 | `tanuki_estimate` | Price something before touching it. Always the first call. |
 | `tanuki_render` | Draw the text as pages, once estimate says it pays. |
 | `tanuki_stash` | Park a big thing outside the conversation, get back a small map of it. |
-| `tanuki_fetch` | Pull back only the slices it needs, by search or line range. |
+| `tanuki_fetch` | Pull back only the slices it needs: regex search, line range, or free-word `find`. |
 | `tanuki_verify` | Check a value it read off a page against the original bytes. |
 
 Three more tools (`tanuki_distill`, `tanuki_compress`, `tanuki_stats`) are hidden
@@ -237,7 +237,7 @@ installed it globally.
 | `estimate <file>` | Prices the file. Renders nothing. Add `--model`, `--cached`, `--distill`, `--codebook`, `--font tiny`. |
 | `run -- <command>` | Runs your command, prints a shrunk version of the output, stashes the full thing. |
 | `stash <file>` | Parks the file and returns a map of it plus an id. |
-| `fetch <id>` | Pulls slices back out with `--query <regex>` or `--lines 40-90`. |
+| `fetch <id>` | Pulls slices back out with `--query <regex>`, `--lines 40-90`, or `--find "free words"` (top-scored windows, never imaged). |
 | `verify <id> <value>` | Checks a value against the stored original. No model involved. |
 | `render <file> [level] [outdir]` | Writes the actual PNG pages to a directory. |
 | `distill <file>` | Prints the text with repeated lines collapsed, errors untouched. |
@@ -425,6 +425,10 @@ section.
 | `distill` (stage 0) | logs, noisy output | **30%** log · **45%** pacman · **94%** JSON · 16% TS | keeps every error line verbatim | **Best text feature.** The only text tier that pays for itself. | [§4](reference/EVALS.md) |
 | `table` (columnar) | JSON/NDJSON only | **59%** JSON · 0% elsewhere | reversible | Excellent, narrow. Keys stated once. | [§4](reference/EVALS.md) |
 | `codebook` (sigils) | repeated long tokens, paths | image 5,264 → 3,808 (**−28%** off image) | reversible; confusability guard | Free win, no downside measured. | [§4](reference/EVALS.md) |
+| `crush` knob (0.20) | big JSON/NDJSON row sets | **94%** on 500 rows (96% with `table`) | reversible: full set stashed, pointer line names the id | headroom's SmartCrusher shape fused with the stash. Keeps head 10 / tail 5 / every error row. | [§12](reference/EVALS.md) |
+| `run` rule table (0.20) | dev-command output | **79% weighted** on 13 real fixtures | errors kept verbatim; never-worse guard; exit code passes through | rtk's design: success elision + noise rules. Full output always stashed. | [§11](reference/EVALS.md) |
+| Hedge rewrites `L2+` (0.20) | hedge-laden prose | hedge-dense fixture: L2 **0→27%** | README control: byte-identical | caveman's rewrite rules. Fires on hedges, zero effect on technical prose. | [§13](reference/EVALS.md) |
+| `recommend.crush` composed route (0.20) | row sets, priced on every estimate | 500 thin rows: old route 14,247 tok → **112** (99%); fat rows 44,804 → **1,008** (98%) | selection then table × codebook × pages; probe is pure (stashes nothing); `route.reason` steers | The new selection feeding the old imaging walk - neither wins alone on fat rows. | [§15](reference/EVALS.md) |
 | **(imaging)** | | | | | |
 | Imaging, normal font | bulk you will *read* | **85–91%** vs raw text | capable readers match their own text score (88–100%); **2 of 5 models score 0%**; exact strings **0/14** | The headline, and the only **conditional** capability here. | [§2](reference/EVALS.md), [§3](reference/EVALS.md) |
 | `tiny` font (4×6) | bulk you will *never* read | **91–96%** (−40% off image) | **0/5 task**, 3/10 needle recall | Cheapest number on the page and it cannot do the job. Lossy-bulk only. | [§3](reference/EVALS.md), [§4](reference/EVALS.md) |
@@ -433,12 +437,14 @@ section.
 | `verbatim` sidecar | ids, hashes, MACs, base64 | **costs** ~42% of render payload | **100%** of at-risk ids over 19.7 MB; **94.5%** on never-seen shapes | Essential. It is what makes imaging safe at all. | [§7](reference/EVALS.md) |
 | `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
 | `stash` | content beyond the window | n/a, a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation, a capability. | [§7](reference/EVALS.md) |
-| `fetch` + match-count | slice retrieval | n/a | **retrieval precision 66.7%**; bare words reach pixels only | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
+| `fetch` + match-count | slice retrieval | n/a | **retrieval precision 73.3%** across 5 strategies | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
+| `fetch --find` (0.20) | bare-word answers | n/a | **3/3**, the only strategy carrying a bare English word as text; never imaged | The pixels-only `unit` miss from 0.16 finally has a text route. | [§10](reference/EVALS.md) |
 | `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop. Covers the sidecar's residual. | [§7](reference/EVALS.md) |
 | Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
 | Redaction on `fetch` | secrets in returned slices | n/a | **2 false positives in 166,985 lines**, both real secrets | Essential. `fetch` returned secrets as text until 0.18. | [§8](reference/EVALS.md) |
 | `dense` refusal | identifier-dense pages | forces text | 2 of 1,393 pages flagged | Correct. Prevents a silently capped sidecar. | [§7](reference/EVALS.md) |
 | Weak-reader gate | haiku-4-5, sonnet-4-5 | forces text | those two: 100% as text, **0% as pages** | Essential, but only fires when the caller passes `model`. | [§3](reference/EVALS.md) |
+| Filename gate (0.20) | `.env*`, keys, `.aws/`... | refuses `render`/`distill`/`stash` | deliberately overcautious (`secretary-notes.md` refuses too); `--allow-sensitive` overrides | caveman's pre-flight complement to the content scanner. | [§13](reference/EVALS.md) |
 | Fidelity band | all imaging | n/a | band now agrees with outcome: good ↔ 100%, unreliable ↔ 20% | Honest since 0.19. Previously called `distill` "degraded" while it solved 1/5. | [§9](reference/EVALS.md) |
 | Router | every call | n/a | declined to image **2 of 4** real corpora (credentials; past the cliff) | Best evidence the engineering is sound: it refuses to sell itself. | [§5](reference/EVALS.md) |
 | **(proxy)** | | | | | |
@@ -446,6 +452,7 @@ section.
 | Cross-request reuse | n/a | n/a | **rejected**: changes the prefix and invalidates the cache it meant to save; also drops the sidecar | Built, measured, reverted. Guard test mirrored into Rust. | [§6](reference/EVALS.md) |
 | `cache_control` breakpoint | multi-turn conversations | **2.1× / 3.0× / 4.7×** at 3/5/10 turns `[calc]` | byte-stable pages | Biggest cost lever found. Cache *writes* are the whole variance story (5.1×). | [§6](reference/EVALS.md) |
 | Fail-open | any transform throw | n/a | survives malformed, astral-plane and null-byte bodies | Essential. A throw used to kill every in-flight call. | [§6](reference/EVALS.md) |
+| Session diagnostics (0.20) | every proxied request | n/a (diagnosis, not savings) | cache-break attribution, never-invoked tool tax, volatile-system-prompt flag; zero forwarded bytes changed | ctxdiff's questions answered live; found a real classifier bug via a Rust panic. | [§14](reference/EVALS.md) |
 | **(accounting)** | | | | | |
 | `textTokens` (class-weighted) | every routing decision | n/a | real content **median 3.3% / worst 16.2%**, vs `chars/4` at 38.3% / 65.6% | Fixed a 3× error in both directions. One documented bound: 239% on pure camelCase blobs. | [§9](reference/EVALS.md) |
 | Output-share reporting | every workload | n/a | **output = 53.3% of spend** | **The ceiling: no input-side tool can cut more than 46.7% of the bill.** Tightens as the tool succeeds. | [§6](reference/EVALS.md) |
@@ -551,6 +558,32 @@ changed*; tanuki decides *what it sees at all*, so the two compose rather than
 compete. Run ctxdiff around an agent using tanuki and the imaged blocks show up
 as ordinary diffs. Its fail-open guarantee and schema-bloat framing are the
 source of the three properties audited in 0.16.1.
+
+**More prior art, new in 0.20.0** - each entry is a technique tanuki
+reimplemented from scratch, measured, and credits:
+
+- **[rtk](https://github.com/rtk-ai/rtk)** (rtk-ai, Apache-2.0): CLI proxy that
+  filters dev-command output with per-command rules. `tanuki-context run`
+  already followed its wrapper shape; 0.20 adds its rule table - success
+  elision, noise strips, a never-worse guard - measured at **79% weighted** on
+  committed real outputs ([EVALS §11](reference/EVALS.md)).
+- **[headroom](https://github.com/chopratejas/headroom)** (Tejas Chopra,
+  Apache-2.0): context-optimization layer. Its SmartCrusher keeps head, tail
+  and anomalous rows of big JSON arrays behind a retrieval sentinel; tanuki's
+  `crush` knob is that shape fused with the existing stash (**94-96%** on a
+  500-row NDJSON, [EVALS §12](reference/EVALS.md)). Its CacheAligner
+  volatile-prefix warning became the proxy's `volatileSystem` flag.
+- **[caveman](https://github.com/JuliusBrussee/caveman)** (Julius Brussee,
+  MIT): telegraphic compression. tanuki's L2-L4 independently converged on the
+  same filler/function-word core; 0.20 ports the rules it lacked - fourteen
+  hedging rewrites (hedge-dense prose L2 **0% → 27%**) and the filename-based
+  credential gate ([EVALS §13](reference/EVALS.md)).
+- **[context-mode](https://github.com/mksglu/context-mode)** (Mert Koseoğlu,
+  Elastic-2.0): park-and-search with a BM25/FTS5 knowledge base. tanuki's
+  stash already followed the park shape; 0.20 adds `find` - free-word
+  relevance search reimplemented independently with integer scoring (no
+  floats, no SQLite, no code shared), the only retrieval strategy that
+  carries a bare-word answer as text ([EVALS §10](reference/EVALS.md)).
 
 **Rust instead of Node.** Same engine, one static binary, held byte-exact and
 pixel-exact with the npm package by a parity harness:

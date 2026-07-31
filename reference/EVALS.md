@@ -17,6 +17,15 @@ Where a number does not flatter the tool, it is here anyway.
   **0/14 byte-exact, every one of 5 models**, which is *why* the `verbatim`
   sidecar carries them as text and the credential gate refuses to image secrets
   (§2).
+- **Proven, 0.20, no model:** the rtk-style `run` rules remove **79%
+  (weighted)** of real command-output chars with errors kept verbatim (§11);
+  the `crush` knob cuts a 500-row NDJSON **94-96%** with the full set stashed
+  (§12); `find` lifts retrieval precision to **73.3%** and is the only
+  strategy that carries a bare-word answer as text (§10); hedge rewrites take
+  hedge-dense prose at L2 from 0% to **27%** with technical prose untouched
+  byte-for-byte (§13); and the routes COMPOSE - `recommend` prices selection
+  through the imaging walk unprompted, taking a 500-row NDJSON the old router
+  billed at 14,247 tok to **112** and fat rows from 44,804 to **1,008** (§15).
 - **Model-dependent:** image *comprehension* needs a capable reader;
   opus-4-8 / opus-5 / sonnet-5 solve the task off pixels as well as off text;
   sonnet-4-5 and haiku-4-5 do not (§3). The fidelity band is calibrated to a
@@ -760,19 +769,31 @@ whole point:
   strings is measured at **0/14** (§2), this is scored a MISS, not a success.
 - **ABSENT**: not retrievable by that strategy at all.
 
-Measured on `opsCorpus()`, four strategies × three planted answers, **identical
+Measured on `opsCorpus()`, five strategies × three planted answers, **identical
 cell-for-cell on both engines**:
 
-| answer | exact-substring | near-keyword | alt-keyword | line-range |
-| --- | --- | --- | --- | --- |
-| request id `42440ce06042` | TEXT | TEXT | TEXT | TEXT |
-| version `9.4.1-rc.2` | TEXT | TEXT | TEXT | TEXT |
-| unit `ingest` | **PIXELS** | **PIXELS** | **PIXELS** | **PIXELS** |
+| answer | exact-substring | near-keyword | alt-keyword | line-range | find-words |
+| --- | --- | --- | --- | --- | --- |
+| request id `42440ce06042` | TEXT | TEXT | TEXT | TEXT | TEXT |
+| version `9.4.1-rc.2` | TEXT | TEXT | TEXT | TEXT | TEXT |
+| unit `ingest` | **PIXELS** | **PIXELS** | **PIXELS** | **PIXELS** | **TEXT** |
 
-**Retrieval precision 8/12 = 66.7%**, and the 4 misses are one coherent cause:
-the `verbatim` sidecar carries id-, hash-, version- and path-shaped strings.
-**`ingest` is a bare English word**, so no strategy ever carries it as text;
-every route puts it on a page only.
+**Retrieval precision 11/15 = 73.3%** (was 8/12 = 66.7% before the fifth
+strategy existed). The 4 misses are one coherent cause: the `verbatim` sidecar
+carries id-, hash-, version- and path-shaped strings. **`ingest` is a bare
+English word**, so none of the four 0.19 strategies ever carried it as text;
+every route put it on a page only.
+
+The fifth column is 0.20's `find` mode (free words, integer-scored windows;
+prior art [context-mode](https://github.com/mksglu/context-mode), Elastic-2.0,
+reimplemented independently - no floats, no FTS5, no code shared), and it is
+the **only strategy that carries the unit answer as
+text**: the top-ranked ERROR windows contain the `ingest` lines verbatim. It
+went 3/3 - but only after this harness caught the first shipped version
+routing its windows through the imaging gate (2,758 chars of windows -> 1 PNG
+page -> the answer scored ABSENT). The rule is now pinned in both engines and
+their test suites: **find output is never imaged.** A relevance result read
+back off pixels is the exact miss this section exists to count.
 
 That resolves the §6 ambiguity precisely: **a failure on
 `dominant-error-unit` is retrieval; a failure on the id or version tasks is
@@ -803,6 +824,188 @@ precision to 12/12 and trips two controls. Disabling the sidecar
 pass, which is the correct split: controls check the instrument, the gate checks
 the engine.
 
+## 11. Command-output crush: `npm run crush`   *(measured, no model)*
+
+0.20.0 gives `tanuki-context run` an rtk-style rule table (prior art:
+[rtk](https://github.com/rtk-ai/rtk), Apache-2.0): per-command noise rules,
+success elision on exit 0, a never-worse guard, and the full original always
+stashed. `reference/crush-report.mjs` replays **committed real command
+outputs** (cargo, pytest, go, npm, git, docker, find; tsc/eslint are
+realistic-shaped synthetics, marked in the manifest) through shims named after
+the real tools, in BOTH engines:
+
+| fixture | exit | rule | chars | saved | distill-only |
+| --- | ---: | --- | ---: | ---: | ---: |
+| cargo-test-pass | 0 | cargo | 8,062 → 909 | **89%** | 65% |
+| find-list (400 lines) | 0 | list-cap | 19,548 → 873 | **96%** | 95% |
+| pytest-pass | 0 | pytest | 504 → 235 | **53%** | -12% |
+| git-status | 0 | git-status | 387 → 216 | **44%** | -16% |
+| cargo-build-fail | 101 | cargo | 355 → 376 | -6% | -17% |
+| npm-install (2 lines) | 0 | npm-install | 21 → 97 | -362% | -276% |
+
+**Weighted over all 13 fixtures: 79% of chars removed** (32,242 → 6,631).
+The honest split: elision-eligible successes save 44-96%; failures stay
+near-neutral because error context is deliberately kept verbatim; tiny outputs
+go negative because `run` always prints its one-line header - a fixed ~70-char
+tax that only matters when the command printed less than the header. A mean of
+per-fixture percentages would report that tax (-23%) instead of the answer, so
+the harness reports the weighted figure and prints both columns.
+
+Three guards make this a measurement instead of a story: the harness
+byte-compares both engines on every fixture (it caught a `lines()` vs
+`split("\n")` trailing-newline divergence and a Rust-only exit!=0 gap before
+they shipped), it replays every fixture under a rule-less command name and
+fails if the rules do not beat plain distill on at least half the success
+fixtures (4/6 currently), and it fails if any exit code is not passed through.
+
+## 12. JSON row crush: the `crush` knob   *(measured, no model)*
+
+Headroom's SmartCrusher insight (prior art:
+[headroom](https://github.com/chopratejas/headroom), Apache-2.0), fused with
+tanuki's stash instead of a bespoke retrieval store: when the whole input is a
+JSON array / NDJSON of ≥30 object rows, keep the first 10, the last 5 and
+every IMPORTANT-matching row (error/warn/fail..., capped at 40), stash the
+FULL original, and append one pointer line:
+
+```
+·crushed· kept 28 of 500 rows - full set: fetch <id> (--query re | --lines a-b)
+```
+
+Measured on a 500-row ops NDJSON (3% error rows): **33,179 → 1,881 tokens
+(94%)**; with `table:true` on the kept rows, **1,294 tokens (96%)**. Nothing
+is unrecoverable - the pointer names the stash id and `tanuki_fetch` takes a
+regex or line range against the original 500 rows. Both engines emit the
+selection and the marker byte-identically (parity ids 38-39, which also pin
+the CRUSH_MIN=30 no-op boundary).
+
+What it does NOT do: statistical anomaly detection (headroom flags >2σ numeric
+outliers; that needs floats we will not put in a parity-pinned selection), and
+it never fires on row sets under 30 or when selection would keep every row.
+
+## 13. Hedge rewrites at L2+: caveman's rules   *(measured)*
+
+tanuki L2-L4 already shared caveman's filler/function-word core (prior art:
+[caveman](https://github.com/JuliusBrussee/caveman), MIT - independently
+derived from the same observation, credited since the lists converged).
+0.20.0 adds the part it lacked: 14 hedging/recommendation rewrites (H1-H14:
+"it could potentially be worth considering that" → gone, "I'd recommend
+using" → "use", "you should ensure that" → "ensure", ...), applied at L2+
+before the filler pass, protected lines untouched.
+
+Measured before/after on a hedge-dense prose fixture (the 0.19.5 published
+build as the before-engine):
+
+| level | 0.19.5 | 0.20.0 |
+| --- | ---: | ---: |
+| L2 prose | 0% (311 tok) | **27%** (228 tok) |
+| L3 dense | 10% (281 tok) | **36%** (200 tok) |
+| L4 caveman | 25% (234 tok) | **42%** (181 tok) |
+
+The boundary, stated plainly: that fixture is hedge-dense by construction.
+The control is the same comparison on this repo's README - **byte-identical
+output across versions** (0%, 9,204 tok, 179 protected lines). The rules fire
+on hedges, not on technical prose, so the win is real where hedges are and
+exactly zero where they are not. caveman's own JetBrains number (-8.5% on 82
+agentic tasks vs 65% advertised on chat prose) is the same lesson from the
+other direction.
+
+Also ported from caveman: the filename gate. `render`, `distill` and `stash`
+refuse `.env*`, `id_rsa`, `*.pem`, `*credential*`, `*secret*`, `.aws/`,
+`.ssh/` ... paths outright (`--allow-sensitive` overrides). Deliberately
+overcautious - `secretary-notes.md` refuses too, and the tests pin that.
+
+## 14. Proxy session diagnostics: ctxdiff's questions   *(deterministic)*
+
+The proxy now answers three questions per request that
+[ctxdiff](https://github.com/salmanzafar949/ctxdiff) (Apache-2.0) asks offline,
+plus one from headroom's CacheAligner - without changing a single forwarded
+byte:
+
+- **`cacheBreak`**: every content block is hashed (sha256 of role + canonical
+  JSON, 12 hex); consecutive requests are compared positionally. A pure append
+  is NOT a break (that is the cache working); otherwise the first divergence
+  is classified `modified` / `added` / `evicted` / `reordered` and the tokens
+  from that block onward are reported as `rebilled`.
+- **`toolTax`**: tools advertised in the request minus tools ever invoked in
+  its own history, priced with `textTokens` - the recurring per-request cost
+  of schemas the model never calls. Only reported when the request shows at
+  least one `tool_use`, so first turns do not spam it.
+- **`volatileSystem`**: a uuid / ISO-timestamp / JWT shape in the system
+  prompt means the client busts its own prefix cache; flagged once per event.
+
+`tanuki_stats` renders all three; the per-request stdout line appends
+` · break@N kind` and ` · toolTax Ntok`. Scope stated honestly: attribution is
+positional (like ctxdiff's), assumes one conversation per proxy process,
+hashes the bytes AFTER imaging but BEFORE our own cache_control placement (the
+breakpoint moves forward as content gets imaged; hashing it would forge a
+false break on every advance), and `rebilled` counts input-side text tokens
+only. This is diagnosis, not savings - no number here is ever added to a
+savings figure.
+
+Building the classifier surfaced one real bug worth recording: two IDENTICAL
+consecutive requests fell through both prefix short-circuits - the TS engine
+reported a bogus `modified` break at index len, the Rust engine panicked on
+the same input. The Rust panic is what caught it; both engines now pin
+identical-lists → no break, with the mutation guard in both test suites.
+
+## 15. Composed routes: selection × imaging: `npm run combined`   *(measured, no model)*
+
+Sections 11-14 measured the 0.20 text-side techniques one at a time. This
+section measures what they do to the routes that already existed - the
+question that matters is not "does crush work" but "does the router now find
+a cheaper route than it could before, without giving anything up".
+
+The mechanism: `recommend` prices the crush selection unprompted, exactly the
+way it has always priced `table` - and then keeps composing: the kept rows go
+through the same walk (columnar table × codebook) and are priced BOTH as text
+and as pages. So the new selection (§12) feeds the old DeepSeek-OCR imaging
+route (§1, §4), and `route.reason` names the composition whenever it beats
+the picked route. The probe is pure: `crushRowsSelect` stashes nothing;
+the stash happens only when a caller actually passes `crush: true`.
+
+Measured on deterministic corpora (seeded, no model, both engines
+byte-identical cell-for-cell):
+
+| corpus | raw tok | 0.19 route would bill | crush as text | crush **+ table + pages** | saved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 500-row NDJSON, thin rows | 14,247 | 14,247 (raw) | 680 | **112** | **99%** |
+| 60-row NDJSON, ~900-char rows | 44,804 | 44,804 (raw) | 14,880 | **1,008** | **98%** |
+| real journal log (control) | 37,591 | 3,665 (image) | - | - | - |
+| 29 rows (below CRUSH_MIN) | 649 | 649 (raw) | - | - | - |
+
+Two rows carry the finding:
+
+- **Thin rows**: selection alone is a 95% cut (680 tok); the old walk stacked
+  on top takes it to 112. Composition is a real multiplier, not double
+  counting - table restates the keys once, codebook and pages compress what
+  selection kept.
+- **Fat rows**: selection alone leaves 14,880 tok of text - still expensive.
+  Imaging the crushed remainder is a further **14.8×** cut to 1,008. This is
+  the case the composition exists for: neither technique wins alone.
+
+The controls hold the boundaries: a real (non-row) log gets no `crush` key
+and routes exactly as before, and 29 rows sit below `CRUSH_MIN` untouched -
+the 0.19 replies for non-row inputs are byte-identical, which parity ids
+43-45 pin across engines.
+
+Honesty notes, so the table cannot oversell:
+
+- `crush.imageTokens` prices pages the way `recommend.imageTokens` always
+  has - the verbatim sidecar is priced separately at route time, so the two
+  candidates stay comparable within one reply.
+- The route's `pick` never becomes "crush": the router only picks loss
+  classes it can label honestly (exact text or a banded image), and crush is
+  lossy by omission with the full set stashed. The steer lives in
+  `route.reason` and the priced candidate in `recommend.crush`; the caller
+  opts in with `crush: true`.
+- Purity is asserted non-vacuously: the harness counts stash entries after
+  every estimate (0) and then proves the counter works by calling
+  `{crush: true}` and seeing exactly 1.
+
+Reproduce: `npm run combined` (add `TANUKI_BIN=<rust binary>` for the
+cross-engine comparison; without it the parity line honestly reports
+`n/a (single engine - nothing was compared)`).
+
 ## Reproduce
 
 ```
@@ -815,6 +1018,11 @@ journalctl --no-pager -n 200000 > /tmp/j.log && bun reference/coverage-report.mj
 
 # generalisation: ids in shapes the engine never saw, injected into real lines
 bun reference/adversarial-report.mjs            # --n 200 for tighter bounds
+
+# 0.20 text-side additions (no key, both engines byte-compared)
+node reference/crush-report.mjs --min 60        # rtk-style run rules on committed real outputs
+node reference/retrieval-report.mjs --min 60    # now includes the find-words column
+node reference/combined-report.mjs --min 90     # composed routes: selection x table x codebook x pages
 
 # the lossless spine: stash it, fetch it, diff it (--no-redact: the default
 # fetch masks credential-shaped values, so byte-identity needs the mask off)

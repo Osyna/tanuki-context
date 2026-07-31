@@ -176,6 +176,12 @@ const secretText = `${Array.from({ length: 40 }, (_, i) =>
     : `2026-07-27 worker-${i % 5} INFO handled request in ${i * 7}ms`,
 ).join("\n")}\n`;
 const secretId = createHash("sha256").update(secretText, "utf8").digest("hex").slice(0, 12);
+// crush parity (0.20): 60 deterministic NDJSON rows, two IMPORTANT rows beyond
+// the head window. The ·crushed· marker carries a stash id (content hash), so
+// this also pins the canonical row serializer both selections hash through.
+const crushRowsText = Array.from({ length: 60 }, (_, i) =>
+  JSON.stringify({ id: i, seq: i * 100, status: i === 20 ? "error" : i === 45 ? "failed" : "ok", unit: `svc-${i % 7}` }),
+).join("\n");
 const requests = [
   { jsonrpc: "2.0", id: 2, method: "ping" },
   { jsonrpc: "2.0", id: 3, method: "tools/list" },
@@ -300,6 +306,31 @@ const requests = [
   { jsonrpc: "2.0", id: 35, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "the router compares estimated token counts before deciding. ".repeat(80), level: 256 } } },
   { jsonrpc: "2.0", id: 36, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: "poll ok latency=3ms shard=7\n".repeat(400), model: "anthropic/claude-haiku-4-5" } } },
   { jsonrpc: "2.0", id: 37, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: 42 } } },
+  // 0.20.0 "absorb" pins. New text-side surfaces, each with the boundary that
+  // could drift one-sided:
+  //   38 crush knob   - head/tail/IMPORTANT row selection + the ·crushed·
+  //                     marker (carries a stash id = content hash, so byte
+  //                     parity here also pins the canonical row serializer)
+  //   39 crush no-op  - 29 rows is under CRUSH_MIN; the knob must change
+  //                     NOTHING (a one-sided threshold drift flips this)
+  //   40 find mode    - integer scoring (3 word / 1 substring), tie-break,
+  //                     window merge, pinned header/trailer lines
+  //   41 find errors  - the new tri-state exclusivity message
+  //   42 hedges L2    - H1-H14 rewrite bytes (order matters: H11 before H12)
+  { jsonrpc: "2.0", id: 38, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText, level: 0, crush: true } } },
+  { jsonrpc: "2.0", id: 39, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText.split("\n").slice(0, 29).join("\n"), level: 0, crush: true } } },
+  { jsonrpc: "2.0", id: 40, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, find: "INFO worker request", top: 3 } } },
+  { jsonrpc: "2.0", id: 41, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: secretId, query: "x", find: "y" } } },
+  { jsonrpc: "2.0", id: 42, method: "tools/call", params: { name: "tanuki_compress", arguments: { text: "It could potentially be worth considering that the retry loop is the bottleneck. I'd recommend using a bounded queue, and make sure to cap the batch size. You should ensure that the pool stays small. To be honest, it turns out that the dry-run flag was never wired.", level: 2 } } },
+  // 0.20 composed route (recommend.crush): 43 pins the unprompted probe on a
+  // row set (crush key + steered route.reason, NO crush knob passed and NO
+  // stash side effect - the shared stash tmp is checked at the end either
+  // way); 44 pins the fat-row case where pages-after-selection beat
+  // selection-as-text (the DeepSeek stack applied to the crushed remainder);
+  // 45 pins the boundary: 29 rows stay crush-free byte-for-byte.
+  { jsonrpc: "2.0", id: 43, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText } } },
+  { jsonrpc: "2.0", id: 44, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: Array.from({ length: 60 }, (_, i) => JSON.stringify({ id: i, blob: Array.from({ length: 15 }, (_, j) => `token-${(i * 31 + j * 7) % 997}-${"x".repeat(40)}`).join(" "), status: i % 9 === 0 ? "error refused" : "ok" })).join("\n") } } },
+  { jsonrpc: "2.0", id: 45, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText.split("\n").slice(0, 29).join("\n") } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

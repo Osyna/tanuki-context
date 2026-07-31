@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { distillLog } from "./distill.ts";
+import { redactCredentials } from "./needles.ts";
 import { cmpCodepoints, rustTrim, truncateChars } from "./serde.ts";
 
 /// 2^53-1: the largest integer JS holds exactly. Both engines saturate a line
@@ -71,9 +72,16 @@ export function stashText(text: string): Stashed {
 
 /** Pull a slice of a stashed text. Throws Error with the contract message on
  *  bad input; the caller maps it to a tool error / CLI fatal. */
-export function fetchSlice(id: string, query: string | null, lines: string | null): string {
-  if ((query === null) === (lines === null)) {
-    throw new Error("give exactly one of query or lines");
+export function fetchSlice(
+  id: string,
+  query: string | null,
+  lines: string | null,
+  find: string | null = null,
+  top = 8,
+): string {
+  const nonNull = [query, lines, find].filter((x) => x !== null).length;
+  if (nonNull !== 1) {
+    throw new Error("give exactly one of query, lines or find");
   }
   let text: string;
   try {
@@ -102,6 +110,70 @@ export function fetchSlice(id: string, query: string | null, lines: string | nul
     const a = Math.min(Math.max(1, A), segments.length);
     const b = Math.min(Math.max(1, B), segments.length);
     return segments.slice(a - 1, b).join("\n");
+  }
+  if (find !== null) {
+    // find mode: word-based relevance scoring
+    const rawWords = find.split(/\s+/).filter((w) => w !== "");
+    if (rawWords.length === 0) throw new Error("find needs at least one word");
+    const words = Array.from(new Set(rawWords.map((w) => w.toLowerCase()))).slice(0, 8);
+    const segments = text.split("\n");
+    const N = segments.length;
+    // Score each line
+    interface Anchor { line: number; score: number }
+    const anchors: Anchor[] = [];
+    for (let i = 0; i < N; i++) {
+      const raw = segments[i];
+      const lower = raw.toLowerCase();
+      let score = 0;
+      for (const word of words) {
+        // Escape regex metacharacters
+        const esc = word.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+        // ASCII word boundary check: (?<![0-9A-Za-z_])word(?![0-9A-Za-z_])
+        const re = new RegExp(`(?<![0-9A-Za-z_])${esc}(?![0-9A-Za-z_])`, "i");
+        if (re.test(raw)) {
+          score += 3;
+        } else if (lower.includes(word)) {
+          score += 1;
+        }
+      }
+      if (score > 0) anchors.push({ line: i + 1, score });
+    }
+    const h = anchors.length;
+    if (h === 0) return `·find· ${words.length} words · 0 lines matched`;
+    // Top K anchors by (score desc, line asc)
+    const k = Math.min(Math.max(1, top), 32);
+    const topAnchors = anchors.sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score;
+      return a.line - b.line;
+    }).slice(0, k);
+    // Build windows: each anchor -> [max(1,n-2), min(N,n+2)]
+    interface Window { start: number; end: number; score: number }
+    const windows: Window[] = [];
+    for (const anc of topAnchors) {
+      const start = Math.max(1, anc.line - 2);
+      const end = Math.min(N, anc.line + 2);
+      windows.push({ start, end, score: anc.score });
+    }
+    // Merge overlapping/adjacent windows
+    windows.sort((a, b) => a.start - b.start);
+    const merged: Window[] = [];
+    for (const win of windows) {
+      if (merged.length === 0 || win.start > merged[merged.length - 1].end + 1) {
+        merged.push(win);
+      } else {
+        const last = merged[merged.length - 1];
+        last.end = Math.max(last.end, win.end);
+        last.score = Math.max(last.score, win.score);
+      }
+    }
+    // Output
+    const parts: string[] = [];
+    for (const win of merged) {
+      parts.push(`·find· L${win.start}-${win.end} score ${win.score}`);
+      parts.push(segments.slice(win.start - 1, win.end).join("\n"));
+    }
+    parts.push(`·find· ${words.length} words · ${h} lines matched · ${merged.length} windows`);
+    return parts.join("\n");
   }
   return distillLog(text, query, 2).distilled;
 }

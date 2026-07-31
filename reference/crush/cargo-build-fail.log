@@ -1,0 +1,11 @@
+   Compiling tanuki-context v0.19.5 (/tmp/fixgen/rust)
+error: this file contains an unclosed delimiter
+   --> src/ladder.rs:151:14
+    |
+151 | fn broken( {
+    |          - -^
+    |          | |
+    |          | unclosed delimiter
+    |          unclosed delimiter
+
+error: could not compile `tanuki-context` (bin "tanuki-context") due to 1 previous error
