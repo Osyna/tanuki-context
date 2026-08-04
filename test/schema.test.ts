@@ -25,7 +25,7 @@ interface Advertised {
 }
 
 /// The schema as it actually goes on the wire, not the registry it is built
-/// from, and for ALL eight tools: the slim default surface hides three, and a
+/// from, and for ALL eight tools: the slim default surface hides two, and a
 /// bad shape in a hidden one breaks a provider just as hard the moment
 /// TANUKI_ALL_TOOLS=1.
 function advertised(): Advertised[] {
