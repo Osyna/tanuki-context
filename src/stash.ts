@@ -25,6 +25,17 @@ function stashDir(): string {
   return `${process.env.HOME ?? ""}/.tanuki/stash`;
 }
 
+/// A stash id is content-addressed - `stashText` mints it as a 12-char
+/// lowercase sha256 prefix - so anything but that shape is a traversal
+/// attempt, not a typo (issue #2). Every read routes through here rather than
+/// building the path itself: string concat happened to defuse absolute paths
+/// in this engine, but the Rust engine joins a PathBuf, where an absolute
+/// `id` replaces the stash dir outright. One chokepoint, both engines.
+function stashPath(id: string): string {
+  if (!/^[0-9a-f]{12}$/.test(id)) throw new Error(`unknown stash id: ${id}`);
+  return `${stashDir()}/${id}`;
+}
+
 export interface Stashed {
   id: string;
   overview: string;
@@ -33,8 +44,10 @@ export interface Stashed {
 export function stashText(text: string): Stashed {
   const id = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
   const dir = stashDir();
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(`${dir}/${id}`, text);
+  // The stash deliberately holds unredacted bytes, so it is owner-only
+  // rather than whatever umask says (0755/0644 by default).
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(`${dir}/${id}`, text, { mode: 0o600 });
 
   const bytes = Buffer.byteLength(text, "utf8");
   const segments = text.split("\n");
@@ -85,7 +98,7 @@ export function fetchSlice(
   }
   let text: string;
   try {
-    text = readFileSync(`${stashDir()}/${id}`, "utf8");
+    text = readFileSync(stashPath(id), "utf8");
   } catch {
     throw new Error(`unknown stash id: ${id}`);
   }
@@ -186,7 +199,7 @@ export function fetchSlice(
 export function matchCount(id: string, query: string): { matched: number; total: number } {
   let text: string;
   try {
-    text = readFileSync(`${stashDir()}/${id}`, "utf8");
+    text = readFileSync(stashPath(id), "utf8");
   } catch {
     throw new Error(`unknown stash id: ${id}`);
   }
@@ -224,7 +237,7 @@ export function verifyValue(id: string, value: string): VerifyResult {
   if (value === "") throw new Error("verify needs a non-empty value");
   let text: string;
   try {
-    text = readFileSync(`${stashDir()}/${id}`, "utf8");
+    text = readFileSync(stashPath(id), "utf8");
   } catch {
     throw new Error(`unknown stash id: ${id}`);
   }

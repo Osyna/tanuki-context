@@ -1,13 +1,15 @@
 // Stash mode: park text outside context, fetch slices back, auto-imaged when
 // pages clearly win. Storage isolated per-run via TANUKI_STASH.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DIR = mkdtempSync(`${tmpdir()}/tanuki-stash-test-`);
 process.env.TANUKI_STASH = DIR;
 
-const { stashText, fetchSlice, verifyValue } = await import("../src/stash.ts");
+// Dynamic on purpose: TANUKI_STASH must be set above before these modules are
+// evaluated, so the whole suite reads and writes the throwaway dir on line 7.
+const { stashText, fetchSlice, matchCount, verifyValue } = await import("../src/stash.ts");
 const { toolFetch, toolStash } = await import("../src/main.ts");
 const { redactCredentials } = await import("../src/needles.ts");
 
@@ -162,6 +164,57 @@ describe("stash", () => {
     expect(() => fetchSlice(id, null, "abc")).toThrow("bad lines range");
     expect(() => fetchSlice(id, "x", "1-2")).toThrow("give exactly one of query, lines or find");
     expect(() => fetchSlice(id, null, null)).toThrow("give exactly one of query, lines or find");
+  });
+
+  // Issue #2: the id indexes a content-addressed file, so a caller-supplied
+  // path is never a legitimate id. The sentinel is a REAL file one level out
+  // of the stash dir, so a passing test means the read was refused, not that
+  // it merely missed. All three read sites are covered because all three
+  // built the path themselves, and `find`/`query` turn one into a grep oracle.
+  test("traversal ids are refused at every read site", () => {
+    const secret = `${DIR}/../tanuki-traversal-secret.txt`;
+    writeFileSync(secret, "SENTINEL topsecret\n");
+    try {
+      const escapes = [
+        "../tanuki-traversal-secret.txt",
+        secret, // absolute: harmless here, but PathBuf::join drops the base in Rust
+        "..",
+        "DEADBEEFCAFE", // a sha256 hex prefix is lowercase
+        "deadbeefcaf", // 11
+        "deadbeefcafe1", // 13
+      ];
+      for (const bad of escapes) {
+        const want = `unknown stash id: ${bad}`;
+        expect(() => fetchSlice(bad, null, "1-2")).toThrow(want);
+        expect(() => fetchSlice(bad, "SENTINEL", null)).toThrow(want);
+        expect(() => fetchSlice(bad, null, null, "SENTINEL")).toThrow(want);
+        expect(() => matchCount(bad, "SENTINEL")).toThrow(want);
+        expect(() => verifyValue(bad, "topsecret")).toThrow(want);
+      }
+      // The guard rejects only what stashText cannot mint: real ids still read.
+      const { id } = stashText(LOG);
+      expect(fetchSlice(id, null, "1-1")).toContain("worker-0");
+      expect(matchCount(id, "INFO").matched).toBe(400);
+      expect(verifyValue(id, "segment_00000").status).toBe("exact");
+    } finally {
+      rmSync(secret, { force: true });
+    }
+  });
+
+  // The stash deliberately holds unredacted bytes, so creation is owner-only
+  // rather than umask-default (0755/0644). Asserting the group/other bits are
+  // clear rather than an exact mode keeps this true under any sane umask.
+  test("stash is created owner-only", () => {
+    const nested = `${DIR}/perm-check`;
+    const prev = process.env.TANUKI_STASH;
+    process.env.TANUKI_STASH = nested;
+    try {
+      const { id } = stashText("alpha\nbeta\n");
+      expect(statSync(nested).mode & 0o077).toBe(0);
+      expect(statSync(`${nested}/${id}`).mode & 0o077).toBe(0);
+    } finally {
+      process.env.TANUKI_STASH = prev;
+    }
   });
 
   test("toolStash returns the overview as a single text block", () => {
