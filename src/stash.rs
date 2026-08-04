@@ -24,13 +24,44 @@ pub fn stash_dir() -> PathBuf {
     }
 }
 
+/// Read a stashed blob by id, validating the id first. Ids are
+/// content-addressed - `stash_text` mints them as a 12-char lowercase sha256
+/// prefix - so any other shape is a traversal attempt, not a typo (issue #2).
+/// This engine needed it more than the TS one: `PathBuf::join` REPLACES the
+/// base when its argument is absolute, so an absolute `id` escaped the stash
+/// dir outright, with no `..` anywhere. Returns the same contract error a
+/// missing id already returned, so callers and tests are unchanged.
+fn read_stash(id: &str) -> Result<String, String> {
+    let shaped = id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    shaped
+        .then(|| stash_dir().join(id))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .ok_or_else(|| format!("unknown stash id: {id}"))
+}
+
 /// Park `text` under its content hash; returns (id, overview).
 pub fn stash_text(text: &str) -> std::io::Result<(String, String)> {
     let mut id = sha256::hex(text.as_bytes());
     id.truncate(12);
     let dir = stash_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join(&id), text.as_bytes())?;
+    // The stash deliberately holds unredacted bytes, so it is owner-only
+    // rather than whatever umask says (0755/0644 by default). Mode is applied
+    // at creation, not chmod'ed after, so there is no world-readable window.
+    let mut db = std::fs::DirBuilder::new();
+    db.recursive(true);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+        db.mode(0o700);
+        opts.mode(0o600);
+    }
+    db.create(&dir)?;
+    {
+        use std::io::Write as _;
+        opts.open(dir.join(&id))?.write_all(text.as_bytes())?;
+    }
     let ov = overview(&id, text);
     Ok((id, ov))
 }
@@ -81,9 +112,7 @@ pub fn fetch_slice(
     if non_null != 1 {
         return Err("give exactly one of query, lines or find".to_string());
     }
-    let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
-        return Err(format!("unknown stash id: {id}"));
-    };
+    let text = read_stash(id)?;
     // F3: find mode
     if let Some(f) = find {
         let raw_words: Vec<&str> = f.split_whitespace().collect();
@@ -200,9 +229,7 @@ pub fn fetch_slice(
 /// count is NOT a match count - and without a real one an agent cannot answer
 /// "which unit logged the most errors" at all (EVALS section 6).
 pub fn match_count(id: &str, query: &str) -> Result<(usize, usize), String> {
-    let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
-        return Err(format!("unknown stash id: {id}"));
-    };
+    let text = read_stash(id)?;
     let re = regex::Regex::new(query).map_err(|_| format!("bad query regex: {query}"))?;
     let segs: Vec<&str> = text.split('\n').collect();
     let matched = segs.iter().filter(|l| re.is_match(l)).count();
@@ -236,9 +263,7 @@ pub fn verify_value(id: &str, value: &str) -> Result<Value, String> {
     if value.is_empty() {
         return Err("verify needs a non-empty value".to_string());
     }
-    let Ok(text) = std::fs::read_to_string(stash_dir().join(id)) else {
-        return Err(format!("unknown stash id: {id}"));
-    };
+    let text = read_stash(id)?;
 
     if let Some(byte_idx) = text.find(value) {
         let line = 1 + text[..byte_idx].bytes().filter(|&b| b == b'\n').count();
@@ -414,6 +439,58 @@ mod tests {
                 fetch_slice("cafebabe0000", Some("a"), None, None, 8).unwrap_err(),
                 "unknown stash id: cafebabe0000"
             );
+        })
+    }
+
+    /// Issue #2: an id indexes a content-addressed file, so a caller-supplied
+    /// path is never legitimate. The sentinel is a REAL file one level out of
+    /// the stash dir, so passing means the read was refused, not that it
+    /// missed. This engine was the worse of the two: `PathBuf::join` replaces
+    /// the base when the argument is absolute, so it escaped with no `..`.
+    #[test]
+    fn traversal_ids_are_refused_at_every_read_site() {
+        with_test_dir("traversal", || {
+            let secret = std::env::temp_dir().join("tanuki-traversal-secret.txt");
+            std::fs::write(&secret, "SENTINEL topsecret\n").unwrap();
+            let abs = secret.to_string_lossy().to_string();
+            let escapes = [
+                "../tanuki-traversal-secret.txt",
+                abs.as_str(),
+                "..",
+                "DEADBEEFCAFE", // a sha256 hex prefix is lowercase
+                "deadbeefcaf",  // 11
+                "deadbeefcafe1", // 13
+            ];
+            for bad in escapes {
+                let want = format!("unknown stash id: {bad}");
+                assert_eq!(fetch_slice(bad, None, Some("1-2"), None, 8).unwrap_err(), want);
+                assert_eq!(fetch_slice(bad, Some("SENTINEL"), None, None, 8).unwrap_err(), want);
+                assert_eq!(fetch_slice(bad, None, None, Some("SENTINEL"), 8).unwrap_err(), want);
+                assert_eq!(match_count(bad, "SENTINEL").unwrap_err(), want);
+                assert_eq!(verify_value(bad, "topsecret").unwrap_err(), want);
+            }
+            // The guard rejects only what stash_text cannot mint: real ids read.
+            let (id, _) = stash_text("alpha\nbeta\n").unwrap();
+            assert!(fetch_slice(&id, None, Some("1-1"), None, 8).is_ok());
+            assert_eq!(match_count(&id, "alpha").unwrap().0, 1);
+            assert_eq!(verify_value(&id, "alpha").unwrap()["status"], "exact");
+            let _ = std::fs::remove_file(&secret);
+        })
+    }
+
+    /// The stash holds unredacted bytes by design, so creation is owner-only
+    /// rather than umask-default (0755/0644). Asserting group/other bits are
+    /// clear rather than an exact mode keeps this true under any sane umask.
+    #[cfg(unix)]
+    #[test]
+    fn stash_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        with_test_dir("perm", || {
+            let (id, _) = stash_text("alpha\nbeta\n").unwrap();
+            let dir = stash_dir();
+            let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o077;
+            assert_eq!(mode(dir.clone()), 0, "stash dir is group/other accessible");
+            assert_eq!(mode(dir.join(&id)), 0, "stash file is group/other readable");
         })
     }
 
