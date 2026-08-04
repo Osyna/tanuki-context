@@ -775,14 +775,18 @@ fn tools_list() -> Value {
             }
         }
     }
-    // Slim default surface: advertise only the 4 workflow tools unless
-    // TANUKI_ALL_TOOLS=1. The other four stay callable by name.
+    // Slim default surface: advertise only the workflow tools unless
+    // TANUKI_ALL_TOOLS=1. The rest stay callable by name.
     if std::env::var("TANUKI_ALL_TOOLS").as_deref() != Ok("1") {
         // `tanuki_fetch` is not optional: stash parks text outside the context
         // and fetch is the ONLY way back. Advertising stash without it let the
         // model park data it could never retrieve and burn every turn on
         // ToolSearch hunting a tool that was not there (EVALS section 6).
-        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stash", "tanuki_fetch", "tanuki_verify"];
+        // `tanuki_stats` is advertised for the same reason, one step removed:
+        // SKILL.md step 6 tells the model to call it at end of session, and an
+        // MCP client cannot invoke what tools/list omits - "callable by name"
+        // only helps a raw JSON-RPC caller.
+        let keep = ["tanuki_render", "tanuki_estimate", "tanuki_stats", "tanuki_stash", "tanuki_fetch", "tanuki_verify"];
         if let Some(tools) = v["tools"].as_array_mut() {
             tools.retain(|t| keep.contains(&t["name"].as_str().unwrap_or("")));
         }
@@ -1844,6 +1848,35 @@ mod schema_tests {
     use crate::needles::Verbatim;
     use serde_json::Value;
     use serde_json::json;
+
+    /// The advertised default surface, pinned against the TS engine's
+    /// DEFAULT_TOOL_NAMES. `tanuki_fetch` is why this list is not just
+    /// render/estimate (EVALS section 6: stash without fetch sent the model
+    /// ToolSearch hunting for a tool that was not there); `tanuki_stats`
+    /// joined it because SKILL.md's end-of-session step names it and an MCP
+    /// client cannot invoke what tools/list omits. `tools_list` was imported
+    /// here and never called, so the slim surface shipped untested on this
+    /// side while the TS engine pinned it - that is exactly how the two
+    /// engines drift.
+    #[test]
+    fn default_surface_advertises_the_six_workflow_tools() {
+        let list = tools_list();
+        let names: Vec<&str> =
+            list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "tanuki_render",
+                "tanuki_estimate",
+                "tanuki_stats",
+                "tanuki_stash",
+                "tanuki_fetch",
+                "tanuki_verify"
+            ]
+        );
+        // The hidden two stay in the registry, callable by name.
+        assert_eq!(all_tools()["tools"].as_array().unwrap().len(), 8);
+    }
 
     /// Walk every advertised parameter rather than pinning the one that broke:
     /// the next union would be just as invisible here as this one was.

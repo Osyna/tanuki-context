@@ -488,20 +488,27 @@ mod count_tests {
         // the premise it needs is pinned here - a find over a corpus whose
         // windows are big enough that the imaging gate WOULD win must still
         // come back as ·find· text windows from fetch_slice.
-        let text: String = (0..300)
-            .map(|i| {
-                if (i + 1) % 6 == 0 {
-                    format!("entry {} ERROR request failed with a long explanatory tail that pads the window bytes", i + 1)
-                } else {
-                    format!("entry {} quiet routine heartbeat line with a long explanatory tail that pads the window", i + 1)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (id, _o) = stash_text(&text).unwrap();
-        let got = fetch_slice(&id, None, None, Some("ERROR request failed"), 32).unwrap();
-        assert!(got.starts_with("\u{b7}find\u{b7} "));
-        assert!(got.contains(" windows"));
+        // TANUKI_STASH is process-global and `with_test_dir` deletes its
+        // scratch dir on the way out, so a test that stashes outside the
+        // harness races every test inside it: the id vanishes between
+        // stash_text and fetch_slice. Landed without the wrapper alongside
+        // `find`; the flake it caused was "unknown stash id", not a find bug.
+        with_test_dir("find", || {
+            let text: String = (0..300)
+                .map(|i| {
+                    if (i + 1) % 6 == 0 {
+                        format!("entry {} ERROR request failed with a long explanatory tail that pads the window bytes", i + 1)
+                    } else {
+                        format!("entry {} quiet routine heartbeat line with a long explanatory tail that pads the window", i + 1)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (id, _o) = stash_text(&text).unwrap();
+            let got = fetch_slice(&id, None, None, Some("ERROR request failed"), 32).unwrap();
+            assert!(got.starts_with("\u{b7}find\u{b7} "));
+            assert!(got.contains(" windows"));
+        })
     }
 
 }
