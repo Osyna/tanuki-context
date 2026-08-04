@@ -117,6 +117,14 @@ exactly one entry.
 - rtk's TOML filter DSL (a config language is a second parser to hold at
   parity; the rule table is code, tested in both engines).
 
+### 0.20.1 - Fixed: `tanuki_fetch`/`tanuki_verify` did not validate the stash id ([#2](https://github.com/Osyna/tanuki-context/issues/2), reported by @crenshawdev)
+
+- **`fetchSlice`, `matchCount` and `verifyValue` read `${stashDir()}/${id}` from a caller-supplied `id`** with nothing checking its shape, so a relative id escaped the stash directory and the file came back through `lines`, `query`, `find` and `verify`. `query` runs a caller-supplied regex over whatever it read, which makes it a grep oracle, and the stash exists specifically to hold untrusted log and command output - the content being processed and the party choosing the tool arguments are not independent here.
+- **On the Rust engine it was worse than reported.** `stash_dir().join(id)` discards the base the moment `id` is absolute, so `id: "/etc/passwd"` escaped with no `../` at all. The issue's "absolute paths do not work" caveat holds for the npm package and did not hold for the compiled binary. Confirmed over MCP on both `tanuki_fetch` and `tanuki_verify` before fixing.
+- Both engines validate before reading now, in one function rather than three call sites - TS's `stashPath()`, Rust's `read_stash()` - so a fourth reader cannot be added without the check. The rule is the id's own shape (12-char lowercase hex, the sha256 prefix `stashText` mints) rather than an allowlist, so nothing legitimate is rejected, and a bad shape returns the same `unknown stash id` message as a well-formed but unknown one, so the guard cannot be used to probe which ids exist.
+- Stash creation is now `0700`/`0600` (`DirBuilder`/`OpenOptions` mode on Rust, Node's `mode` option on TS), applied at creation rather than `chmod`'d after, so a stash - which deliberately holds unredacted bytes - is never briefly world-readable. Existing stash dirs keep their mode; `chmod -R go-rwx ~/.tanuki/stash` covers one already on disk.
+- Verified: 252 TS / 126 Rust tests pass, `npm run parity` ALL PASS, and 10 attack combinations (5 id shapes x 2 engines) re-run at the CLI and MCP layers all refused with `-32602` and zero sentinel bytes returned. The new traversal tests point at a real file one level outside the stash dir, so they fail if a read merely misses instead of being refused.
+
 ## 0.19.5
 
 ### Fixed: the tool list failed to register on Moonshot/Kimi ([#1](https://github.com/Osyna/tanuki-context/issues/1), reported by @cousined1)
