@@ -187,9 +187,16 @@ export const TOOLS: readonly ToolMeta[] = [
 /// Advertising stash without fetch let the model park data it could never
 /// retrieve - it burned every turn on ToolSearch looking for a tool that was
 /// not there, which is the whole of the "agent loop thrash" in EVALS §6.
+///
+/// `tanuki_stats` is advertised for the same reason, one step removed: SKILL.md
+/// step 6 tells the model to call it at end of session, and "callable by name"
+/// only helps a raw JSON-RPC caller - an MCP client cannot invoke what
+/// tools/list omits. A documented step that cannot execute is EVALS §6 in
+/// miniature, so the tool the workflow names is the tool the surface carries.
 export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "tanuki_render",
   "tanuki_estimate",
+  "tanuki_stats",
   "tanuki_stash",
   "tanuki_fetch",
   "tanuki_verify",

@@ -628,7 +628,7 @@ export function toolVerify(args: unknown): unknown[] {
 /// parity-locked byte-for-byte with the Rust engine, so knob hints stay out
 /// of it (the pi/SDK projections carry them).
 /// `tools` defaults to the slim advertised surface. The schema tests pass the
-/// FULL registry instead: the default surface hides three tools, and a bad
+/// FULL registry instead: the default surface hides two tools, and a bad
 /// shape in a hidden one breaks a provider just as hard the moment
 /// TANUKI_ALL_TOOLS=1. Taking it as an argument beats having the test mutate a
 /// global that other tests in the same file read.
