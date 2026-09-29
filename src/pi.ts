@@ -11,10 +11,10 @@
 //! ToolResult content shape, so results pass through untouched.
 //!
 //! It is also an I/O router (context-mode's shape, tanuki's `run` rules): a
-//! `bash` result over RUN_INLINE_MAX chars is crushed + distilled in place and
-//! the untouched output stashed, fetchable with `tanuki_fetch`. That path runs
-//! in-process (no server child); the stash format is shared by both engines.
-//! `TANUKI_ROUTE=off` turns it off.
+//! `bash` result over RUN_INLINE_MAX chars from a build/test/install tool is
+//! crushed + distilled in place and the text omp handed over stashed,
+//! fetchable with `tanuki_fetch`. That path runs in-process (no server child);
+//! the stash format is shared by both engines. `TANUKI_ROUTE=off` turns it off.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -41,21 +41,27 @@ function serverCommand(): { cmd: string; args: string[] } {
   return { cmd: process.execPath, args: [fileURLToPath(new URL("./cli.js", import.meta.url))] };
 }
 
-/// The argv the `run` rules key on. A shell line rarely is one command:
-/// `cd x && cargo test` routes on its last `&&`/`;` step with `VAR=v`
-/// prefixes dropped, and a pipeline gets the generic pass only, because its
-/// output is the last stage's while its first word names the first stage.
-function argvOf(command: string): string[] {
+/// Commands whose big output is build/test/install noise. Distill is lossy, so
+/// anything else (cat, sed, git diff, jq, curl, rg, a pipeline) is content the
+/// model may edit from and passes through untouched.
+const ROUTED = new Set(["cargo", "npm", "pnpm", "yarn", "bun", "pytest", "py.test", "go", "tsc", "eslint", "make", "gradle", "gradlew", "mvn", "pip", "uv", "docker", "jest", "vitest"]);
+
+/// The argv the `run` rules key on, or null when the line is not routed. A
+/// shell line rarely is one command: `cd x && cargo test` routes on its last
+/// `&&`/`;` step with `VAR=v` prefixes dropped; a pipeline's output is its last
+/// stage's, so it is never routed.
+function argvOf(command: string): string[] | null {
   const step = command.split(/&&|;|\n/).map((s) => s.trim()).filter(Boolean).pop() ?? "";
-  if (step.includes("|")) return ["sh"];
-  return step.split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  if (step.includes("|")) return null;
+  const argv = step.split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+  return ROUTED.has(argv[0]?.split("/").pop() ?? "") ? argv : null;
 }
 
 interface ToolResultEvent {
   toolName: string;
   input?: { command?: unknown };
   content?: McpContent[];
-  details?: { exitCode?: number };
+  details?: { exitCode?: number; meta?: { truncation?: { artifactId?: string } } };
   isError?: boolean;
 }
 
@@ -160,12 +166,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", async (event: ToolResultEvent) => {
     if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off") return;
+    const argv = argvOf(String(event.input?.command ?? ""));
     const blocks = event.content ?? [];
-    if (blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
+    if (argv === null || blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
     const text = blocks.map((b) => b.text ?? "").join("\n");
     if (charCount(text) <= RUN_INLINE_MAX) return;
     const code = event.details?.exitCode ?? (event.isError ? 1 : 0);
-    const out = routeOutput(argvOf(String(event.input?.command ?? "")), text, code, null, (id) => `full output stashed: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
+    let out = routeOutput(argv, text, code, null, (id) => `stashed: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
+    // omp truncates before this hook, so the stash holds its view, not every line.
+    const artifact = event.details?.meta?.truncation?.artifactId;
+    if (artifact !== undefined) out += `\ncomplete output: artifact://${artifact}`;
     if (charCount(out) >= charCount(text)) return;
     return { content: [{ type: "text" as const, text: out }] };
   });

@@ -131,18 +131,23 @@ pi install npm:tanuki-context         # pi
 
 Restart the session. You get all eight `tanuki_*` tools as native tools (no MCP
 entry needed; drop an old `tanuki-context` MCP server or the model sees both),
-the skill below, and the **bash router**: like context-mode, every `bash`
-result over 8,000 characters is rewritten before the model reads it, through
-the same rules as `tanuki-context run` (crush, distill, errors kept verbatim),
-with the untouched output stashed and one `tanuki_fetch` line pointing at it.
-Smaller results and every other tool pass through untouched.
+the skill below, and the **bash router**: like context-mode, a `bash` result
+over 8,000 characters from a build, test, or install tool (cargo, npm, pnpm,
+yarn, bun, pytest, go, tsc, eslint, make, gradle, mvn, pip, uv, docker, jest,
+vitest) is rewritten before the model reads it, through the same rules as
+`tanuki-context run` (crush, distill, errors kept verbatim), with the text it
+received stashed and one `tanuki_fetch` line pointing at it. When omp already
+cut the output, the line after it names omp's `artifact://` holding every line.
+File and diff views (`cat`, `sed`, `git diff`, `jq`, ...), pipelines, smaller
+results and every other tool pass through untouched: distill is lossy, and the
+model must not edit from a view with lines missing.
 
 ```
 [tanuki run] exit 3 · 585 -> 15 lines · 97% of chars removed
 ...
 test suite::broken ... FAILED
   ×575 (template)  test suite::case_0 ... ok
-full output stashed: tanuki_fetch {"id":"2ab362e1c9fc","query":"<regex>"} or {"id":"2ab362e1c9fc","lines":"a-b"}
+stashed: tanuki_fetch {"id":"2ab362e1c9fc","query":"<regex>"} or {"id":"2ab362e1c9fc","lines":"a-b"}
 ```
 
 `TANUKI_ROUTE=off` turns the router off. `TANUKI_BIN=/path/to/tanuki-context`

@@ -10,6 +10,10 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.21.1
+
+- **The bash router only rewrites build, test, and install output.** 0.21.0 routed every `bash` result over 8,000 chars, so `cat`, `sed -n`, `git diff`, `jq` or `curl` views reached the model distilled, with lines missing it could edit from. The router now acts only when the command's last `&&`/`;` step starts with cargo, npm, pnpm, yarn, bun, pytest, go, tsc, eslint, make, gradle, mvn, pip, uv, docker, jest or vitest and is not a pipeline. When omp had already truncated the output, the result also names omp's `artifact://` holding every line, since the stash holds only the text omp handed over.
+
 ## 0.21.0
 
 - **An OMP plugin, and a router for shell output.** `omp plugin install tanuki-context` (or `pi install npm:tanuki-context`) registers the eight tools natively and ships the skill. The extension now also hooks `tool_result`: a `bash` result over 8,000 chars goes through the `run` rules (crush, distill, stash the original, one `tanuki_fetch` pointer) before the model reads it. Checked in a real omp session on 3,000 lines of test output: 97% of chars removed, the FAILED line and the exit code kept, exit 0 and exit 3 alike. In-process, so it works with `TANUKI_BIN` too; `TANUKI_ROUTE=off` disables it. The `run` CLI formats through the same function, output unchanged.

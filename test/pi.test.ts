@@ -122,19 +122,24 @@ describe("pi extension bash router", () => {
   });
 
   test("a big failing bash result is cut, keeps the failure, and the original is fetchable", async () => {
-    const r = await route({ toolName: "bash", input: { command: "cd x && cargo test" }, content: [{ type: "text", text: BIG }], details: { exitCode: 101 }, isError: true });
+    const r = await route({ toolName: "bash", input: { command: "cd x && cargo test" }, content: [{ type: "text", text: BIG }], details: { exitCode: 101, meta: { truncation: { artifactId: "7" } } }, isError: true });
     const out = r!.content[0]!.text;
     expect(out.startsWith("[tanuki run] exit 101")).toBe(true);
     expect(out.length).toBeLessThan(BIG.length / 2);
     expect(out).toContain("suite::broken ... FAILED");
+    expect(out.endsWith("\ncomplete output: artifact://7")).toBe(true);
     const id = /"id":"([0-9a-f]{12})"/.exec(out)![1]!;
     const back = await ext.tools.get("tanuki_fetch")!.execute("f1", { id, lines: "200-200" });
     expect(back.content.map((c) => c.text ?? "").join("")).toContain("case_198 ... ok");
   });
 
-  test("small results, other tools, and TANUKI_ROUTE=off pass through untouched", async () => {
-    expect(await route({ toolName: "bash", input: { command: "ls" }, content: [{ type: "text", text: "a\nb" }] })).toBeUndefined();
+  test("small results, other tools, readers, pipelines, and TANUKI_ROUTE=off pass through untouched", async () => {
+    expect(await route({ toolName: "bash", input: { command: "cargo test" }, content: [{ type: "text", text: "a\nb" }] })).toBeUndefined();
     expect(await route({ toolName: "read", input: {}, content: [{ type: "text", text: BIG }] })).toBeUndefined();
+    // distill is lossy: file and diff views the model may edit from stay whole
+    for (const command of ["cat big.log", "git diff", "cd x && sed -n 1,900p a.rs", "cargo test 2>&1 | grep ok", "jq . out.json"]) {
+      expect(await route({ toolName: "bash", input: { command }, content: [{ type: "text", text: BIG }] })).toBeUndefined();
+    }
     process.env.TANUKI_ROUTE = "off";
     try {
       expect(await route({ toolName: "bash", input: { command: "cargo test" }, content: [{ type: "text", text: BIG }] })).toBeUndefined();
