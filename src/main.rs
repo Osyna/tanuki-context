@@ -1356,6 +1356,7 @@ fn main() {
             print!("{}\n", lines.join("\n"));
             std::process::exit(code);
         }
+        Some("--version") | Some("-V") => println!("tanuki-context {VERSION}"),
         Some("serve") | None => serve(),
         Some(other) => {
             eprintln!("unknown command: {other}\nusage: tanuki-context [serve|proxy|distill|estimate|render|bench|stash|fetch|verify|run] ...");
