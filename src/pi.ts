@@ -9,10 +9,18 @@
 //!
 //! MCP tool-result content blocks ({type:"text"|"image"}) are pi's own
 //! ToolResult content shape, so results pass through untouched.
+//!
+//! It is also an I/O router (context-mode's shape, tanuki's `run` rules): a
+//! `bash` result over RUN_INLINE_MAX chars is crushed + distilled in place and
+//! the untouched output stashed, fetchable with `tanuki_fetch`. That path runs
+//! in-process (no server child); the stash format is shared by both engines.
+//! `TANUKI_ROUTE=off` turns it off.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
+import { RUN_INLINE_MAX, routeOutput } from "./crush.ts";
+import { charCount } from "./serde.ts";
 import { TOOLS, type Knob } from "./tools.ts";
 
 interface McpContent {
@@ -31,6 +39,24 @@ function serverCommand(): { cmd: string; args: string[] } {
   if (bin) return { cmd: bin, args: [] };
   // dist/pi.js sits next to dist/cli.js; process.execPath = the node running pi
   return { cmd: process.execPath, args: [fileURLToPath(new URL("./cli.js", import.meta.url))] };
+}
+
+/// The argv the `run` rules key on. A shell line rarely is one command:
+/// `cd x && cargo test` routes on its last `&&`/`;` step with `VAR=v`
+/// prefixes dropped, and a pipeline gets the generic pass only, because its
+/// output is the last stage's while its first word names the first stage.
+function argvOf(command: string): string[] {
+  const step = command.split(/&&|;|\n/).map((s) => s.trim()).filter(Boolean).pop() ?? "";
+  if (step.includes("|")) return ["sh"];
+  return step.split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+}
+
+interface ToolResultEvent {
+  toolName: string;
+  input?: { command?: unknown };
+  content?: McpContent[];
+  details?: { exitCode?: number };
+  isError?: boolean;
 }
 
 class TanukiClient {
@@ -130,6 +156,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     client?.kill();
     client = null;
+  });
+
+  pi.on("tool_result", async (event: ToolResultEvent) => {
+    if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off") return;
+    const blocks = event.content ?? [];
+    if (blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
+    const text = blocks.map((b) => b.text ?? "").join("\n");
+    if (charCount(text) <= RUN_INLINE_MAX) return;
+    const code = event.details?.exitCode ?? (event.isError ? 1 : 0);
+    const out = routeOutput(argvOf(String(event.input?.command ?? "")), text, code, null, (id) => `full output stashed: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
+    if (charCount(out) >= charCount(text)) return;
+    return { content: [{ type: "text" as const, text: out }] };
   });
 
   for (const t of TOOLS) {

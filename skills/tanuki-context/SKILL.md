@@ -6,8 +6,8 @@ description: |
   parking it outside context and fetching slices. Use when pasting or reading
   anything over ~2,000 tokens of logs, build output, or documents; when a
   session is close to its context limit; or before re-reading a large file.
-  Requires the tanuki-context MCP server (tanuki_* tools) and a
-  vision-capable model.
+  Requires the tanuki_* tools (the tanuki-context MCP server, or the omp/pi
+  plugin) and a vision-capable model.
 ---
 
 # tanuki-context: pay pixels, not tokens

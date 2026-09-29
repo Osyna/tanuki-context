@@ -117,6 +117,14 @@ export function rnd(x: number): number {
   return x < 0 ? -Math.round(-x) : Math.round(x);
 }
 
+/** Percent of `from` removed to get `to`, rounded like Rust. */
+export function pct(from: number, to: number): number {
+  if (from === 0) {
+    return 0;
+  }
+  return rnd((1.0 - to / from) * 100.0);
+}
+
 /**
  * The one text-price heuristic, stated once. Measured, not assumed.
  *

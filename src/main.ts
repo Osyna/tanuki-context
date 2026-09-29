@@ -14,21 +14,20 @@ import { apply as codebookApply } from "./codebook.ts";
 import { costVerdict } from "./cost.ts";
 import { fidelity, weakReader } from "./fidelity.ts";
 import { crushRows, crushRowsSelect, tableEncode } from "./table.ts";
-import { crushOutput } from "./crush.ts";
+import { routeOutput } from "./crush.ts";
 import { distillLog } from "./distill.ts";
 import { LEVELS, compressText } from "./ladder.ts";
 import { isSensitivePath } from "./gate.ts";
 import { lazyPointer, parseVerbatim, scanNeedles, scanCredentials, redactCredentials, type Sidecar, type Verbatim } from "./needles.ts";
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
-import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, rnd, textTokens } from "./serde.ts";
+import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, pct, rnd, textTokens } from "./serde.ts";
 import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.20.2";
+export const VERSION = "0.21.0";
 const MAX_INLINE_PAGES = 6;
-const RUN_INLINE_MAX = 8000; // chars (~2k tokens) the run wrapper prints inline
 
 // ------------------------------------------------------------------ stages
 
@@ -98,13 +97,6 @@ function stage01(
     table,
     crush,
   };
-}
-
-function pct(from: number, to: number): number {
-  if (from === 0) {
-    return 0;
-  }
-  return rnd((1.0 - to / from) * 100.0);
 }
 
 // ---------------------------------------------------------------- MCP tools
@@ -1182,28 +1174,8 @@ export function main(): void {
       const captured =
         (r.stdout ?? "") + ((r.stderr ?? "") !== "" ? `\n--- stderr ---\n${r.stderr}` : "");
       const code = r.status ?? 0;
-      const crushed = crushOutput(cmd, captured, code);
-      const d = distillLog(crushed.text, query, 2);
-      const capturedLines = captured.split("\n").length;
-      const savedPct = pct(charCount(captured), charCount(d.distilled));
-      let header = `[tanuki run] exit ${code} · ${capturedLines} -> ${d.stats.outLines} lines · ${savedPct}% of chars removed`;
-      if (crushed.rule !== null) {
-        header += ` · rule ${crushed.rule}`;
-      }
-      const lines = [header];
-      // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
-      // if real usage ever wants one.
-      if (charCount(d.distilled) <= RUN_INLINE_MAX || charCount(captured) <= RUN_INLINE_MAX) {
-        lines.push(d.distilled);
-        if (charCount(captured) > RUN_INLINE_MAX) {
-          const st = stashText(captured);
-          lines.push(`full output stashed: tanuki-context fetch ${st.id} [--query re] [--lines a-b]`);
-        }
-      } else {
-        const st = stashText(captured);
-        lines.push(st.overview);
-      }
-      process.stdout.write(lines.join("\n") + "\n");
+      const out = routeOutput(cmd, captured, code, query, (id) => `full output stashed: tanuki-context fetch ${id} [--query re] [--lines a-b]`);
+      process.stdout.write(out + "\n");
       process.exit(code);
     }
     case "--version":

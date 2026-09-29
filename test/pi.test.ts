@@ -4,7 +4,8 @@
 // rust-branch binary is present — the same file against the Rust engine via
 // TANUKI_BIN, asserting identical estimate numbers.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const LOG = Array.from({ length: 300 }, (_, i) => `2026-07-26 INFO copied /srv/data/batch/segment_${i % 7}.parquet ok`).join("\n");
 
@@ -14,12 +15,19 @@ type Registered = {
   execute: (id: string, params: Record<string, unknown>) => Promise<{ content: { type: string; text?: string; data?: string; mimeType?: string }[] }>;
 };
 
-async function loadExtension(env?: Record<string, string | undefined>) {
+type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
+interface Loaded {
+  tools: Map<string, Registered>;
+  handlers: Map<string, Handler>;
+  shutdown: () => unknown;
+}
+
+async function loadExtension(env?: Record<string, string | undefined>): Promise<Loaded> {
   const saved = process.env.TANUKI_BIN;
   if (env && "TANUKI_BIN" in env) process.env.TANUKI_BIN = env.TANUKI_BIN;
   else delete process.env.TANUKI_BIN;
   const tools = new Map<string, Registered>();
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
+  const handlers = new Map<string, Handler>();
   const mockPi = {
     registerTool(t: Registered) {
       tools.set(t.name, t);
@@ -36,7 +44,7 @@ async function loadExtension(env?: Record<string, string | undefined>) {
   if (saved === undefined) delete process.env.TANUKI_BIN;
   else process.env.TANUKI_BIN = saved;
   const shutdown = () => handlers.get("session_shutdown")?.({}, {});
-  return { tools, shutdown };
+  return { tools, handlers, shutdown };
 }
 
 describe("pi extension (TS engine)", () => {
@@ -90,6 +98,49 @@ describe("pi extension (TS engine)", () => {
   test("server child is reused across calls and dies on shutdown", async () => {
     const a = await tools.get("tanuki_compress")!.execute("t4", { text: "hello   world", level: 1 });
     expect(a.content.map((c) => c.text ?? "").join("\n")).toContain("hello");
+  });
+});
+
+// The I/O router: omp/pi hand every bash result to tool_result; a big one comes
+// back crushed with the original stashed, and small or non-bash ones untouched.
+describe("pi extension bash router", () => {
+  const prevStash = process.env.TANUKI_STASH;
+  let ext: Loaded;
+  const route = (event: Record<string, unknown>) =>
+    ext.handlers.get("tool_result")!(event, {}) as Promise<{ content: { type: string; text: string }[] } | undefined>;
+  const passing = Array.from({ length: 400 }, (_, i) => `test suite::case_${i} ... ok`);
+  const BIG = ["running 401 tests", ...passing, "test suite::broken ... FAILED", "error: test failed, to rerun pass `--lib`"].join("\n");
+
+  beforeAll(async () => {
+    process.env.TANUKI_STASH = mkdtempSync(`${tmpdir()}/tanuki-router-test-`);
+    ext = await loadExtension();
+  });
+  afterAll(() => {
+    ext.shutdown();
+    if (prevStash === undefined) delete process.env.TANUKI_STASH;
+    else process.env.TANUKI_STASH = prevStash;
+  });
+
+  test("a big failing bash result is cut, keeps the failure, and the original is fetchable", async () => {
+    const r = await route({ toolName: "bash", input: { command: "cd x && cargo test" }, content: [{ type: "text", text: BIG }], details: { exitCode: 101 }, isError: true });
+    const out = r!.content[0]!.text;
+    expect(out.startsWith("[tanuki run] exit 101")).toBe(true);
+    expect(out.length).toBeLessThan(BIG.length / 2);
+    expect(out).toContain("suite::broken ... FAILED");
+    const id = /"id":"([0-9a-f]{12})"/.exec(out)![1]!;
+    const back = await ext.tools.get("tanuki_fetch")!.execute("f1", { id, lines: "200-200" });
+    expect(back.content.map((c) => c.text ?? "").join("")).toContain("case_198 ... ok");
+  });
+
+  test("small results, other tools, and TANUKI_ROUTE=off pass through untouched", async () => {
+    expect(await route({ toolName: "bash", input: { command: "ls" }, content: [{ type: "text", text: "a\nb" }] })).toBeUndefined();
+    expect(await route({ toolName: "read", input: {}, content: [{ type: "text", text: BIG }] })).toBeUndefined();
+    process.env.TANUKI_ROUTE = "off";
+    try {
+      expect(await route({ toolName: "bash", input: { command: "cargo test" }, content: [{ type: "text", text: BIG }] })).toBeUndefined();
+    } finally {
+      delete process.env.TANUKI_ROUTE;
+    }
   });
 });
 

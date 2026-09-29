@@ -4,7 +4,43 @@
 // Rule pass: command-specific noise filters + success elision (exit==0)
 // Never-worse guard: if crushing doesn't shrink char count, return original
 
-import { charCount } from "./serde.ts";
+import { distillLog } from "./distill.ts";
+import { charCount, pct } from "./serde.ts";
+import { stashText } from "./stash.ts";
+
+/** Chars (~2k tokens) of command output handed back inline. */
+// ponytail: fixed budget; make it a knob if real usage ever wants one.
+export const RUN_INLINE_MAX = 8000;
+
+/** The `run` wrapper's answer for one command's output: crush, distill, and
+ *  stash the untouched capture when it is too big to hand back whole. Shared
+ *  by the CLI and the pi/omp router; `pointer` names how the caller fetches a
+ *  stash back (CLI command vs tool call). */
+export function routeOutput(
+  cmd: string[],
+  captured: string,
+  code: number,
+  query: string | null,
+  pointer: (id: string) => string,
+): string {
+  const crushed = crushOutput(cmd, captured, code);
+  const d = distillLog(crushed.text, query, 2);
+  const capturedLines = captured.split("\n").length;
+  let header = `[tanuki run] exit ${code} · ${capturedLines} -> ${d.stats.outLines} lines · ${pct(charCount(captured), charCount(d.distilled))}% of chars removed`;
+  if (crushed.rule !== null) {
+    header += ` · rule ${crushed.rule}`;
+  }
+  const lines = [header];
+  if (charCount(d.distilled) <= RUN_INLINE_MAX || charCount(captured) <= RUN_INLINE_MAX) {
+    lines.push(d.distilled);
+    if (charCount(captured) > RUN_INLINE_MAX) {
+      lines.push(pointer(stashText(captured).id));
+    }
+  } else {
+    lines.push(stashText(captured).overview);
+  }
+  return lines.join("\n");
+}
 
 export interface Crushed {
   text: string;
