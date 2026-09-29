@@ -7,10 +7,14 @@
 //!      same user-role message (Anthropic allows image blocks in user content
 //!      and inside tool_result content).
 //!   3. The latest message is never imaged (the model may need to quote it).
-//!   4. Blocks carrying cache_control are never touched (rewriting would
+//!   4. Blocks carrying cache_control are never imaged (rewriting would
 //!      defeat the cache they exist for).
 //!   5. Imaging only happens when `estimate` says it wins by a clear margin;
 //!      everything else passes through byte-for-byte.
+//!   7. Lossless first: a pretty-printed JSON tool result loses the
+//!      whitespace between its tokens (strings byte-exact) in EVERY message,
+//!      recent or not, breakpoint or not - deterministic and idempotent, so
+//!      the API cache never sees the block change (mirror of proxy.ts).
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -28,6 +32,73 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 
+/// Below this a pretty-printed JSON block is not worth a rewrite.
+const JSON_MIN_CHARS: usize = 200;
+
+/// Whitespace-only JSON minify (mirror of serde.ts minifyJson): the trimmed
+/// text must parse as one JSON object or array; ASCII whitespace between
+/// tokens goes, every byte inside a string stays. None when it is not JSON,
+/// shorter than JSON_MIN_CHARS, or saves under 10 % of the chars.
+pub(crate) fn minify_json(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) || text.chars().count() < JSON_MIN_CHARS {
+        return None;
+    }
+    serde_json::from_str::<Value>(t).ok()?;
+    let b = t.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let (mut in_str, mut esc) = (false, false);
+    for &c in b {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            continue;
+        }
+        out.push(c);
+    }
+    let out = String::from_utf8(out).ok()?;
+    if out.chars().count() * 10 > text.chars().count() * 9 {
+        return None;
+    }
+    Some(out)
+}
+
+/// A number a JSON round-trip would re-spell: a run of 16+ digits outside
+/// strings (mirror of proxy.ts hasWideNumber). serde_json keeps a u64 exact,
+/// but the TS engine cannot, and both must make the same decision.
+fn has_wide_number(raw: &str) -> bool {
+    let (mut in_str, mut esc, mut run) = (false, false, 0usize);
+    for &c in raw.as_bytes() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+            run = 0;
+        } else if c.is_ascii_digit() {
+            run += 1;
+            if run >= 16 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
 
 /// F4: classify cache break kind. Exported for unit tests. Pure append -> None (cache intact).
 pub(crate) fn attribute_break(
@@ -243,6 +314,8 @@ pub struct TransformResult {
     pub changed: bool,
     #[allow(dead_code)] // part of the TS TransformResult shape; asserted in tests
     pub imaged_blocks: usize,
+    /// tool_result texts whose JSON whitespace was dropped (rule 7).
+    pub minified_blocks: usize,
     pub orig_chars: u64,
     pub image_count: u64,
     pub saved_tokens: i64,
@@ -357,6 +430,62 @@ pub fn transform_request_body(
     let mut saved_tokens_cache_aware = 0i64;
     // provider ratios for the cache-aware ledger, from the request's own model
     let rate = crate::cost::resolve_rate(body.get("model").and_then(|m| m.as_str())).1;
+    // rule 7: lossless JSON minify of tool results, everywhere, before imaging
+    // (mirror of proxy.ts, same ledger: never sent pretty, so no flip).
+    // A body we cannot re-serialise without re-spelling a number is forwarded
+    // byte-for-byte: no rewrite at all, diagnostics only.
+    let frozen = has_wide_number(raw);
+    let mut minified_blocks = 0usize;
+    {
+        let mut minify = |text: &str| -> Option<String> {
+            let m = minify_json(text)?;
+            minified_blocks += 1;
+            let saved = crate::text_tokens(text) as i64 - crate::text_tokens(&m) as i64;
+            saved_tokens += saved;
+            let hash = crate::sha256::hex(&crate::sha256::digest(format!("json\u{0}{text}").as_bytes()));
+            let (replayed, caching_seen) = match session.as_deref_mut() {
+                Some(s) => (s.seen_blocks.contains(&hash), s.caching_seen),
+                None => (false, false),
+            };
+            saved_tokens_cache_aware += if !caching_seen {
+                saved
+            } else {
+                crate::cost::rnd(saved as f64 * if replayed { rate.cache_read_mult } else { rate.cache_write_mult })
+            };
+            if let Some(s) = session.as_deref_mut() {
+                if !replayed {
+                    if s.seen_blocks.len() >= 1024 {
+                        s.seen_blocks.clear();
+                    }
+                    s.seen_blocks.insert(hash);
+                }
+            }
+            Some(m)
+        };
+        for m in body["messages"].as_array_mut()?.iter_mut().take(if frozen { 0 } else { usize::MAX }) {
+            let Some(content) = m.get_mut("content").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for block in content.iter_mut() {
+                if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                    continue;
+                }
+                if let Some(text) = block["content"].as_str() {
+                    if let Some(t) = minify(text) {
+                        block["content"] = Value::String(t);
+                    }
+                } else if let Some(items) = block["content"].as_array_mut() {
+                    for item in items.iter_mut() {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(t) = item["text"].as_str().and_then(&mut minify) {
+                                item["text"] = Value::String(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Exact-repeat dedupe: block text -> page count, recorded only when a
     // block is actually imaged in THIS request. A later byte-identical block
     // that reaches the funnel becomes one short marker, no repeated pages.
@@ -425,7 +554,7 @@ pub fn transform_request_body(
     // recent turns reasoned over precisely, distant bulk imaged). Default 1.
     let keep = cfg.recency_window.max(1);
     let messages = body["messages"].as_array_mut()?;
-    for (i, m) in messages.iter_mut().enumerate().take(msg_count.saturating_sub(keep)) {
+    for (i, m) in messages.iter_mut().enumerate().take(if frozen { 0 } else { msg_count.saturating_sub(keep) }) {
         cur_msg.set(i);
         // Anthropic accepts image blocks only in user-role content.
         if m["role"].as_str() != Some("user") {
@@ -596,13 +725,14 @@ pub fn transform_request_body(
             || M_TS.is_match(&system_text)
             || M_JWT.is_match(&system_text));
 
-    if imaged_blocks == 0 {
+    if imaged_blocks == 0 && minified_blocks == 0 {
         // Nothing imaged: the caller forwards the ORIGINAL bytes; this result
         // exists only to carry the diagnostics into the event log.
         return Some(TransformResult {
             body: raw.to_string(),
             changed: false,
             imaged_blocks,
+            minified_blocks,
             orig_chars,
             image_count,
             saved_tokens,
@@ -643,6 +773,7 @@ pub fn transform_request_body(
         body: body.to_string(),
         changed: true,
         imaged_blocks,
+        minified_blocks,
         orig_chars,
         image_count,
         saved_tokens,
@@ -850,6 +981,7 @@ fn handle(
             "ts": now_ms(),
             "tool": "proxy",
             "compressed": tstats.as_ref().is_some_and(|s| s.changed),
+            "minified_blocks": tstats.as_ref().map_or(0, |s| s.minified_blocks),
             "orig_chars": tstats.as_ref().map_or(0, |s| s.orig_chars),
             "image_count": tstats.as_ref().map_or(0, |s| s.image_count),
             // baseline names its denominator: what Anthropic billed plus
@@ -935,7 +1067,7 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
         cfg.min_save,
     );
     eprint!(
-        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once{}\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
+        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control skipped \u{b7} identical blocks imaged once{} \u{b7} pretty JSON tool results minified (lossless)\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
         cfg.upstream,
         cfg.recency_window.max(1),
         if cfg.cache { " \u{b7} imaged prefix marked cacheable" } else { "" },
@@ -970,6 +1102,23 @@ pub fn run(cfg: ProxyCfg) {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn minify_json_is_whitespace_only_and_guarded() {
+        let pretty = serde_json::to_string_pretty(&json!({
+            "items": (0..20).map(|i| json!({ "name": format!("row {i}"), "note": "keep  these\tspaces \"q\" \\n" })).collect::<Vec<_>>()
+        }))
+        .unwrap()
+        .replace("\"row 3\"", "12345678901234567890");
+        let min = minify_json(&pretty).unwrap();
+        assert!(min.contains("\"keep  these\\tspaces \\\"q\\\" \\\\n\""), "{min}");
+        assert!(min.contains("12345678901234567890") && !min.contains('\n') && !min.contains(": "));
+        assert_eq!(minify_json(&min), None, "already compact saves nothing");
+        assert_eq!(minify_json(&format!("{pretty}\nprose")), None, "not JSON");
+        assert_eq!(minify_json("{\n  \"a\": 1\n}"), None, "too small");
+        assert!(has_wide_number(r#"{"input":{"id":12345678901234567890}}"#));
+        assert!(!has_wide_number(r#"{"input":{"id":"12345678901234567890","n":123456789012345}}"#));
+    }
     fn big() -> String {
         (0..300)
             .map(|i| {

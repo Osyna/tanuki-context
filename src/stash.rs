@@ -98,6 +98,37 @@ fn overview(id: &str, text: &str) -> String {
     out.join("\n")
 }
 
+const FIND_K1: f64 = 1.2;
+const FIND_B: f64 = 0.75;
+const FIND_MAX_WORDS: usize = 16;
+
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Term frequency of `word` in a lowercased line: whole-word hits count one
+/// each; a line holding it only inside a longer word counts 1/3 (mirror of
+/// stash.ts termFreq - non-overlapping, left to right).
+fn term_freq(lower: &str, word: &str) -> f64 {
+    let b = lower.as_bytes();
+    let mut full = 0usize;
+    let mut any = false;
+    for (at, _) in lower.match_indices(word) {
+        any = true;
+        let end = at + word.len();
+        if (at == 0 || !is_word_byte(b[at - 1])) && (end >= b.len() || !is_word_byte(b[end])) {
+            full += 1;
+        }
+    }
+    if full > 0 {
+        full as f64
+    } else if any {
+        1.0 / 3.0
+    } else {
+        0.0
+    }
+}
+
 /// Pull a slice of a stashed text: `query` (regex -> distilled slice), `lines`
 /// "a-b" (1-based inclusive segments, clamped), or `find` (relevance search) —
 /// exactly one of them.
@@ -113,7 +144,7 @@ pub fn fetch_slice(
         return Err("give exactly one of query, lines or find".to_string());
     }
     let text = read_stash(id)?;
-    // F3: find mode
+    // F3: find mode — BM25 over lines (see FIND_K1 in stash.ts for the measurement)
     if let Some(f) = find {
         let raw_words: Vec<&str> = f.split_whitespace().collect();
         if raw_words.is_empty() {
@@ -123,44 +154,46 @@ pub fn fetch_slice(
         let mut words = Vec::new();
         for w in raw_words {
             let lower = w.to_lowercase();
-            if !seen.contains(&lower) {
-                seen.insert(lower.clone());
+            if seen.insert(lower.clone()) {
                 words.push(lower);
-                if words.len() >= 8 {
+                if words.len() >= FIND_MAX_WORDS {
                     break;
                 }
             }
         }
         let segments: Vec<&str> = text.split('\n').collect();
         let n = segments.len();
-        
-        // Score each line
+        let lowers: Vec<String> = segments.iter().map(|s| s.to_lowercase()).collect();
+        let tf: Vec<Vec<f64>> = words.iter().map(|w| lowers.iter().map(|l| term_freq(l, w)).collect()).collect();
+        let dl: Vec<usize> = segments.iter().map(|s| s.split_whitespace().count()).collect();
+        let total: f64 = dl.iter().map(|&d| d as f64).sum();
+        let avg = total / n as f64;
+        let idf: Vec<f64> = tf
+            .iter()
+            .map(|col| {
+                let df = col.iter().filter(|&&f| f > 0.0).count() as f64;
+                (1.0 + (n as f64 - df + 0.5) / (df + 0.5)).ln()
+            })
+            .collect();
+
         struct Anchor {
             line: usize,
-            score: usize,
+            score: i64,
         }
         let mut anchors = Vec::new();
-        for (i, raw) in segments.iter().enumerate() {
-            let lower = raw.to_lowercase();
-            let mut score = 0;
-            for word in &words {
-                // ASCII word boundary check
-                let mut found = false;
-                if let Some(pos) = raw.to_lowercase().find(word) {
-                    let before_ok = pos == 0 || !raw.as_bytes()[pos - 1].is_ascii_alphanumeric() && raw.as_bytes()[pos - 1] != b'_';
-                    let after_pos = pos + word.len();
-                    let after_ok = after_pos >= raw.len() || !raw.as_bytes()[after_pos].is_ascii_alphanumeric() && raw.as_bytes()[after_pos] != b'_';
-                    if before_ok && after_ok {
-                        score += 3;
-                        found = true;
-                    }
-                }
-                if !found && lower.contains(word) {
-                    score += 1;
+        for i in 0..n {
+            let mut score = 0.0f64;
+            let mut hit = false;
+            for j in 0..words.len() {
+                let f = tf[j][i];
+                if f > 0.0 {
+                    hit = true;
+                    score += (idf[j] * (f * (FIND_K1 + 1.0))) / (f + FIND_K1 * (1.0 - FIND_B + (FIND_B * dl[i] as f64) / avg));
                 }
             }
-            if score > 0 {
-                anchors.push(Anchor { line: i + 1, score });
+            if hit {
+                // integer micro-points: ordering and the window max are exact across engines
+                anchors.push(Anchor { line: i + 1, score: crate::cost::rnd(score * 1e6) });
             }
         }
         
@@ -184,7 +217,7 @@ pub fn fetch_slice(
         struct Window {
             start: usize,
             end: usize,
-            score: usize,
+            score: i64,
         }
         let mut windows = Vec::new();
         for anc in &top_anchors {
@@ -209,7 +242,7 @@ pub fn fetch_slice(
         // Output
         let mut parts = Vec::new();
         for win in &merged {
-            parts.push(format!("·find· L{}-{} score {}", win.start, win.end, win.score));
+            parts.push(format!("·find· L{}-{} score {:.1}", win.start, win.end, crate::cost::rnd(win.score as f64 / 1e5) as f64 / 10.0));
             parts.push(segments[win.start - 1..win.end].join("\n"));
         }
         parts.push(format!("·find· {} words · {} lines matched · {} windows", words.len(), h, merged.len()));
@@ -585,6 +618,24 @@ mod count_tests {
             let got = fetch_slice(&id, None, None, Some("ERROR request failed"), 32).unwrap();
             assert!(got.starts_with("\u{b7}find\u{b7} "));
             assert!(got.contains(" windows"));
+        })
+    }
+    #[test]
+    fn find_rare_word_outweighs_common_ones() {
+        // Mirror of the TS IDF guard: 60 lines share `error request failed`,
+        // one is the digest mismatch; a flat per-word count ranks it last.
+        with_test_dir("find_idf", || {
+            let mut lines: Vec<String> = (0..60).map(|i| format!("t{i} worker ERROR request failed status=502")).collect();
+            lines.insert(40, "t40b relay ERROR digest mismatch expected sha256:4806bc9b".to_string());
+            let (id, _o) = stash_text(&lines.join("\n")).unwrap();
+            let got = fetch_slice(&id, None, None, Some("which request failed with the error digest"), 1).unwrap();
+            assert!(got.starts_with("\u{b7}find\u{b7} L39-43 score "), "{got}");
+            assert!(got.contains("digest mismatch"));
+            // an embedded hit (`error_code`) never takes the top slot from a whole word
+            let pad: Vec<String> = (0..9).map(|i| format!("quiet {i}")).collect();
+            let text = [vec!["error_code=500".to_string()], pad.clone(), vec!["an error occurred".to_string()], pad].concat().join("\n");
+            let (id, _o) = stash_text(&text).unwrap();
+            assert!(fetch_slice(&id, None, None, Some("error"), 1).unwrap().starts_with("\u{b7}find\u{b7} L9-13 score "));
         })
     }
 
