@@ -31,7 +31,10 @@ async function loadExtension(env?: Record<string, string | undefined>) {
   // Cache-bust so each load re-reads TANUKI_BIN.
   const mod = await import(new URL(`../dist/pi.js?${Math.random()}`, import.meta.url).href);
   mod.default(mockPi);
-  process.env.TANUKI_BIN = saved;
+  // Assigning undefined stores the string "undefined" (bun >= 1.4, node), which
+  // the lazily spawned server would then try to exec.
+  if (saved === undefined) delete process.env.TANUKI_BIN;
+  else process.env.TANUKI_BIN = saved;
   const shutdown = () => handlers.get("session_shutdown")?.({}, {});
   return { tools, shutdown };
 }
