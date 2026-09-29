@@ -795,6 +795,20 @@ page -> the answer scored ABSENT). The rule is now pinned in both engines and
 their test suites: **find output is never imaged.** A relevance result read
 back off pixels is the exact miss this section exists to count.
 
+**0.22: BM25 ranking.** The 3/3 above holds unchanged (the table is
+byte-identical before and after). What the flat 3-points-per-word count got
+wrong is a *plain-language* ask: every word scored the same, so `which request
+failed with the digest mismatch` ranked the one digest line below every line
+carrying `request failed`. Measured on a real 6,000-line system journal with
+200 seeded asks built from a target line's rare words plus corpus-common ones:
+right line first **11/200 flat, 25/200 BM25**;
+one common + one rare word **0 -> 10**; pure rare-word asks tied (11 vs 11). The
+journal is machine data and is not committed; the seeded noisy corpus in
+`reference/gate.mjs` reproduces the effect (**0/60 flat, 60/60 BM25**) and
+gates it in CI. Scores are integer micro-points, so a last-bit difference in
+the two engines' `ln()` cannot reorder lines; the parity harness pins four
+asks (IDF, repeated words, Unicode case and whitespace, a 27-word ask).
+
 That resolves the §6 ambiguity precisely: **a failure on
 `dominant-error-unit` is retrieval; a failure on the id or version tasks is
 reasoning.** Two different bugs that had been averaging into one number.

@@ -15,6 +15,13 @@ jobs:
       - run: bun install
       - run: bun run build
       - run: bun test
+      # No-regression gate: every number the package is sold on (run-rule
+      # savings, distill size + planted answers, id catch rate, find ranking,
+      # JSON minify, proxy saving, imaging cost, speed as a ratio to a fixed
+      # workload) against reference/gate-baseline.json. A number may only move
+      # in its good direction; `bun reference/gate.mjs --update` records a new
+      # baseline and refuses while anything regressed.
+      - run: bun reference/gate.mjs
       # Generalisation gate: ids in shapes the scanner was never designed for.
       # Self-contained (synthesises its own), deterministic, no corpus needed.
       # A rule-per-format scanner scores near zero here - see EVALS §7.

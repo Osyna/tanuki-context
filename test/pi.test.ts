@@ -147,6 +147,39 @@ describe("pi extension bash router", () => {
       delete process.env.TANUKI_ROUTE;
     }
   });
+
+  // Lossless JSON: a data tool's pretty-printed reply loses its indentation
+  // and the spaces between tokens; strings (spaces, "\n" escapes, big
+  // integers) come through byte-exact, and file views never change shape.
+  const PRETTY = JSON.stringify({ id: "12345678901234567890", items: Array.from({ length: 30 }, (_, i) => ({ name: `item ${i}`, note: "two  spaces\tand a \\n escape", big: "BIGINT" })) }, null, 2)
+    .replaceAll('"BIGINT"', "9007199254740993"); // past 2^53: a parse-and-print would round it
+  test("pretty JSON from a data tool is minified losslessly; the omp footer stays", async () => {
+    const mcp = await route({ toolName: "mcp__github__get_issue", input: {}, content: [{ type: "text", text: PRETTY }] });
+    const got = mcp!.content[0]!.text;
+    expect(got.length).toBeLessThan(PRETTY.length * 0.8);
+    expect(JSON.parse(got)).toEqual(JSON.parse(PRETTY));
+    expect(got).toContain('"two  spaces\\tand a \\\\n escape"');
+    expect(got).toContain("9007199254740993"); // not re-printed through a float
+    // omp cuts a result line at 768 bytes (tools.outputMaxColumns): the
+    // document keeps its line breaks, so no line may outgrow the original's
+    expect(got.length).toBeGreaterThan(2048);
+    expect(Math.max(...got.split("\n").map((l) => l.length))).toBeLessThanOrEqual(Math.max(...PRETTY.split("\n").map((l) => l.length)));
+    const footer = "\n\nWall time: 0.41 seconds";
+    const gh = await route({ toolName: "bash", input: { command: "gh api repos/o/r" }, content: [{ type: "text", text: PRETTY + footer }] });
+    expect(gh!.content[0]!.text).toBe(got + footer);
+    // big docker JSON: lossless minify wins over the lossy run rules
+    const big = JSON.stringify(Array.from({ length: 400 }, (_, i) => ({ Id: `c${i}`, State: { Status: "running" } })), null, 2);
+    const dk = await route({ toolName: "bash", input: { command: "docker inspect $(docker ps -q)" }, content: [{ type: "text", text: big }] });
+    expect(JSON.parse(dk!.content[0]!.text)).toEqual(JSON.parse(big));
+  });
+
+  test("JSON in file views, reader commands and non-JSON text is left alone", async () => {
+    for (const [toolName, command] of [["read", ""], ["edit", ""], ["bash", "cat package.json"], ["bash", "jq . package.json"], ["bash", "gh api x | jq ."]]) {
+      expect(await route({ toolName, input: { command }, content: [{ type: "text", text: PRETTY }] })).toBeUndefined();
+    }
+    expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: `${PRETTY}\ntrailing prose` }] })).toBeUndefined();
+    expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: '{"already":"compact"}' }] })).toBeUndefined();
+  });
 });
 
 const RUST_BIN = process.env.TANUKI_BIN_TEST ?? "/tmp/tanuki-rust/target/release/tanuki-context";

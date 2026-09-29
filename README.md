@@ -142,6 +142,15 @@ File and diff views (`cat`, `sed`, `git diff`, `jq`, ...), pipelines, smaller
 results and every other tool pass through untouched: distill is lossy, and the
 model must not edit from a view with lines missing.
 
+One lossless rewrite applies more widely: a result that is one pretty-printed
+JSON document, from an MCP server or a data command (`gh`, `curl`, `kubectl`,
+`docker`, `npm`, `aws`, ...), loses its indentation and the spaces between
+tokens, line breaks kept (omp cuts a result line at 768 bytes, so no line may
+grow). Strings stay byte-exact and numbers are never re-printed, so nothing the
+model reads changes meaning: `npm view <pkg> --json` in a live omp session went
+6,885 -> 5,574 chars and parsed back equal. `read`/`write`/`edit` results and
+file-reading commands keep their layout.
+
 ```
 [tanuki run] exit 3 · 585 -> 15 lines · 97% of chars removed
 ...
@@ -230,7 +239,7 @@ tanuki-context proxy on http://127.0.0.1:8484 -> https://api.anthropic.com
   level=0 distill=false codebook=false font=normal recency=1 minChars=4000 ratio=0.75 minSave=300
   rules: system prompt & tools untouched · in-place blocks only · last 1 message(s) kept as text
          · secrets never imaged · cache_control skipped · identical blocks imaged once
-         · imaged prefix marked cacheable
+         · imaged prefix marked cacheable · pretty JSON tool results minified (lossless)
   point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
 ```
 
@@ -245,6 +254,13 @@ to leave running. Your system prompt and your tool definitions are never touched
 The most recent message always stays as text. Anything holding a secret is left
 alone. If a transform throws for any reason, your original bytes are forwarded
 unchanged rather than the request failing.
+
+One rewrite is lossless and applies everywhere, the latest message included: a
+`tool_result` that is pretty-printed JSON loses the whitespace between its
+tokens (strings byte-exact). It is the same output for the same input on every
+request, so the block never changes under the API's prompt cache. A request
+holding a number the JSON round-trip would re-spell (16+ digits outside a
+string) is forwarded byte-for-byte, untouched.
 
 Knobs worth knowing: `--distill` drops repeated log noise before drawing,
 `--min-chars 4000` sets how big a block has to be before it is worth touching,
@@ -272,7 +288,7 @@ installed it globally.
 | `estimate <file>` | Prices the file. Renders nothing. Add `--model`, `--cached`, `--distill`, `--codebook`, `--font tiny`. |
 | `run -- <command>` | Runs your command, prints a shrunk version of the output, stashes the full thing. |
 | `stash <file>` | Parks the file and returns a map of it plus an id. |
-| `fetch <id>` | Pulls slices back out with `--query <regex>`, `--lines 40-90`, or `--find "free words"` (top-scored windows, never imaged). |
+| `fetch <id>` | Pulls slices back out with `--query <regex>`, `--lines 40-90`, or `--find "free words"` (BM25-ranked windows: plain language works, rare words outweigh common ones; never imaged). |
 | `verify <id> <value>` | Checks a value against the stored original. No model involved. |
 | `render <file> [level] [outdir]` | Writes the actual PNG pages to a directory. |
 | `distill <file>` | Prints the text with repeated lines collapsed, errors untouched. |
@@ -473,7 +489,8 @@ section.
 | `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
 | `stash` | content beyond the window | n/a, a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation, a capability. | [§7](reference/EVALS.md) |
 | `fetch` + match-count | slice retrieval | n/a | **retrieval precision 73.3%** across 5 strategies | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
-| `fetch --find` (0.20) | bare-word answers | n/a | **3/3**, the only strategy carrying a bare English word as text; never imaged | The pixels-only `unit` miss from 0.16 finally has a text route. | [§10](reference/EVALS.md) |
+| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count; the gate's noisy corpus **60/60 vs 0/60** | Rare words now outweigh the ones on every line. Never imaged. | [§10](reference/EVALS.md) |
+| JSON minify (0.22) | pretty-printed JSON tool results (proxy, omp/pi hook) | **-40%** estimated tokens (proxy, one line) / **-35%** (hook, line breaks kept) on a GitHub-API-shaped document | lossless: whitespace between tokens only, strings and number spellings byte-exact; cache-stable (same bytes from the first request) | Default on. File views never touched. | this README |
 | `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop. Covers the sidecar's residual. | [§7](reference/EVALS.md) |
 | Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
 | Redaction on `fetch` | secrets in returned slices | n/a | **2 false positives in 166,985 lines**, both real secrets | Essential. `fetch` returned secrets as text until 0.18. | [§8](reference/EVALS.md) |
@@ -615,10 +632,25 @@ reimplemented from scratch, measured, and credits:
   credential gate ([EVALS §13](reference/EVALS.md)).
 - **[context-mode](https://github.com/mksglu/context-mode)** (Mert Koseoğlu,
   Elastic-2.0): park-and-search with a BM25/FTS5 knowledge base. tanuki's
-  stash already followed the park shape; 0.20 adds `find` - free-word
-  relevance search reimplemented independently with integer scoring (no
-  floats, no SQLite, no code shared), the only retrieval strategy that
-  carries a bare-word answer as text ([EVALS §10](reference/EVALS.md)).
+  stash already followed the park shape; 0.20 adds `find`, and 0.22 ranks it
+  with BM25 over lines, reimplemented independently (no SQLite, no code
+  shared; scores are integer micro-points so both engines order lines
+  identically) ([EVALS §10](reference/EVALS.md)).
+- **[Laya](https://github.com/NandhaKishorM/laya)** and
+  **[CLM](https://github.com/Contrastive-LM/CLM)** (both Apache-2.0): their
+  eval gates (a baseline with a tolerance, failing the build on a worse number)
+  are the shape of `reference/gate.mjs`; CLM's typed-state rendering was
+  measured for token savings and rejected (0-14 % *more* tokens than minified
+  JSON), which is why the JSON rewrite here only drops whitespace.
+
+**No release makes a number worse.** `bun reference/gate.mjs` (in CI after the
+tests) measures every figure the package is sold on, model-free on committed or
+seeded inputs - run-rule savings per real command output, distill size with its
+planted answers, id catch rate, `find` ranking, JSON minify, proxy saving,
+imaging cost, and speed as a ratio to a fixed workload in the same process -
+and fails if any moved against its direction versus
+`reference/gate-baseline.json`. `--update` records a new baseline and refuses
+while anything regressed.
 
 **Rust instead of Node.** Same engine, one static binary, held byte-exact and
 pixel-exact with the npm package by a parity harness:

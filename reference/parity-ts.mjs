@@ -176,6 +176,13 @@ const secretText = `${Array.from({ length: 40 }, (_, i) =>
     : `2026-07-27 worker-${i % 5} INFO handled request in ${i * 7}ms`,
 ).join("\n")}\n`;
 const secretId = createHash("sha256").update(secretText, "utf8").digest("hex").slice(0, 12);
+// BM25 find parity: 700 lines, repeated words on one line, embedded hits
+// (error_code), Unicode case (ÉRROR, İ) and whitespace (NBSP, ideographic).
+const findText = Array.from({ length: 700 }, (_, i) => {
+  const w = i % 97 === 0 ? "ÉRROR İstanbul\u3000shard_7 digest mismatch" : i % 13 === 0 ? `ERROR request failed error_code=${i % 7} retry retry` : i % 5 === 0 ? `WARN retry backoff=${i % 9}s\u00a0shard_${i % 11}` : `INFO poll ok latency=${(i * 7) % 40}ms`;
+  return `2026-07-27T09:${String(i % 60).padStart(2, "0")} worker-${i % 6} ${w}`;
+}).join("\n") + "\n";
+const findId = createHash("sha256").update(findText, "utf8").digest("hex").slice(0, 12);
 // crush parity (0.20): 60 deterministic NDJSON rows, two IMPORTANT rows beyond
 // the head window. The ·crushed· marker carries a stash id (content hash), so
 // this also pins the canonical row serializer both selections hash through.
@@ -331,6 +338,15 @@ const requests = [
   { jsonrpc: "2.0", id: 43, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText } } },
   { jsonrpc: "2.0", id: 44, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: Array.from({ length: 60 }, (_, i) => JSON.stringify({ id: i, blob: Array.from({ length: 15 }, (_, j) => `token-${(i * 31 + j * 7) % 997}-${"x".repeat(40)}`).join(" "), status: i % 9 === 0 ? "error refused" : "ok" })).join("\n") } } },
   { jsonrpc: "2.0", id: 45, method: "tools/call", params: { name: "tanuki_estimate", arguments: { text: crushRowsText.split("\n").slice(0, 29).join("\n") } } },
+  // 0.22 BM25 find: float scoring printed to one decimal, so the IDF, length
+  // normalisation, embedded-hit 1/3 weight, repeated-word tf, Unicode
+  // lowercasing and Unicode whitespace in both the ask and the lines must all
+  // agree to the micro-point. 46 stashes, 47-50 ask it four ways.
+  { jsonrpc: "2.0", id: 46, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: findText } } },
+  { jsonrpc: "2.0", id: 47, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "which request failed with the digest mismatch error", top: 5 } } },
+  { jsonrpc: "2.0", id: 48, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "ÉRROR İstanbul\u00a0shard_7 error", top: 32 } } },
+  { jsonrpc: "2.0", id: 49, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "retry retry retry backoff the a of to in on", top: 8 } } },
+  { jsonrpc: "2.0", id: 50, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "a b c d e f g h i j k l m n o p q r s t u v w x y z latency" } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([

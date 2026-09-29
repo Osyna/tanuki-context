@@ -1,0 +1,179 @@
+{
+ "crush.cargo-test-pass.log.out_chars": {
+  "value": 845,
+  "better": "lower"
+ },
+ "crush.cargo-test-pass.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.cargo-build-fail.log.out_chars": {
+  "value": 375,
+  "better": "lower"
+ },
+ "crush.cargo-build-fail.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.pytest-pass.log.out_chars": {
+  "value": 234,
+  "better": "lower"
+ },
+ "crush.pytest-pass.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.pytest-fail.log.out_chars": {
+  "value": 1272,
+  "better": "lower"
+ },
+ "crush.pytest-fail.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.go-test-pass.log.out_chars": {
+  "value": 131,
+  "better": "lower"
+ },
+ "crush.go-test-pass.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.go-test-fail.log.out_chars": {
+  "value": 192,
+  "better": "lower"
+ },
+ "crush.go-test-fail.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.npm-install.log.out_chars": {
+  "value": 96,
+  "better": "lower"
+ },
+ "crush.npm-install.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.git-status.log.out_chars": {
+  "value": 215,
+  "better": "lower"
+ },
+ "crush.git-status.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.git-diff.log.out_chars": {
+  "value": 838,
+  "better": "lower"
+ },
+ "crush.git-diff.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.docker-ps.log.out_chars": {
+  "value": 824,
+  "better": "lower"
+ },
+ "crush.docker-ps.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.find-list.log.out_chars": {
+  "value": 809,
+  "better": "lower"
+ },
+ "crush.find-list.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.tsc-fail.log.out_chars": {
+  "value": 604,
+  "better": "lower"
+ },
+ "crush.tsc-fail.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.eslint-pass.log.out_chars": {
+  "value": 57,
+  "better": "lower"
+ },
+ "crush.eslint-pass.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.weighted_saved_permille": {
+  "value": 799,
+  "better": "higher"
+ },
+ "distill.ops.out_chars": {
+  "value": 4495,
+  "better": "lower"
+ },
+ "distill.ops.answers_kept": {
+  "value": 3,
+  "better": "higher"
+ },
+ "distill.task30.out_chars": {
+  "value": 57317,
+  "better": "lower"
+ },
+ "distill.task30.fatal_kept": {
+  "value": 30,
+  "better": "higher"
+ },
+ "ids.random_caught_of_300": {
+  "value": 296,
+  "better": "higher"
+ },
+ "find.hit1_of_60": {
+  "value": 60,
+  "better": "higher"
+ },
+ "find.mrr_permille": {
+  "value": 1000,
+  "better": "higher"
+ },
+ "json.pretty_tokens_after_minify": {
+  "value": 4496,
+  "better": "lower"
+ },
+ "json.roundtrip_exact": {
+  "value": 1,
+  "better": "higher"
+ },
+ "json.keep_lines_tokens_after_minify": {
+  "value": 4858,
+  "better": "lower"
+ },
+ "json.keep_lines_no_line_grew": {
+  "value": 1,
+  "better": "higher"
+ },
+ "proxy.saved_tokens": {
+  "value": 36574,
+  "better": "higher"
+ },
+ "estimate.ops_image_tokens": {
+  "value": 3920,
+  "better": "lower"
+ },
+ "estimate.ops_total_saved_pct": {
+  "value": 89,
+  "better": "higher"
+ },
+ "speed.distill_80k_lines_x_ref": {
+  "value": 2.847,
+  "better": "lower-speed"
+ },
+ "speed.find_80k_lines_x_ref": {
+  "value": 4.351,
+  "better": "lower-speed"
+ },
+ "speed.distill_scaling_4x": {
+  "value": 3.84,
+  "better": "lower-speed",
+  "limit": 6
+ }
+}

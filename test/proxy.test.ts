@@ -305,6 +305,62 @@ describe("cache breakpoint on the imaged prefix", () => {
   });
 });
 
+// Rule 7: a pretty-printed JSON tool result is minified, lossless, in every
+// message - including the latest and one holding the client's breakpoint -
+// because the same bytes from its first request on are what keeps the cache.
+describe("lossless JSON tool results (rule 7)", () => {
+  const DOC = { items: Array.from({ length: 20 }, (_, i) => ({ name: `row ${i}`, note: "keep  these\tspaces", n: "N" })) };
+  const big = (s: string) => s.replaceAll('"N"', "12345678901234567890"); // past 2^53: a re-print would round it
+  const PRETTY = big(JSON.stringify(DOC, null, 2));
+  const toolResult = (content: unknown, extra: Record<string, unknown> = {}) => ({ type: "tool_result", tool_use_id: "t1", content, ...extra });
+
+  test("minified in the latest message, strings and big numbers byte-exact", () => {
+    const body = JSON.stringify({ messages: [msg("user", [toolResult(PRETTY, { cache_control: { type: "ephemeral" } })])] });
+    const r = transformRequestBody(body, CFG)!;
+    expect(r.changed).toBe(true);
+    expect(r.minifiedBlocks).toBe(1);
+    expect(r.imagedBlocks).toBe(0);
+    const got = (parse(r).messages[0].content as Block[])[0];
+    expect(got.cache_control).toEqual({ type: "ephemeral" }); // the client's breakpoint stays where it was
+    expect(got.content).toBe(big(JSON.stringify(DOC)));
+    expect(got.content as string).toContain('"keep  these\\tspaces"');
+    expect(got.content as string).toContain("12345678901234567890");
+    expect(r.savedTokens).toBeGreaterThan(0);
+  });
+
+  test("idempotent: the next request carries the same bytes, so the cache holds", () => {
+    // the client knows nothing of the proxy: it re-sends the pretty original every turn
+    const turn1 = { messages: [msg("user", [toolResult([{ type: "text", text: PRETTY }])])] };
+    const first = transformRequestBody(JSON.stringify(turn1), CFG)!;
+    const turn2 = { messages: [...turn1.messages, msg("assistant", "ok"), msg("user", "next question")] };
+    const again = transformRequestBody(JSON.stringify(turn2), CFG)!;
+    expect(again.minifiedBlocks).toBe(1);
+    expect(parse(again).messages[0]).toEqual(parse(first).messages[0]);
+    // and minifying an already-minified block is a no-op
+    const settled = transformRequestBody(first.body, CFG)!;
+    expect(settled.changed).toBe(false);
+  });
+
+  test("a body holding a number past 2^53 is forwarded byte-for-byte", () => {
+    // JSON.parse would round the tool_use input to 12345678901234567000
+    const raw = `{"messages":[{"role":"user","content":${JSON.stringify(BIG)}},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"get","input":{"id":12345678901234567890}}]},{"role":"user","content":[${JSON.stringify(toolResult(PRETTY))}]}]}`;
+    const r = transformRequestBody(raw, CFG)!;
+    expect(r.changed).toBe(false);
+    expect(r.body).toBe(raw);
+    expect(r.minifiedBlocks + r.imagedBlocks).toBe(0);
+    // the same request with the id quoted is rewritten as usual
+    const safe = transformRequestBody(raw.replace("12345678901234567890", '"12345678901234567890"'), CFG)!;
+    expect(safe.changed && safe.minifiedBlocks === 1 && safe.imagedBlocks === 1).toBe(true);
+  });
+
+  test("not JSON, not a tool result, or too small: untouched", () => {
+    for (const content of [`${PRETTY}\nprose after`, "[not json", JSON.stringify({ a: 1 }, null, 2)]) {
+      expect(transformRequestBody(JSON.stringify({ messages: [msg("user", [toolResult(content)])] }), CFG)!.changed).toBe(false);
+    }
+    expect(transformRequestBody(JSON.stringify({ messages: [msg("user", PRETTY)] }), CFG)!.minifiedBlocks).toBe(0);
+  });
+});
+
 // ------------------------------------------------ F4 diagnostics
 
 describe("attributeBreak classifier", () => {

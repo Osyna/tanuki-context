@@ -15,12 +15,19 @@
 //! crushed + distilled in place and the text omp handed over stashed,
 //! fetchable with `tanuki_fetch`. That path runs in-process (no server child);
 //! the stash format is shared by both engines. `TANUKI_ROUTE=off` turns it off.
+//!
+//! Any other tool's result that is one pretty-printed JSON document (an MCP
+//! server's reply, `gh api`, `kubectl -o json`) loses its indentation and the
+//! spaces between tokens, lossless, line breaks kept (`minifyJson(…, true)`):
+//! omp caps a result line at 768 bytes, so a one-line document would be cut.
+//! File tools and file-reading shell commands are never touched: an edit
+//! needs the file's own layout.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
 import { RUN_INLINE_MAX, routeOutput } from "./crush.ts";
-import { charCount } from "./serde.ts";
+import { charCount, minifyJson } from "./serde.ts";
 import { TOOLS, type Knob } from "./tools.ts";
 
 interface McpContent {
@@ -46,16 +53,23 @@ function serverCommand(): { cmd: string; args: string[] } {
 /// model may edit from and passes through untouched.
 const ROUTED = new Set(["cargo", "npm", "pnpm", "yarn", "bun", "pytest", "py.test", "go", "tsc", "eslint", "make", "gradle", "gradlew", "mvn", "pip", "uv", "docker", "jest", "vitest"]);
 
-/// The argv the `run` rules key on, or null when the line is not routed. A
-/// shell line rarely is one command: `cd x && cargo test` routes on its last
-/// `&&`/`;` step with `VAR=v` prefixes dropped; a pipeline's output is its last
-/// stage's, so it is never routed.
-function argvOf(command: string): string[] | null {
+/// Shell commands whose JSON output is data, not a file the model edits.
+const DATA = new Set(["gh", "curl", "wget", "kubectl", "helm", "docker", "podman", "npm", "pnpm", "yarn", "aws", "gcloud", "az", "http", "xh"]);
+/// Tools whose text is a file's own layout.
+const FILE_TOOLS = new Set(["read", "write", "edit"]);
+
+/// The last `&&`/`;` step of a shell line as argv, `VAR=v` prefixes dropped;
+/// null for a pipeline, whose output is its last stage's while its first word
+/// names the first stage.
+function lastStep(command: string): string[] | null {
   const step = command.split(/&&|;|\n/).map((s) => s.trim()).filter(Boolean).pop() ?? "";
   if (step.includes("|")) return null;
-  const argv = step.split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
-  return ROUTED.has(argv[0]?.split("/").pop() ?? "") ? argv : null;
+  return step.split(/\s+/).filter((w) => w !== "" && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
 }
+
+/// omp appends `Wall time: …` (and the exit code, truncation notice) to a bash
+/// result; the JSON is what comes before it.
+const FOOTER = "\n\nWall time: ";
 
 interface ToolResultEvent {
   toolName: string;
@@ -165,12 +179,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event: ToolResultEvent) => {
-    if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off") return;
-    const argv = argvOf(String(event.input?.command ?? ""));
+    if (process.env.TANUKI_ROUTE === "off" || FILE_TOOLS.has(event.toolName)) return;
     const blocks = event.content ?? [];
-    if (argv === null || blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
+    if (blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
     const text = blocks.map((b) => b.text ?? "").join("\n");
-    if (charCount(text) <= RUN_INLINE_MAX) return;
+    const argv = event.toolName === "bash" ? lastStep(String(event.input?.command ?? "")) : null;
+    const cmd = argv?.[0]?.split("/").pop() ?? "";
+    // lossless first: JSON output (`docker inspect`, `npm view --json`) is data
+    // that distill would drop lines from
+    if (event.toolName !== "bash" || DATA.has(cmd) || ROUTED.has(cmd)) {
+      const cut = text.indexOf(FOOTER);
+      const min = minifyJson(cut === -1 ? text : text.slice(0, cut), true);
+      if (min !== null) return { content: [{ type: "text" as const, text: cut === -1 ? min : min + text.slice(cut) }] };
+    }
+    if (argv === null || !ROUTED.has(cmd) || charCount(text) <= RUN_INLINE_MAX) return;
     const code = event.details?.exitCode ?? (event.isError ? 1 : 0);
     let out = routeOutput(argv, text, code, null, (id) => `stashed: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
     // omp truncates before this hook, so the stash holds its view, not every line.

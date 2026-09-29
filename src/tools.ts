@@ -156,7 +156,7 @@ export const TOOLS: readonly ToolMeta[] = [
       { key: "id", type: "string", required: true, hint: "stash id from tanuki_stash" },
       { key: "query", type: "string", hint: "regex: matching lines + error/warn lines + context" },
       { key: "lines", type: "string", hint: "line range 'a-b' (1-based, inclusive)" },
-      { key: "find", type: "string", hint: "free-word relevance search over the stash: space-separated words, top windows by hit score" },
+      { key: "find", type: "string", hint: "free-word relevance search over the stash: space-separated words (plain language works; rare words weigh more than common ones), top windows by BM25 score" },
       { key: "top", type: "integer", min: 1, max: 32, hint: "find mode: how many top windows (1-32, default 8)" },
       { key: "redact", type: "boolean", hint: "mask credential-shaped values in the returned slice (default true); false returns the original bytes" },
       VERBATIM,

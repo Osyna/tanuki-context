@@ -12,12 +12,56 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { distillLog } from "./distill.ts";
 import { redactCredentials } from "./needles.ts";
-import { cmpCodepoints, rustTrim, truncateChars } from "./serde.ts";
+import { cmpCodepoints, isRustWhitespace, rnd, rustTrim, truncateChars } from "./serde.ts";
 
 /// 2^53-1: the largest integer JS holds exactly. Both engines saturate a line
 /// bound here so an absurd end bound means "to the end" identically, instead
 /// of TS rounding and Rust overflowing into an error.
 const MAX_LINE = 9007199254740991;
+
+/// `find` ranks lines by BM25: a word that is on every line (`error`, `the`)
+/// weighs almost nothing, a rare one decides. k1 caps how much a repeated word
+/// counts, b how much a long line is discounted. Flat per-word points let
+/// common words drown the one that mattered: on a real 6,000-line journal with
+/// plain-language asks, the right line came first 11 times in 200 flat, 25 with
+/// BM25 (and 0 vs 10 for a one-common-word ask); pure rare-word asks tied.
+const FIND_K1 = 1.2;
+const FIND_B = 0.75;
+const FIND_MAX_WORDS = 16;
+
+function isWordUnit(c: number): boolean {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+}
+
+/// Rust `str::split_whitespace`: runs between Unicode whitespace.
+function rustWords(s: string): string[] {
+  const out: string[] = [];
+  let start = -1;
+  for (let i = 0; i <= s.length; i++) {
+    const ws = i === s.length || isRustWhitespace(s.charCodeAt(i));
+    if (ws && start !== -1) {
+      out.push(s.slice(start, i));
+      start = -1;
+    } else if (!ws && start === -1) {
+      start = i;
+    }
+  }
+  return out;
+}
+
+/// Term frequency of `word` in a lowercased line: whole-word hits count one
+/// each; a line holding it only inside a longer word (`error_code` for
+/// `error`) counts 1/3 - the old 3:1 whole-word preference, kept as a frequency.
+function termFreq(lower: string, word: string): number {
+  let full = 0;
+  let any = false;
+  for (let at = lower.indexOf(word); at !== -1; at = lower.indexOf(word, at + word.length)) {
+    any = true;
+    const end = at + word.length;
+    if ((at === 0 || !isWordUnit(lower.charCodeAt(at - 1))) && (end >= lower.length || !isWordUnit(lower.charCodeAt(end)))) full++;
+  }
+  return full > 0 ? full : any ? 1 / 3 : 0;
+}
 
 function stashDir(): string {
   const env = process.env.TANUKI_STASH;
@@ -125,40 +169,42 @@ export function fetchSlice(
     return segments.slice(a - 1, b).join("\n");
   }
   if (find !== null) {
-    // find mode: word-based relevance scoring
-    const rawWords = find.split(/\s+/).filter((w) => w !== "");
+    const rawWords = rustWords(find);
     if (rawWords.length === 0) throw new Error("find needs at least one word");
-    const words = Array.from(new Set(rawWords.map((w) => w.toLowerCase()))).slice(0, 8);
+    const words = Array.from(new Set(rawWords.map((w) => w.toLowerCase()))).slice(0, FIND_MAX_WORDS);
     const segments = text.split("\n");
     const N = segments.length;
-    // Score each line
+    const lowers = segments.map((s) => s.toLowerCase());
+    const tf = words.map((w) => lowers.map((l) => termFreq(l, w)));
+    const dl = segments.map((s) => rustWords(s).length);
+    let total = 0;
+    for (const d of dl) total += d;
+    const avg = total / N;
+    const idf = tf.map((col) => {
+      const df = col.filter((f) => f > 0).length;
+      return Math.log(1 + (N - df + 0.5) / (df + 0.5));
+    });
     interface Anchor { line: number; score: number }
     const anchors: Anchor[] = [];
     for (let i = 0; i < N; i++) {
-      const raw = segments[i];
-      const lower = raw.toLowerCase();
       let score = 0;
-      for (const word of words) {
-        // Escape regex metacharacters
-        const esc = word.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-        // ASCII word boundary check: (?<![0-9A-Za-z_])word(?![0-9A-Za-z_])
-        const re = new RegExp(`(?<![0-9A-Za-z_])${esc}(?![0-9A-Za-z_])`, "i");
-        if (re.test(raw)) {
-          score += 3;
-        } else if (lower.includes(word)) {
-          score += 1;
+      let hit = false;
+      for (let j = 0; j < words.length; j++) {
+        const f = tf[j][i];
+        if (f > 0) {
+          hit = true;
+          score += (idf[j] * (f * (FIND_K1 + 1))) / (f + FIND_K1 * (1 - FIND_B + (FIND_B * dl[i]) / avg));
         }
       }
-      if (score > 0) anchors.push({ line: i + 1, score });
+      // integer micro-points: ordering and the window max are exact, so a last-bit
+      // difference between the engines' ln() cannot reorder two lines
+      if (hit) anchors.push({ line: i + 1, score: rnd(score * 1e6) });
     }
     const h = anchors.length;
     if (h === 0) return `·find· ${words.length} words · 0 lines matched`;
     // Top K anchors by (score desc, line asc)
     const k = Math.min(Math.max(1, top), 32);
-    const topAnchors = anchors.sort((a, b) => {
-      if (a.score !== b.score) return b.score - a.score;
-      return a.line - b.line;
-    }).slice(0, k);
+    const topAnchors = anchors.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.line - b.line)).slice(0, k);
     // Build windows: each anchor -> [max(1,n-2), min(N,n+2)]
     interface Window { start: number; end: number; score: number }
     const windows: Window[] = [];
@@ -182,7 +228,7 @@ export function fetchSlice(
     // Output
     const parts: string[] = [];
     for (const win of merged) {
-      parts.push(`·find· L${win.start}-${win.end} score ${win.score}`);
+      parts.push(`·find· L${win.start}-${win.end} score ${(rnd(win.score / 1e5) / 10).toFixed(1)}`);
       parts.push(segments.slice(win.start - 1, win.end).join("\n"));
     }
     parts.push(`·find· ${words.length} words · ${h} lines matched · ${merged.length} windows`);

@@ -8,13 +8,20 @@
 //!      and inside tool_result content).
 //!   3. The latest `recencyWindow` message(s) are kept as text (default 1):
 //!      recent turns are reasoned over precisely, distant bulk is imaged.
-//!   4. Blocks carrying cache_control are never touched (rewriting would
+//!   4. Blocks carrying cache_control are never imaged (rewriting would
 //!      defeat the cache they exist for).
 //!   5. Imaging only happens when `estimate` says it wins by a clear margin;
 //!      everything else passes through byte-for-byte.
 //!   6. A block carrying a credential-shaped secret (API keys, private-key
 //!      blocks, tokens) is never imaged: a secret must not be silently
 //!      misread from pixels, so it stays text (needles.ts `scanCredentials`).
+//!   7. Lossless first: a pretty-printed JSON tool result loses the
+//!      whitespace between its tokens (strings byte-exact) in EVERY message,
+//!      recent or not, breakpoint or not. The rewrite is deterministic and
+//!      idempotent, so the block has the same bytes from its first request on
+//!      and the API cache never sees it change. Rules 3 and 4 would break that:
+//!      skipping a block while it holds the client's breakpoint and minifying
+//!      it a turn later is exactly a cache break.
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -33,7 +40,7 @@ import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
-import { charCount, isObj, rnd, textTokens } from "./serde.ts";
+import { charCount, isObj, minifyJson, rnd, textTokens } from "./serde.ts";
 
 // Volatile prompt shapes, same patterns as distill.ts's masks (F4). Declared
 // WITHOUT the g flag: .test() on a g-regex is stateful (lastIndex carries
@@ -191,6 +198,8 @@ export interface TransformResult {
   /** false = no block was imaged; result exists only for the diagnostics. */
   changed: boolean;
   imagedBlocks: number;
+  /** tool_result texts whose JSON whitespace was dropped (rule 7). */
+  minifiedBlocks: number;
   origChars: number;
   imageCount: number;
   savedTokens: number;
@@ -280,6 +289,32 @@ function countBreakpoints(body: Record<string, unknown>): number {
   return n;
 }
 
+/// A number JSON.parse -> JSON.stringify would re-spell: a run of 16+ digits
+/// outside strings (an integer past 2^53, or a float with more digits than a
+/// double keeps). A tool_use id or input like that must reach the API as the
+/// model wrote it, so such a request is never rewritten. Mirrored in proxy.rs.
+function hasWideNumber(raw: string): boolean {
+  let inStr = false;
+  let esc = false;
+  let run = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === 0x5c) esc = true;
+      else if (c === 0x22) inStr = false;
+    } else if (c === 0x22) {
+      inStr = true;
+      run = 0;
+    } else if (c >= 0x30 && c <= 0x39) {
+      if (++run >= 16) return true;
+    } else {
+      run = 0;
+    }
+  }
+  return false;
+}
+
 /// Rewrite a /v1/messages body. Returns null when nothing changed (caller
 /// forwards the original bytes untouched).
 export function transformRequestBody(
@@ -363,10 +398,51 @@ export function transformRequestBody(
     return done;
   };
 
+  // rule 7: lossless JSON minify of tool results, everywhere, before imaging.
+  // Ledger: the block was never sent pretty, so there is no flip - with cache
+  // traffic seen, the saving rides a cache write the first time and reads after.
+  let minifiedBlocks = 0;
+  const minify = (text: string): string | null => {
+    const m = minifyJson(text);
+    if (m === null) return null;
+    minifiedBlocks++;
+    const saved = textTokens(text) - textTokens(m);
+    savedTokens += saved;
+    const hash = createHash("sha256").update(`json\x00${text}`, "utf8").digest("hex");
+    const replayed = session !== undefined && session.seenBlocks.has(hash);
+    savedTokensCacheAware +=
+      session === undefined || !session.cachingSeen ? saved : rnd(saved * (replayed ? rate.cacheReadMult : rate.cacheWriteMult));
+    if (session !== undefined && !replayed) {
+      if (session.seenBlocks.size >= 1024) session.seenBlocks.clear();
+      session.seenBlocks.add(hash);
+    }
+    return m;
+  };
+  // A body we cannot re-serialise without re-spelling a number is forwarded
+  // byte-for-byte: no rewrite at all, diagnostics only.
+  const frozen = hasWideNumber(raw);
+  for (const m of frozen ? [] : body.messages) {
+    if (!isObj(m) || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (!isObj(block) || block.type !== "tool_result") continue;
+      if (typeof block.content === "string") {
+        const t = minify(block.content);
+        if (t !== null) block.content = t;
+      } else if (Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (isObj(item) && item.type === "text" && typeof item.text === "string") {
+            const t = minify(item.text);
+            if (t !== null) item.text = t;
+          }
+        }
+      }
+    }
+  }
+
   // rule 3: keep the latest recencyWindow message(s) as text (VIST slow-fast:
   // recent turns reasoned over precisely, distant bulk imaged). Default 1.
   const keep = Math.max(1, cfg.recencyWindow);
-  for (let i = 0; i < body.messages.length - keep; i++) {
+  for (let i = 0; i < (frozen ? 0 : body.messages.length - keep); i++) {
     const m = body.messages[i];
     // Anthropic accepts image blocks only in user-role content.
     if (!isObj(m) || m.role !== "user") continue;
@@ -571,10 +647,10 @@ export function transformRequestBody(
     session.prevBlocks = blocks;
   }
 
-  if (imagedBlocks === 0) {
-    // Nothing imaged: the caller forwards the ORIGINAL bytes; this result
+  if (imagedBlocks === 0 && minifiedBlocks === 0) {
+    // Nothing rewritten: the caller forwards the ORIGINAL bytes; this result
     // exists only to carry the diagnostics into the event log.
-    return { body: raw, changed: false, imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached: false, blocks, cacheBreak, toolTax, volatileSystem };
+    return { body: raw, changed: false, imagedBlocks, minifiedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached: false, blocks, cacheBreak, toolTax, volatileSystem };
   }
 
   // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
@@ -599,7 +675,7 @@ export function transformRequestBody(
     }
   }
 
-  return { body: JSON.stringify(body), changed: true, imagedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached, blocks, cacheBreak, toolTax, volatileSystem };
+  return { body: JSON.stringify(body), changed: true, imagedBlocks, minifiedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached, blocks, cacheBreak, toolTax, volatileSystem };
 }
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
@@ -708,6 +784,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 orig_chars: stats?.origChars ?? 0,
                 image_count: stats?.imageCount ?? 0,
                 compressed: stats !== null && stats.changed,
+                minified_blocks: stats?.minifiedBlocks ?? 0,
                 // what the imaged blocks would have added as text (estimate).
                 baseline_tokens: actual + (stats?.savedTokens ?? 0),
                 // the same estimate with the session's observed cache state
@@ -764,7 +841,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}\n` +
+        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""} · pretty JSON tool results minified (lossless)\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });

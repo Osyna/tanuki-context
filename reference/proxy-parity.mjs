@@ -12,13 +12,23 @@ const BIG = Array.from(
   (_, i) => `2026-07-26T02:${String(i % 60).padStart(2, "0")}:00Z INFO worker-${i % 5} copied /srv/data/prod/batch/segment_${String(i).padStart(5, "0")}.parquet ok`,
 ).join("\n");
 
+// 0.22 rule 7: a pretty JSON tool result in the LATEST message (recency window
+// and all) must reach upstream minified, identically - Unicode, escapes and a
+// past-2^53 integer inside a string included.
+const PRETTY = JSON.stringify(
+  { items: Array.from({ length: 12 }, (_, i) => ({ id: `n${i}`, note: "café \u2603 \"quoted\"  two spaces\ttab", big: "12345678901234567890" })) },
+  null,
+  2,
+);
+const MIN = JSON.stringify(JSON.parse(PRETTY));
+
 const REQ = JSON.stringify({
   model: "claude-sonnet-4-5",
   max_tokens: 16,
   system: "SYSTEM",
   messages: [
     { role: "user", content: [{ type: "text", text: BIG }, { type: "text", text: "tail" }] },
-    { role: "user", content: "latest question" },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: PRETTY }, { type: "text", text: "latest question" }] },
   ],
 });
 
@@ -115,6 +125,8 @@ if (!same) {
   };
   walk(canon(strip(JSON.parse(ts))), canon(strip(JSON.parse(rs))), "$");
 }
-const ok = same && imgSame && last?.cache_control?.type === "ephemeral";
+const minified = jt.messages[1].content[0].content === MIN && jt.messages[1].content[1].text === "latest question";
+console.log(`latest tool_result minified (rule 7): ${minified}`);
+const ok = same && imgSame && minified && last?.cache_control?.type === "ephemeral";
 console.log(ok ? "\nPASS" : "\nFAIL");
 process.exit(ok ? 0 : 1);

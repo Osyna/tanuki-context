@@ -125,6 +125,51 @@ export function pct(from: number, to: number): number {
   return rnd((1.0 - to / from) * 100.0);
 }
 
+/// Below this a pretty-printed JSON block is not worth a rewrite.
+export const JSON_MIN_CHARS = 200;
+
+/**
+ * Whitespace-only JSON minify. `text` (trimmed) must parse as one JSON object
+ * or array; the spaces, tabs and newlines between tokens go and every byte
+ * inside a string stays. Deliberately not parse-and-print: big integers, float
+ * spellings, key order and duplicate keys come through untouched. null when it
+ * is not JSON, shorter than JSON_MIN_CHARS, or saves under 10 % of the chars.
+ * Measured on `gh api`, `gh run list --json` and `npm view --json`: 18-24 %
+ * fewer o200k tokens than the indented form. Mirrored in proxy.rs.
+ *
+ * `keepLines` keeps the document's line breaks (12-17 % instead): every line
+ * only gets shorter, for hosts that cap line length - omp cuts a tool-result
+ * line at `tools.outputMaxColumns` (768 bytes), which ate a one-line document.
+ */
+export function minifyJson(text: string, keepLines = false): string | null {
+  const t = rustTrim(text);
+  if ((t[0] !== "{" && t[0] !== "[") || charCount(text) < JSON_MIN_CHARS) return null;
+  try {
+    JSON.parse(t);
+  } catch {
+    return null;
+  }
+  let out = "";
+  let inStr = false;
+  let esc = false;
+  let from = 0; // copy runs, not characters
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === 0x5c) esc = true;
+      else if (c === 0x22) inStr = false;
+    } else if (c === 0x22) {
+      inStr = true;
+    } else if (c === 0x20 || c === 0x09 || c === 0x0d || (c === 0x0a && !keepLines)) {
+      out += t.slice(from, i);
+      from = i + 1;
+    }
+  }
+  out += t.slice(from);
+  return charCount(out) * 10 > charCount(text) * 9 ? null : out;
+}
+
 /**
  * The one text-price heuristic, stated once. Measured, not assumed.
  *

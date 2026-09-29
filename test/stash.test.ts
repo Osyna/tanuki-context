@@ -362,48 +362,42 @@ describe("named-secret redaction", () => {
 });
 
 describe("find mode", () => {
-  test("word boundary scores 3, substring scores 1, tie breaks by line asc", () => {
-    // Line 1: "error_code" - substring match for "error" = 1
-    // Line 3: "error occurred" - word boundary match for "error" = 3
-    // Line 5: "ERROR log" - word boundary match for "error" (case insensitive) = 3
-    // Line 7: "the error" - word boundary match = 3
+  test("whole words outrank embedded hits; equal scores break by line asc", () => {
     const text = [
-      "error_code=500",      // 1: substring only
-      "info message",        // 2: no match
-      "error occurred",      // 3: word boundary
-      "debug trace",         // 4: no match
-      "ERROR log",           // 5: word boundary
-      "warning here",        // 6: no match
-      "the error",           // 7: word boundary
-      "another line",        // 8: no match
-      "final error_msg",     // 9: substring only
+      "error_code=500",      // 1: embedded only
+      "info message",        // 2
+      "error occurred",      // 3: whole word
+      "debug trace",         // 4
+      "ERROR log",           // 5: whole word, case-insensitive
+      "warning here",        // 6
+      "the error",           // 7: whole word
+      "another line",        // 8
+      "final error_msg",     // 9: embedded only
     ].join("\n");
     const { id } = stashText(text);
+    // Top 3 = lines 3, 5, 7 (1 and 9 score less); windows [1,5] [3,7] [5,9] merge to [1,9]
     const result = fetchSlice(id, null, null, "error", 3);
-    // Top 3 by score: lines 3,5,7 (all score 3), tie-break by line asc
-    // Windows: 3 -> [1,5], 5 -> [3,7], 7 -> [5,9]
-    // Merged: [1,9] (all adjacent/overlapping)
-    expect(result).toContain("·find· L1-9 score 3");
-    expect(result).toContain("error_code=500");
-    expect(result).toContain("final error_msg");
+    expect(result).toMatch(/^·find· L1-9 score \d+\.\d$/m);
     expect(result).toContain("·find· 1 words · 5 lines matched · 1 windows");
   });
 
-  test("substring-only scoring would change ranking (mutation guard)", () => {
-    // If all hits scored 1, line 1 and 9 would rank equally with 3,5,7
-    // and might be selected instead, proving word-boundary logic matters
-    const text = [
-      "error_code=500",
-      "info message",
-      "error occurred",
-    ].join("\n");
+  test("an embedded hit never takes the top slot from a whole word (mutation guard)", () => {
+    const pad = (n: number) => Array.from({ length: n }, (_, i) => `quiet ${i}`);
+    const text = ["error_code=500", ...pad(9), "an error occurred", ...pad(9)].join("\n");
     const { id } = stashText(text);
-    const result = fetchSlice(id, null, null, "error", 1);
-    // With correct scoring, line 3 (score 3) wins over line 1 (score 1)
-    expect(result).toContain("error occurred");
-    // Line 1 might be included via context window, but not as the anchor
-    // The key is that the window is centered on line 3, not line 1
-    expect(result).toContain("·find· L1-3 score 3");
+    // anchor line 11 -> window 9-13; had line 1 won, the window would be 1-3
+    expect(fetchSlice(id, null, null, "error", 1)).toMatch(/^·find· L9-13 score/m);
+  });
+
+  test("a rare word outweighs common ones (IDF): plain-language asks find the odd line", () => {
+    // 60 ordinary failures share `error request failed`; one line is the digest
+    // mismatch. Counting words flat, every ordinary line scores 3 hits to its 2.
+    const lines = Array.from({ length: 60 }, (_, i) => `t${i} worker ERROR request failed status=502`);
+    lines.splice(40, 0, "t40b relay ERROR digest mismatch expected sha256:4806bc9b");
+    const { id } = stashText(lines.join("\n"));
+    const out = fetchSlice(id, null, null, "which request failed with the error digest", 1);
+    expect(out).toMatch(/^·find· L39-43 score/m);
+    expect(out).toContain("digest mismatch");
   });
 
   test("window merge: adjacent windows collapse", () => {
@@ -419,7 +413,7 @@ describe("find mode", () => {
     const { id } = stashText(text);
     const result = fetchSlice(id, null, null, "error", 2);
     // Anchors: 3,6 -> windows [1,5] and [4,7] -> merged to [1,7]
-    expect(result).toContain("·find· L1-7 score 3");
+    expect(result).toMatch(/^·find· L1-7 score \d+\.\d$/m);
     expect(result).toContain("·find· 1 words · 2 lines matched · 1 windows");
   });
 
