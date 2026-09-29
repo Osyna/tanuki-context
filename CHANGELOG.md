@@ -10,6 +10,12 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## Unreleased
+
+- **License: MIT → [PolyForm Noncommercial 1.0.0](LICENSE).** Personal, research, hobby and noncommercial-organisation use stays free; companies need a written commercial license from the author to use it, including in their internal processes. 0.20.1 and earlier stay MIT for anyone who already has them.
+- **`tanuki-context --version` (and `-V`)** prints `tanuki-context <version>` on both engines; it used to be an "unknown command".
+- **SKILL.md no longer carries a `version:` field.** Nothing read it, and it had already drifted (0.20.0 in a 0.20.1 package).
+
 ## 0.20.0
 
 ### Five text-side techniques from neighbouring tools, reimplemented and measured

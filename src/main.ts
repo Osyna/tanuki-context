@@ -1206,6 +1206,10 @@ export function main(): void {
       process.stdout.write(lines.join("\n") + "\n");
       process.exit(code);
     }
+    case "--version":
+    case "-V":
+      process.stdout.write(`tanuki-context ${VERSION}\n`);
+      break;
     case "serve":
     case undefined:
       serve();

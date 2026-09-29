@@ -592,5 +592,15 @@ pixel-exact with the npm package by a parity harness:
 cargo install --git https://github.com/Osyna/tanuki-context --branch rust
 ```
 
-MIT. The bundled glyph atlas derives from the Spleen font, GNU Unifont, and
-pxpipe; see [NOTICE](NOTICE).
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE). Personal, research, hobby and
+noncommercial-organisation use is free. **Companies may not use tanuki-context
+(in products, services, or their internal processes) without a written
+commercial license from the author**; ask via [github.com/Osyna](https://github.com/Osyna).
+Releases up to and including 0.20.1 were published under MIT and those copies
+stay MIT.
+
+The bundled glyph atlas (`assets/glyphs.*`) is not covered by these terms: it
+derives from the Spleen font, GNU Unifont, and pxpipe and stays under their
+licenses; see [NOTICE](NOTICE).
