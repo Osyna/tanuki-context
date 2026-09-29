@@ -111,6 +111,7 @@ together.
 
 | If this sounds like you | Go to |
 | --- | --- |
+| I use OMP (oh-my-pi) or pi | [OMP or pi plugin](#omp-or-pi-plugin) |
 | I use Claude Code, Cursor, or another app that supports MCP | [1. MCP server](#1-mcp-server) |
 | I want the model to use it properly without me asking | [2. Add the skill](#2-add-the-skill) |
 | My app cannot be configured, or I do not want to touch it | [3. Proxy](#3-proxy) |
@@ -118,6 +119,35 @@ together.
 
 You need Node 18 or newer, or the single Rust binary. There is nothing to
 compile, no dependencies to pull in, and no config file anywhere.
+
+### OMP or pi plugin
+
+One command installs the tools, the skill, and a router for shell output:
+
+```sh
+omp plugin install tanuki-context     # oh-my-pi
+pi install npm:tanuki-context         # pi
+```
+
+Restart the session. You get all eight `tanuki_*` tools as native tools (no MCP
+entry needed; drop an old `tanuki-context` MCP server or the model sees both),
+the skill below, and the **bash router**: like context-mode, every `bash`
+result over 8,000 characters is rewritten before the model reads it, through
+the same rules as `tanuki-context run` (crush, distill, errors kept verbatim),
+with the untouched output stashed and one `tanuki_fetch` line pointing at it.
+Smaller results and every other tool pass through untouched.
+
+```
+[tanuki run] exit 3 · 585 -> 15 lines · 97% of chars removed
+...
+test suite::broken ... FAILED
+  ×575 (template)  test suite::case_0 ... ok
+full output stashed: tanuki_fetch {"id":"2ab362e1c9fc","query":"<regex>"} or {"id":"2ab362e1c9fc","lines":"a-b"}
+```
+
+`TANUKI_ROUTE=off` turns the router off. `TANUKI_BIN=/path/to/tanuki-context`
+runs the tools on the Rust binary instead of Node; the stash is shared, so a
+routed output fetches the same on either engine.
 
 ### 1. MCP server
 

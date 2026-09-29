@@ -10,6 +10,11 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.21.0
+
+- **An OMP plugin, and a router for shell output.** `omp plugin install tanuki-context` (or `pi install npm:tanuki-context`) registers the eight tools natively and ships the skill. The extension now also hooks `tool_result`: a `bash` result over 8,000 chars goes through the `run` rules (crush, distill, stash the original, one `tanuki_fetch` pointer) before the model reads it. Checked in a real omp session on 3,000 lines of test output: 97% of chars removed, the FAILED line and the exit code kept, exit 0 and exit 3 alike. In-process, so it works with `TANUKI_BIN` too; `TANUKI_ROUTE=off` disables it. The `run` CLI formats through the same function, output unchanged.
+- **`test/pi.test.ts` stopped writing the string `"undefined"` into `TANUKI_BIN`** (bun 1.4 stores it), which spawned a binary called `undefined` and failed four tests on CI.
+
 ## 0.20.2
 
 - **License: MIT → [PolyForm Noncommercial 1.0.0](LICENSE).** Personal, research, hobby and noncommercial-organisation use stays free; companies need a written commercial license from the author to use it, including in their internal processes. Copies already obtained under MIT (npm up to 0.20.0, git up to 0.20.1) stay MIT. The branch now ships the NOTICE for the bundled glyph atlas, which it was missing.
