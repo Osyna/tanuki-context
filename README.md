@@ -598,8 +598,8 @@ cargo install --git https://github.com/Osyna/tanuki-context --branch rust
 noncommercial-organisation use is free. **Companies may not use tanuki-context
 (in products, services, or their internal processes) without a written
 commercial license from the author**; ask via [github.com/Osyna](https://github.com/Osyna).
-Releases up to and including 0.20.1 were published under MIT and those copies
-stay MIT.
+Earlier releases (npm up to 0.20.0, git up to 0.20.1) were published under MIT
+and those copies stay MIT.
 
 The bundled glyph atlas (`assets/glyphs.*`) is not covered by these terms: it
 derives from the Spleen font, GNU Unifont, and pxpipe and stays under their

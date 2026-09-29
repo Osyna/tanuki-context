@@ -7,8 +7,9 @@ or on behalf of any company in its processes, requires a separate written
 license from the licensor. Copyright (c) 2026 Irvin Heslan
 (https://github.com/Osyna).
 
-Versions up to and including 0.20.1 were released under the MIT License;
-copies obtained under those releases remain under MIT.
+Earlier releases were under the MIT License: npm versions up to and including
+0.20.0, and git copies up to 0.20.1. Copies obtained under those releases
+remain under MIT.
 
 The glyph atlas (assets/glyphs.*) is NOT covered by the PolyForm terms: it
 stays under the upstream licenses of the components below.
