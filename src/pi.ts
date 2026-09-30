@@ -186,8 +186,10 @@ export default function (pi: ExtensionAPI) {
     const argv = event.toolName === "bash" ? lastStep(String(event.input?.command ?? "")) : null;
     const cmd = argv?.[0]?.split("/").pop() ?? "";
     // lossless first: JSON output (`docker inspect`, `npm view --json`) is data
-    // that distill would drop lines from
-    if (process.env.TANUKI_MINIFY !== "off" && (event.toolName !== "bash" || DATA.has(cmd) || ROUTED.has(cmd))) {
+    // that distill would drop lines from. Our own results are already shaped
+    // (a `tanuki_fetch` lines slice must stay the slice asked for).
+    const data = event.toolName !== "bash" ? !event.toolName.startsWith("tanuki_") : DATA.has(cmd) || ROUTED.has(cmd);
+    if (process.env.TANUKI_MINIFY !== "off" && data) {
       const cut = text.indexOf(FOOTER);
       const min = minifyJson(cut === -1 ? text : text.slice(0, cut), true);
       if (min !== null) return { content: [{ type: "text" as const, text: cut === -1 ? min : min + text.slice(cut) }] };

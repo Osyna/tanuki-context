@@ -173,12 +173,18 @@ describe("pi extension bash router", () => {
     expect(JSON.parse(dk!.content[0]!.text)).toEqual(JSON.parse(big));
   });
 
-  test("JSON in file views, reader commands and non-JSON text is left alone", async () => {
-    for (const [toolName, command] of [["read", ""], ["edit", ""], ["bash", "cat package.json"], ["bash", "jq . package.json"], ["bash", "gh api x | jq ."]]) {
+  test("JSON in file views, our own tools' results, reader commands, non-JSON text and TANUKI_MINIFY=off is left alone", async () => {
+    for (const [toolName, command] of [["read", ""], ["edit", ""], ["tanuki_fetch", ""], ["bash", "cat package.json"], ["bash", "jq . package.json"], ["bash", "gh api x | jq ."]]) {
       expect(await route({ toolName, input: { command }, content: [{ type: "text", text: PRETTY }] })).toBeUndefined();
     }
     expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: `${PRETTY}\ntrailing prose` }] })).toBeUndefined();
     expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: '{"already":"compact"}' }] })).toBeUndefined();
+    process.env.TANUKI_MINIFY = "off";
+    try {
+      expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: PRETTY }] })).toBeUndefined();
+    } finally {
+      delete process.env.TANUKI_MINIFY;
+    }
   });
 });
 
