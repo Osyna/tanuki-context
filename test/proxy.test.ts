@@ -4,6 +4,7 @@
 // upstream-bound, response passthrough, count_tokens ignored).
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { PROXY_DEFAULTS, attributeBreak, newSession, startProxy, transformRequestBody, type ProxyCfg } from "../src/proxy.ts";
@@ -341,16 +342,13 @@ describe("lossless JSON tool results (rule 7)", () => {
     expect(settled.changed).toBe(false);
   });
 
-  test("a body holding a number past 2^53 is forwarded byte-for-byte", () => {
-    // JSON.parse would round the tool_use input to 12345678901234567000
+  test("a number past 2^53 is rewritten around, never re-printed", () => {
+    // JSON.parse would round the tool_use input to 12345678901234567000; splicing
+    // never re-prints it, so the body is rewritten and the id survives verbatim
     const raw = `{"messages":[{"role":"user","content":${JSON.stringify(BIG)}},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"get","input":{"id":12345678901234567890}}]},{"role":"user","content":[${JSON.stringify(toolResult(PRETTY))}]}]}`;
     const r = transformRequestBody(raw, CFG)!;
-    expect(r.changed).toBe(false);
-    expect(r.body).toBe(raw);
-    expect(r.minifiedBlocks + r.imagedBlocks).toBe(0);
-    // the same request with the id quoted is rewritten as usual
-    const safe = transformRequestBody(raw.replace("12345678901234567890", '"12345678901234567890"'), CFG)!;
-    expect(safe.changed && safe.minifiedBlocks === 1 && safe.imagedBlocks === 1).toBe(true);
+    expect(r.changed && r.minifiedBlocks === 1 && r.imagedBlocks === 1).toBe(true);
+    expect(r.body).toContain('"input":{"id":12345678901234567890}}]}');
   });
 
   test("not JSON, not a tool result, or too small: untouched", () => {
@@ -631,5 +629,380 @@ describe("F4 proxy diagnostics", () => {
     const result = transformRequestBody(JSON.stringify(body), CFG);
     expect(result).not.toBeNull();
     expect(result!.volatileSystem).toBe(false);
+  });
+});
+
+// ------------------------------------------------ T1a byte-exact splicing
+// The rewritten request is the client's own bytes with only the changed spans
+// substituted: key order, spacing, escapes and number spellings elsewhere stay.
+describe("byte splicing (T1a)", () => {
+  const OPEN =
+    '{"stream" : true,\n "max_tokens":1e2, "temperature": 1.0, "system" :[{"text":"caf\\u00e9 \\/ sys","type":"text"}],\n' +
+    ' "tools":[{"name":"t","input_schema":{"z":12345678901234567890,"a":1.50}}],\n "messages" : [\n  ';
+  const MID =
+    ',\n  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"get","input":{"id":12345678901234567890,"f":1.50,"e":1e2}}]},\n  ';
+  const LAST = '{"content":"latest","role":"user"}\n ]\n}';
+  const M0 = `{"role":"user", "content":${JSON.stringify(BIG)}}`;
+
+  test("the untouched prefix and suffix of an imaged request are byte-identical", () => {
+    const raw = OPEN + M0 + MID + LAST;
+    const r = transformRequestBody(raw, CFG)!;
+    expect(r.changed && r.imagedBlocks === 1).toBe(true);
+    expect(r.body.startsWith(`${OPEN}{"role":"user", "content":[`)).toBe(true);
+    expect(r.body.endsWith(`}${MID}${LAST}`)).toBe(true);
+    // 1e2, 1.0, 1.50, \u00e9 and the 20-digit ints all survived as spelled
+    for (const lit of ["1e2", "1.0", "1.50", "caf\\u00e9 \\/ sys", "12345678901234567890"]) expect(r.body).toContain(lit);
+    const c = (JSON.parse(r.body).messages[0].content as Block[]);
+    expect(c[0].text).toStartWith("[tanuki-context:");
+    expect(c.at(-1)!.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  test("a minified tool_result replaces exactly its string literal", () => {
+    const DOC = { items: Array.from({ length: 20 }, (_, i) => ({ name: `row ${i}`, n: "N" })) };
+    const pretty = JSON.stringify(DOC, null, 2).replaceAll('"N"', "12345678901234567890");
+    const min = JSON.stringify(DOC).replaceAll('"N"', "12345678901234567890");
+    const tr = `{"content" : ${JSON.stringify(pretty)} ,"type": "tool_result","tool_use_id" :"t1"}`;
+    const raw = `${OPEN}{"role":"user","content":[ ${tr} ]}${MID}${LAST}`;
+    const r = transformRequestBody(raw, CFG)!;
+    expect(r.minifiedBlocks).toBe(1);
+    expect(r.body).toBe(raw.replace(JSON.stringify(pretty), JSON.stringify(min)));
+  });
+
+  test("the client's own tail block gains the breakpoint as one more member", () => {
+    const raw = `{"messages":[{"role":"user","content":[ {"type":"text","text":${JSON.stringify(BIG)}} , {"type":"text","text":"tail" } ]},{"role":"user","content":"latest"}]}`;
+    const r = transformRequestBody(raw, CFG)!;
+    expect(r.cached).toBe(true);
+    expect(r.body).toContain(', {"type":"text","text":"tail","cache_control":{"type":"ephemeral"} } ]}');
+    expect(r.body.endsWith(',{"role":"user","content":"latest"}]}')).toBe(true);
+  });
+
+  test("duplicate keys, escaped keys and odd whitespace do not desynchronise the spans", () => {
+    const tr = `{"type":"tool_result","tool_use_id":"t1","con\\u0074ent":"stale","content":${JSON.stringify(JSON.stringify({ a: Array.from({ length: 40 }, (_, i) => `v${i}`) }, null, 4))}}`;
+    const raw = `{ "messages" :\n[\n{ "role":"user" , "content" : [ ${tr} ] } ,\n{"role":"user","content":"x"} ] , "messages":[{"role":"user","content":[ ${tr} ]},{"role":"user","content":"x"}] }`;
+    const r = transformRequestBody(raw, CFG)!;
+    expect(r.minifiedBlocks).toBe(1);
+    expect(r.body.startsWith('{ "messages" :\n[\n{ "role":"user" , "content" : [ ')).toBe(true);
+    expect(r.body.endsWith('{"role":"user","content":"x"}] }')).toBe(true);
+    const got = JSON.parse(r.body).messages[0].content[0].content as string;
+    expect(got).toBe(JSON.stringify({ a: Array.from({ length: 40 }, (_, i) => `v${i}`) }));
+  });
+});
+
+// ------------------------------------------------ T1b memoised minify
+describe("memoised minify (T1b)", () => {
+  const doc = (n: number) =>
+    JSON.stringify(
+      { items: Array.from({ length: 350 }, (_, i) => ({ id: `n${n}-${i}`, name: `row ${i}`, note: "keep  these\tspaces", tags: ["a", "b"] })) },
+      null,
+      2,
+    );
+
+  test("200-message history of pretty-JSON tool results: second call on the session is a fraction of the first", () => {
+    const kb = Math.round(doc(0).length / 1024);
+    const messages = Array.from({ length: 200 }, (_, n) => msg("user", [{ type: "tool_result", tool_use_id: `t${n}`, content: doc(n) }]));
+    const raw = JSON.stringify({ model: "claude-sonnet-4", messages });
+    // imaging and the auto breakpoint off: this measures the minify + bookkeeping path (imaging has its own memo)
+    const cfg = { ...CFG, minChars: 1e9, autoCache: false };
+    // A timing ratio on a shared machine: up to three fresh-session attempts, the
+    // test passes on the first that meets both bounds and prints every attempt.
+    let ok = false;
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      const s = newSession();
+      let t = performance.now();
+      const first = transformRequestBody(raw, cfg, s)!;
+      const t1 = performance.now() - t;
+      // the warm call, best of three: one GC pause must not fail a ratio test
+      let t2 = Infinity;
+      let second = first;
+      for (let k = 0; k < 3; k++) {
+        t = performance.now();
+        second = transformRequestBody(raw, cfg, s)!;
+        t2 = Math.min(t2, performance.now() - t);
+      }
+      console.log(`memo timing #${attempt + 1}: ${messages.length} messages x ${kb} KB pretty JSON (${(raw.length / 1e6).toFixed(1)} MB): first ${t1.toFixed(0)} ms, second ${t2.toFixed(0)} ms (${((100 * t2) / t1).toFixed(0)} %)`);
+      expect(first.minifiedBlocks).toBe(200);
+      expect(second.body).toBe(first.body);
+      ok = t1 < 1000 && t2 < 0.2 * t1;
+    }
+    expect(ok).toBe(true);
+  });
+
+  test("already-compact JSON is never parsed (whitespace pre-check) and stays untouched", () => {
+    const compact = JSON.stringify({ items: Array.from({ length: 600 }, (_, i) => ({ id: i, name: `row ${i}` })) });
+    const s = newSession();
+    const r = transformRequestBody(JSON.stringify({ messages: [msg("user", [{ type: "tool_result", tool_use_id: "t", content: compact }])] }), CFG, s)!;
+    expect(r.changed).toBe(false);
+    expect([...s.minifyMemo.values()].map((m) => m.min)).toEqual([null]); // the verdict is remembered
+  });
+
+  test("the image memo is keyed by config: another font in the same session images afresh", () => {
+    const raw = JSON.stringify({ messages: [msg("user", BIG), msg("user", "x")] });
+    const tiny = { ...CFG, font: "tiny" as const };
+    const s = newSession();
+    const normal = transformRequestBody(raw, CFG, s)!;
+    const other = transformRequestBody(raw, tiny, s)!;
+    expect(other.body).toBe(transformRequestBody(raw, tiny)!.body); // == a cold session's answer
+    expect(other.body).not.toBe(normal.body);
+    expect(transformRequestBody(raw, CFG, s)!.body).toBe(normal.body); // and back again
+    expect(s.imageMemo.size).toBe(2);
+  });
+
+  test("the memo never changes the bytes: warm and cold sessions agree", () => {
+    const raw = JSON.stringify({ messages: [msg("user", [{ type: "tool_result", tool_use_id: "t", content: doc(1) }]), msg("assistant", "ok")] });
+    const cold = transformRequestBody(raw, CFG)!;
+    const s = newSession();
+    transformRequestBody(raw, CFG, s);
+    expect(transformRequestBody(raw, CFG, s)!.body).toBe(cold.body);
+  });
+});
+
+// ------------------------------------------------ T8a automatic cache breakpoint
+describe("automatic cache breakpoint (T8a)", () => {
+  const conv = (n: number, first: unknown = "q0", extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      model: "claude-sonnet-4",
+      messages: [msg("user", first), msg("assistant", "a0"), msg("user", "q1"), msg("assistant", "a1"), msg("user", "q2")].slice(0, n),
+      ...extra,
+    });
+
+  test("first two requests untouched, the third gets exactly one breakpoint before the recency window", () => {
+    const s = newSession();
+    const r1 = transformRequestBody(conv(1), CFG, s)!;
+    const r2 = transformRequestBody(conv(3), CFG, s)!;
+    expect(r1.changed || r2.changed || r1.autoCache || r2.autoCache).toBe(false);
+    const r3 = transformRequestBody(conv(5), CFG, s)!;
+    expect(r3.autoCache).toBe(true);
+    // the same literal becomes the one text block that carries it; nothing else moves
+    expect(r3.body).toBe(conv(5).replace('"content":"a1"', '"content":[{"type":"text","text":"a1","cache_control":{"type":"ephemeral"}}]'));
+    expect(r3.body.split("cache_control").length - 1).toBe(1);
+  });
+
+  test("a client breakpoint on any message block suppresses it", () => {
+    const s = newSession();
+    const client = [{ type: "text", text: "q0", cache_control: { type: "ephemeral" } }];
+    for (const n of [1, 3, 5]) {
+      const r = transformRequestBody(conv(n, client), CFG, s)!;
+      expect(r.autoCache).toBe(false);
+      expect(r.changed).toBe(false);
+    }
+  });
+
+  test("system/tools breakpoints count toward the ceiling of 4", () => {
+    const four = [0, 1, 2, 3].map(() => ({ type: "text", text: "x", cache_control: { type: "ephemeral" } }));
+    for (const [system, expected] of [[four.slice(0, 3), true], [four, false]] as const) {
+      const s = newSession();
+      transformRequestBody(conv(1, "q0", { system }), CFG, s);
+      transformRequestBody(conv(3, "q0", { system }), CFG, s);
+      expect(transformRequestBody(conv(5, "q0", { system }), CFG, s)!.autoCache).toBe(expected);
+    }
+  });
+
+  test("a prefix that keeps changing earns none; TANUKI_AUTO_CACHE=off, cfg and a missing session also opt out", () => {
+    const s = newSession();
+    for (const n of [1, 3, 5, 5]) {
+      // message 0 differs on every request: the cache never held, so nothing to protect
+      const r = transformRequestBody(conv(n, `q0-${Math.random()}`), CFG, s)!;
+      expect(r.autoCache).toBe(false);
+    }
+    const warm = (cfg: ProxyCfg): boolean => {
+      const ss = newSession();
+      transformRequestBody(conv(1), cfg, ss);
+      transformRequestBody(conv(3), cfg, ss);
+      return transformRequestBody(conv(5), cfg, ss)!.autoCache;
+    };
+    expect(warm(CFG)).toBe(true);
+    expect(warm({ ...CFG, autoCache: false })).toBe(false);
+    process.env.TANUKI_AUTO_CACHE = "off";
+    try {
+      expect(warm(CFG)).toBe(false);
+    } finally {
+      delete process.env.TANUKI_AUTO_CACHE;
+    }
+    expect(transformRequestBody(conv(5), CFG)!.autoCache).toBe(false);
+  });
+
+  test("a thinking tail and an empty string cannot carry one", () => {
+    const thinking = (n: number) =>
+      JSON.stringify({ messages: [msg("user", "q0"), msg("assistant", [{ type: "thinking", thinking: "hm", signature: "s" }]), msg("user", "q1"), msg("assistant", "a"), msg("user", "q2")].slice(0, n) });
+    const s = newSession();
+    // boundary message of the 5-message request is index 3 ("a"); make it the thinking one instead
+    const body = (n: number) => thinking(n).replace('"content":"a"', '"content":[{"type":"thinking","thinking":"hm","signature":"s"}]');
+    transformRequestBody(body(1), CFG, s);
+    transformRequestBody(body(3), CFG, s);
+    const r = transformRequestBody(body(5), CFG, s)!;
+    expect(r.autoCache).toBe(false);
+    expect(r.changed).toBe(false);
+  });
+
+  test("the breakpoint lands on the client's own last block, as one more member", () => {
+    const s = newSession();
+    const head = '{"model":"m","messages":[{"role":"user","content":"q0"},{"role":"assistant","content":"a0"},{"role":"user","content":"q1"}';
+    const short = `${head}]}`;
+    const long = `${head},{"role":"assistant","content":[{"type":"text","text":"a1"},{"type":"text", "text":"a2" }]},{"role":"user","content":"q2"}]}`;
+    transformRequestBody(short, CFG, s);
+    transformRequestBody(short, CFG, s);
+    const r = transformRequestBody(long, CFG, s)!;
+    expect(r.autoCache).toBe(true);
+    expect(r.body).toBe(long.replace('"text":"a2" }', '"text":"a2","cache_control":{"type":"ephemeral"} }'));
+  });
+
+  test("the event log says so (wire)", async () => {
+    const upstream = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ usage: { input_tokens: 40, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }));
+      });
+    });
+    await new Promise<void>((ok) => upstream.listen(0, "127.0.0.1", ok));
+    const log = `/tmp/tanuki-proxy-auto-${process.pid}.jsonl`;
+    const prev = process.env.TANUKI_EVENTS;
+    process.env.TANUKI_EVENTS = log;
+    const proxy = startProxy({ ...CFG, port: 0, upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}` });
+    await new Promise<void>((ok) => proxy.on("listening", ok));
+    const port = (proxy.address() as AddressInfo).port;
+    try {
+      for (const n of [1, 3, 5]) {
+        await (await fetch(`http://127.0.0.1:${port}/v1/messages`, { method: "POST", body: conv(n) })).text();
+      }
+      await Bun.sleep(50);
+      const rows = (await Bun.file(log).text()).trim().split("\n").map((l) => JSON.parse(l));
+      expect(rows.map((r) => r.auto_cache)).toEqual([false, false, true]);
+    } finally {
+      proxy.close();
+      upstream.close();
+      rmSync(log, { force: true });
+      if (prev === undefined) delete process.env.TANUKI_EVENTS;
+      else process.env.TANUKI_EVENTS = prev;
+    }
+  });
+});
+
+// ------------------------------------------------ T8b client cache-break warning
+describe("client cache-break warning (T8b)", () => {
+  // the client rewrites message 1 on every turn (a volatile timestamp, say)
+  const turn = (n: number, tool?: string): string =>
+    JSON.stringify({
+      model: "claude-sonnet-4",
+      messages: [
+        msg("user", tool === undefined ? "q0" : [{ type: "tool_result", tool_use_id: "t", content: tool }]),
+        msg("assistant", `reply at ${n}`),
+        msg("user", "q1"),
+      ],
+    });
+
+  test("three consecutive modified breaks in an untouched message warn once, naming block and type", () => {
+    const s = newSession();
+    expect(transformRequestBody(turn(0), CFG, s)!.clientBreak).toBe(0);
+    const streak: number[] = [];
+    const warns: (string | null)[] = [];
+    for (const n of [1, 2, 3, 4, 5]) {
+      const r = transformRequestBody(turn(n), CFG, s)!;
+      streak.push(r.clientBreak);
+      warns.push(r.warn);
+    }
+    expect(streak).toEqual([1, 2, 3, 4, 5]);
+    expect(warns.slice(0, 2)).toEqual([null, null]);
+    expect(warns[2]).toContain("message 1");
+    expect(warns[2]).toContain("block 1");
+    expect(warns[2]).toContain("text");
+    expect(warns[2]).toContain("cache never holds");
+    expect(warns.slice(3)).toEqual([null, null]); // once per session
+  });
+
+  test("a clean append resets the streak", () => {
+    const s = newSession();
+    transformRequestBody(turn(0), CFG, s);
+    transformRequestBody(turn(1), CFG, s);
+    expect(transformRequestBody(turn(2), CFG, s)!.clientBreak).toBe(2);
+    // pure append of the same messages: cache intact
+    const grown = JSON.stringify({ ...JSON.parse(turn(2)), messages: [...JSON.parse(turn(2)).messages, msg("assistant", "more")] });
+    expect(transformRequestBody(grown, CFG, s)!.clientBreak).toBe(0);
+    expect(transformRequestBody(turn(3), CFG, s)!.clientBreak).toBe(1);
+  });
+
+  test("a break inside a message the proxy rewrote is not the client's", () => {
+    const s = newSession();
+    const pretty = (n: number) => JSON.stringify({ items: Array.from({ length: 30 }, (_, i) => ({ id: `v${n}-${i}`, note: "keep  spaces" })) }, null, 2);
+    for (const n of [0, 1, 2, 3, 4, 5]) {
+      const r = transformRequestBody(turn(0, pretty(n)), CFG, s)!;
+      expect(r.minifiedBlocks).toBe(1);
+      expect(r.clientBreak).toBe(0);
+      expect(r.warn).toBeNull();
+    }
+  });
+
+  test("the event row carries client_break and the estimate next to the bill (wire)", async () => {
+    const upstream = http.createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ usage: { input_tokens: 30, cache_read_input_tokens: 20, cache_creation_input_tokens: 5, output_tokens: 7 } }));
+      });
+    });
+    await new Promise<void>((ok) => upstream.listen(0, "127.0.0.1", ok));
+    const log = `/tmp/tanuki-proxy-cb-${process.pid}.jsonl`;
+    const prev = process.env.TANUKI_EVENTS;
+    process.env.TANUKI_EVENTS = log;
+    const proxy = startProxy({ ...CFG, port: 0, upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}` });
+    await new Promise<void>((ok) => proxy.on("listening", ok));
+    const port = (proxy.address() as AddressInfo).port;
+    try {
+      for (const n of [0, 1, 2, 3]) await (await fetch(`http://127.0.0.1:${port}/v1/messages`, { method: "POST", body: turn(n) })).text();
+      await Bun.sleep(50);
+      const rows = (await Bun.file(log).text()).trim().split("\n").map((l) => JSON.parse(l));
+      expect(rows.map((r) => r.client_break)).toEqual([undefined, 1, 2, 3]);
+      for (const r of rows) {
+        expect(r.billed_input_tokens).toBe(55);
+        expect(r.est_input_tokens).toBeGreaterThan(0);
+      }
+    } finally {
+      proxy.close();
+      upstream.close();
+      rmSync(log, { force: true });
+      if (prev === undefined) delete process.env.TANUKI_EVENTS;
+      else process.env.TANUKI_EVENTS = prev;
+    }
+  });
+});
+
+// ------------------------------------------------ T2b estimated vs billed
+describe("estimated vs billed (T2b)", () => {
+  test("the estimate covers system, tools, text, tool traffic and our own pages", () => {
+    const tool = { name: "get", description: "fetch a thing", input_schema: { type: "object" } };
+    const base = { model: "m", system: "You are terse.", tools: [tool], messages: [msg("user", "hello there"), msg("assistant", [{ type: "tool_use", id: "t1", name: "get", input: { k: "v" } }]), msg("user", [{ type: "tool_result", tool_use_id: "t1", content: "done" }])] };
+    const r = transformRequestBody(JSON.stringify(base), CFG)!;
+    expect(r.estTokens).toBeGreaterThan(20);
+    // more text -> larger estimate, monotonically
+    const more = transformRequestBody(JSON.stringify({ ...base, system: `${base.system} ${"Be careful and precise. ".repeat(40)}` }), CFG)!;
+    expect(more.estTokens).toBeGreaterThan(r.estTokens + 100);
+    // an imaged block is priced at its pages, not at the text it replaced
+    const imaged = transformRequestBody(JSON.stringify({ messages: [msg("user", BIG), msg("user", "latest")] }), CFG)!;
+    const asText = transformRequestBody(JSON.stringify({ messages: [msg("user", BIG), msg("user", "latest")] }), { ...CFG, minChars: 1e9 })!;
+    expect(imaged.imagedBlocks).toBe(1);
+    expect(imaged.estTokens).toBeLessThan(asText.estTokens);
+    expect(imaged.estTokens).toBeGreaterThan(200); // pages are not free
+  });
+
+  test("tanuki_stats reports estimated and billed totals and their ratio", async () => {
+    const log = `/tmp/tanuki-stats-est-${process.pid}.jsonl`;
+    const row = (est: number, input: number, read: number, create: number) => JSON.stringify({ tool: "proxy", est_input_tokens: est, input_tokens: input, cache_read_tokens: read, cache_create_tokens: create });
+    await Bun.write(log, [row(100, 60, 30, 10), row(300, 200, 100, 0), row(50, 0, 0, 0), JSON.stringify({ tool: "proxy", input_tokens: 5 })].join("\n") + "\n");
+    const prev = process.env.TANUKI_EVENTS;
+    process.env.TANUKI_EVENTS = log;
+    try {
+      const { pxStats } = await import("../src/stats.ts");
+      const { jstring } = await import("../src/serde.ts");
+      const st = pxStats() as Record<string, unknown>;
+      // the zero-billed row (an error response) and the row without an estimate are excluded
+      expect(st.estimatedInputTokens).toBe(400);
+      expect(st.billedInputTokens).toBe(400);
+      expect(jstring(st.estimatorRatioPct, false)).toBe("100.0");
+      expect(st.actualInputTokens).toBe(405);
+    } finally {
+      rmSync(log, { force: true });
+      if (prev === undefined) delete process.env.TANUKI_EVENTS;
+      else process.env.TANUKI_EVENTS = prev;
+    }
   });
 });

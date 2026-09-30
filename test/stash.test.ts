@@ -377,7 +377,7 @@ describe("find mode", () => {
     const { id } = stashText(text);
     // Top 3 = lines 3, 5, 7 (1 and 9 score less); windows [1,5] [3,7] [5,9] merge to [1,9]
     const result = fetchSlice(id, null, null, "error", 3);
-    expect(result).toMatch(/^·find· L1-9 score \d+\.\d$/m);
+    expect(result).toMatch(/^·find· L1-9 score \d+\.\d · error$/m);
     expect(result).toContain("·find· 1 words · 5 lines matched · 1 windows");
   });
 
@@ -413,7 +413,7 @@ describe("find mode", () => {
     const { id } = stashText(text);
     const result = fetchSlice(id, null, null, "error", 2);
     // Anchors: 3,6 -> windows [1,5] and [4,7] -> merged to [1,7]
-    expect(result).toMatch(/^·find· L1-7 score \d+\.\d$/m);
+    expect(result).toMatch(/^·find· L1-7 score \d+\.\d · \w+$/m);
     expect(result).toContain("·find· 1 words · 2 lines matched · 1 windows");
   });
 
@@ -508,5 +508,38 @@ describe("find mode", () => {
     const redacted = redactCredentials(result);
     expect(redacted.text).toContain("[redacted:aws-key]");
     expect(redacted.text).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  });
+
+  // T4: vocabulary gaps. Noise repeats the ask's common words; the answer only
+  // shares a synonym or a stem with the ask.
+  const vgLog = (gold: string) => {
+    const lines = Array.from({ length: 80 }, (_, i) => `t${i} INFO service request served status=200 worker-${i % 4}`);
+    lines[40] = `t40 ${gold}`;
+    return stashText(lines.join("\n")).id;
+  };
+
+  test("a synonym finds a line that shares no word with the ask, and the header says so", () => {
+    const out = fetchSlice(vgLog("FATAL panic: invariant violated"), null, null, "why did the service crash", 1);
+    expect(out).toMatch(/^·find· L39-43 score \d+\.\d · crash~$/m);
+    expect(out).not.toMatch(/·find· L1-/);
+  });
+
+  test("a stem finds an inflection, and a direct hit has no ~", () => {
+    const id = vgLog("INFO retry 3/5 upload chunk=88");
+    expect(fetchSlice(id, null, null, "retrying uploads", 1)).toMatch(/^·find· L39-43 score \d+\.\d · retrying~, uploads~$/m);
+    expect(fetchSlice(id, null, null, "retry upload", 1)).toMatch(/ · retry, upload$/m);
+  });
+
+  test("an expansion scores below a direct hit of the same length", () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `t${i} INFO poll ok`);
+    lines[5] = "t5 INFO panic ok"; // synonym only, earlier line
+    lines[30] = "t30 INFO crash ok"; // direct, same length: half weight loses to full
+    const out = fetchSlice(stashText(lines.join("\n")).id, null, null, "crash", 1);
+    expect(out).toMatch(/^·find· L29-33 score \d+\.\d · crash$/m);
+  });
+
+  test("a non-word ask word gets no expansion", () => {
+    const id = vgLog("FATAL panic: invariant violated");
+    expect(fetchSlice(id, null, null, "!!! ÉRROR", 8)).toBe("·find· 2 words · 0 lines matched");
   });
 });

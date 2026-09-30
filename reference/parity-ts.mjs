@@ -3,7 +3,7 @@
 //   node reference/parity-ts.mjs [file...]
 // Env: TANUKI_BIN (rust binary), TANUKI_TS ("bun src/cli.ts" | "node dist/cli.js")
 import { readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -74,6 +74,7 @@ writeFileSync(events, [
   JSON.stringify({ ts: 1, tool: "tanuki_render", inputTokens: 1000, cacheRead: 200, cacheCreate: 50 }),
   JSON.stringify({ ts: 2, tool: "tanuki_estimate", inputTokens: 400 }),
   JSON.stringify({ ts: 3, tool: "proxy", input_tokens: 900, cache_read_tokens: 100, output_tokens: 4500 }),
+  JSON.stringify({ ts: 4, tool: "proxy", est_input_tokens: 400, input_tokens: 200, cache_read_tokens: 100, cache_create_tokens: 100, output_tokens: 300 }),
 ].join("\n") + "\n");
 
 const files = process.argv.slice(2).length
@@ -183,6 +184,13 @@ const findText = Array.from({ length: 700 }, (_, i) => {
   return `2026-07-27T09:${String(i % 60).padStart(2, "0")} worker-${i % 6} ${w}`;
 }).join("\n") + "\n";
 const findId = createHash("sha256").update(findText, "utf8").digest("hex").slice(0, 12);
+// 0.23 find synonyms/stems/matched terms: 500 lines of mixed length so near-tied
+// scores depend on the micro-points (length norm, group idf, half-weight hits).
+const vgText = Array.from({ length: 500 }, (_, i) => {
+  const w = i % 11 === 0 ? `FATAL panic segfault in shard_${i % 9} while listening on :${8000 + i} after a long and eventful startup sequence` : i % 7 === 0 ? `WARN worker crashed restarting pool=${i % 5}` : i % 17 === 0 ? `ERROR ENOSPC disk full token 401 unauthorized` : i % 3 === 0 ? `INFO timed out waiting peer=${i}` : i % 5 === 0 ? `INFO halted stopped shutdowns=${i % 4} timeouts` : `INFO poll ok latency=${(i * 7) % 40}ms`;
+  return `2026-07-27T10:${String(i % 60).padStart(2, "0")} unit-${i % 6} ${w}`;
+}).join("\n") + "\n";
+const vgId = createHash("sha256").update(vgText, "utf8").digest("hex").slice(0, 12);
 // crush parity (0.20): 60 deterministic NDJSON rows, two IMPORTANT rows beyond
 // the head window. The ·crushed· marker carries a stash id (content hash), so
 // this also pins the canonical row serializer both selections hash through.
@@ -347,6 +355,17 @@ const requests = [
   { jsonrpc: "2.0", id: 48, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "ÉRROR İstanbul\u00a0shard_7 error", top: 32 } } },
   { jsonrpc: "2.0", id: 49, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "retry retry retry backoff the a of to in on", top: 8 } } },
   { jsonrpc: "2.0", id: 50, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: findId, find: "a b c d e f g h i j k l m n o p q r s t u v w x y z latency" } } },
+  // 0.23 (51-60): synonyms, stems, matched-terms header, near-tied scores.
+  { jsonrpc: "2.0", id: 51, method: "tools/call", params: { name: "tanuki_stash", arguments: { text: vgText } } },
+  { jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "why did the service crash", top: 8 } } },
+  { jsonrpc: "2.0", id: 53, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "retrying timeouts", top: 8 } } },
+  { jsonrpc: "2.0", id: 54, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "disk problems and unauthorized logins", top: 32 } } },
+  { jsonrpc: "2.0", id: 55, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "Crashes, PANIC! segfault?", top: 12 } } },
+  { jsonrpc: "2.0", id: 56, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "panic panic crash", top: 5 } } },
+  { jsonrpc: "2.0", id: 57, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "nothing matches xyzzy", top: 8 } } },
+  { jsonrpc: "2.0", id: 58, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "listening boot startup", top: 32 } } },
+  { jsonrpc: "2.0", id: 59, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "ÉRROR crashing", top: 4 } } },
+  { jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "stop halting shutdowns", top: 32 } } },
 ];
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
@@ -389,6 +408,81 @@ for (let i = 0; i < Math.min(tsOut.length, rsOut.length); i++) {
     check(`MCP id=${b.id ?? "?"} ${methodById.get(b.id) ?? "initialize"}`, deq(a, b),
       `ts=${JSON.stringify(a).slice(0, 400)}\n        rs=${JSON.stringify(b).slice(0, 400)}`);
   }
+}
+
+// --- run wrapper parity: crush rules + delta (0.23, ids 61-80). `run` is
+// CLI-only (no MCP tool), so each case spawns BOTH engines on a shim that
+// prints fixture bytes and exits with a recorded code; every step's stdout
+// and exit code must match byte for byte, and `expect` proves the rule under
+// test actually fired (two engines both doing nothing would also agree).
+console.log("\n== run: crush rules + delta ==");
+{
+  const shimDir = mkdtempSync(path.join(tmp, "runshim-"));
+  const fx = (f) => ({ file: path.join(ROOT, "reference", "crush", f) });
+  let n = 0;
+  const runSteps = (bin, pre, steps, env) => {
+    const stash = path.join(tmp, `run-stash-${++n}`);
+    return steps.map((s) => {
+      const src = s.file ?? path.join(shimDir, `in-${n}-${steps.indexOf(s)}`);
+      if (s.text !== undefined) writeFileSync(src, s.text);
+      const shim = path.join(shimDir, s.argv[0]);
+      writeFileSync(shim, '#!/bin/sh\ncat "$CRUSH_FIXTURE"\nexit "$CRUSH_EXIT"\n', { mode: 0o755 });
+      const r = spawnSync(bin, [...pre, "run", "--", ...s.argv], {
+        cwd: ROOT,
+        encoding: "utf8",
+        maxBuffer: 1 << 28,
+        env: { ...process.env, ...env, PATH: `${shimDir}:${process.env.PATH}`, CRUSH_FIXTURE: src, CRUSH_EXIT: String(s.exit ?? 0), TANUKI_STASH: stash },
+      });
+      return { out: r.stdout ?? "", code: r.status };
+    });
+  };
+  const runCase = (id, label, steps, expect, env = {}) => {
+    const ts = runSteps(TS[0], TS.slice(1), steps, env);
+    const rs = runSteps(BIN, [], steps, env);
+    const same = ts.every((t, i) => t.out === rs[i].out && t.code === rs[i].code);
+    const last = ts[ts.length - 1].out;
+    const fired = expect(last);
+    check(`run id=${id} ${label}`, same && fired,
+      same ? `expectation not met: ${JSON.stringify(last.slice(0, 200))}` : `ts=${JSON.stringify(ts.map((t) => t.out).join("|").slice(0, 300))}\n        rs=${JSON.stringify(rs.map((t) => t.out).join("|").slice(0, 300))}`);
+  };
+  const rule = (r) => (o) => o.split("\n")[0].includes(` · rule ${r}`);
+  const noRule = (r) => (o) => !o.split("\n")[0].includes(r);
+  const has = (s) => (o) => o.includes(s);
+  const ndSpaced = [
+    '{ "ts": "2026-09-30T10:00:00Z", "level": "info", "msg": "h\u00e9llo  w\u00f6rld\\t\\"q\\"", "n": 12345678901234567890 }',
+    '{"a" : [1 , 2 , {"b" : null}] ,\t"c" : "x   y"}',
+    '   { "ts": "2026-09-30T10:00:01Z", "level": "warn", "msg": "\u65e5\u672c\u8a9e \u2713", "f": 1.50 }   ',
+    "[ 1 , 2 , 3 ]",
+    '{ "deep": { "k": [ true , false , null ] } }',
+    '{ "z": 0 }',
+  ].join("\n") + "\n";
+  const jl = (i) => `{ "a": ${i}, "b": [ ${i}, ${i + 1} ] }`;
+  runCase(61, "ndjson: cargo test --format json fixture", [{ argv: ["cargo", "test", "--", "-Z", "unstable-options", "--format", "json", "--report-time"], exit: 101, ...fx("cargo-test-json.log") }], rule("cargo+ndjson"));
+  runCase(62, "ndjson: spaced lines, unicode, escapes, big int", [{ argv: ["ndj"], text: ndSpaced }], rule("ndjson"));
+  runCase(63, "ndjson: 3 JSON + 3 other lines fires", [{ argv: ["ndj"], text: ["Running tests", jl(1), jl(2), "warning: something", jl(3), "error: test failed", ""].join("\n") }], rule("ndjson"));
+  runCase(64, "ndjson: 3 JSON + 4 other lines does not", [{ argv: ["ndj"], text: ["Running tests", jl(1), jl(2), "{ \"a\": 1,, }", "warning: something", jl(3), "error: test failed", ""].join("\n") }], noRule("ndjson"));
+  runCase(65, "table: docker ps fixture", [{ argv: ["docker", "ps"], ...fx("docker-ps.log") }], rule("table"));
+  runCase(66, "table: ps aux fixture", [{ argv: ["ps", "aux"], ...fx("ps-aux.log") }], rule("table"));
+  runCase(67, "table: df -h fixture", [{ argv: ["df", "-h"], ...fx("df-h.log") }], rule("table"));
+  runCase(68, "table: empty cells + unicode", [{ argv: ["tbl"], text: ["NAME        STATUS     PORTS            AGE", "web-1       Running    80/tcp           3d", "api-\u00e9\u2026      Pending                     2d", "worker-3    Running    9000/tcp,22/tcp  10h", "db          Running    5432/tcp         12d", ""].join("\n") }], rule("table"));
+  runCase(69, "table: aligned but unpadded stays text", [{ argv: ["tbl"], text: ["a b c d", "e f g h", "i j k l", "m n o p", "q r s t", ""].join("\n") }], noRule("table"));
+  runCase(70, "kubectl: managedFields yaml fixture", [{ argv: ["kubectl", "get", "deployments,services,configmaps", "-A", "-o", "yaml", "--show-managed-fields"], ...fx("kubectl-get-yaml.log") }], rule("managedfields"));
+  runCase(71, "kubectl: managedFields json fixture", [{ argv: ["kubectl", "get", "deployments,services,configmaps", "-A", "-o", "json", "--show-managed-fields"], ...fx("kubectl-get-json.log") }], rule("managedfields"));
+  runCase(72, "kubectl: yaml + json variants (comma, none, nested)", [{
+    argv: ["kubectl", "get", "x"],
+    text: ["metadata:", "  managedFields:", "  - apiVersion: v1", "    manager: a", "  - apiVersion: v1", "    manager: b", "  name: x", "{", '  "m": {', '    "managedFields": [', "      {", '        "manager": "kubectl"', "      },", "      {", '        "manager": "k3s"', "      }", "    ],", '    "name": "x"', "  },", '  "o": {', '    "managedFields": [', '      { "manager": "z" }', "    ]", "  }", "}", ""].join("\n"),
+  }], rule("managedfields"));
+  runCase(73, "kubectl: yaml without managedFields keeps list-cap", [{ argv: ["kubectl", "get", "deployments,services,configmaps", "-A", "-o", "yaml"], ...fx("kubectl-get-yaml-default.log") }], rule("list-cap"));
+  runCase(74, "terraform: plan fixture (ANSI kept)", [{ argv: ["terraform", "plan"], ...fx("terraform-plan.log") }], rule("terraform"));
+  runCase(75, "terraform: apply after a change fixture", [{ argv: ["terraform", "apply", "-auto-approve"], ...fx("terraform-apply-change.log") }], rule("terraform"));
+  runCase(76, "terraform: ANSI + bracketed address + diff lookalike", [{
+    argv: ["terraform", "plan"],
+    text: ['\x1b[0m\x1b[1mrandom_pet.p[0]: Refreshing state... [id=a-b]\x1b[0m', 'module.x["a b"].aws_y.z: Refreshing state... [id=i-1]', "data.local_file.f: Reading...", "data.local_file.f: Read complete after 0s [id=abc]", "", "  # random_pet.p[0] will be updated", '      + name = "x: Reading... y"', "Plan: 0 to add, 1 to change, 0 to destroy.", ""].join("\n"),
+  }], has("[terraform: 4 progress lines dropped: 2 Refreshing state, 1 Reading, 1 Read complete]"));
+  runCase(77, "delta: cargo test, one fixed + one new", [{ argv: ["cargo", "test"], exit: 101, ...fx("cargo-test-fail-1.log") }, { argv: ["cargo", "test"], exit: 101, ...fx("cargo-test-fail-2.log") }], has("1 fixed \u00b7 1 new"));
+  runCase(78, "delta: npm test twice, identical", [{ argv: ["npm", "test"], ...fx("npm-test-1.log") }, { argv: ["npm", "test"], ...fx("npm-test-2.log") }], has("output identical"));
+  runCase(79, "delta: failing run then a tiny passing run (exit 101 -> 0)", [{ argv: ["cargo", "test"], exit: 101, ...fx("cargo-test-fail-1.log") }, { argv: ["cargo", "test"], text: "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n" }], has("exit 101 -> 0"));
+  runCase(80, "delta: TANUKI_DELTA=off leaves the second run alone", [{ argv: ["npm", "test"], ...fx("npm-test-1.log") }, { argv: ["npm", "test"], ...fx("npm-test-2.log") }], (o) => !o.includes("[tanuki delta]"), { TANUKI_DELTA: "off" });
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

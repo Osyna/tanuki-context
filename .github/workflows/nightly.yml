@@ -1,0 +1,59 @@
+name: Nightly read-back
+
+# Fidelity eval, not a gate: can a vision model still read exact strings off
+# the pages the pipeline renders? Costs real API money, so it runs only when
+# the ANTHROPIC_API_KEY repository secret exists. Forks and PR-less clones
+# without the secret skip every step after the check and finish green.
+# Results accumulate in the `readback-history` artifact (one JSON line per
+# font per night); each run downloads the previous history, appends, re-uploads.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Anthropic model to read the pages
+        default: claude-haiku-4-5
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Skip without the secret
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "ANTHROPIC_API_KEY secret not set - nightly read-back skipped"
+      - uses: actions/checkout@v4
+        if: env.ANTHROPIC_API_KEY != ''
+      - uses: oven-sh/setup-bun@v2
+        if: env.ANTHROPIC_API_KEY != ''
+      - name: Install and build
+        if: env.ANTHROPIC_API_KEY != ''
+        run: bun install && bun run build
+      - name: Fetch previous history
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          id=$(gh run list --workflow nightly.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$id" ]; then gh run download "$id" -n readback-history -D history || true; fi
+          mkdir -p history
+          touch history/readback-results.jsonl
+      - name: Read-back eval
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          node reference/readback-nightly.mjs --provider anthropic \
+            --model "${{ inputs.model || 'claude-haiku-4-5' }}" \
+            --out history/readback-results.jsonl | tee summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          name: readback-history
+          path: history/readback-results.jsonl
+          retention-days: 90

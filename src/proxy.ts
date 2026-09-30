@@ -22,6 +22,16 @@
 //!      and the API cache never sees it change. Rules 3 and 4 would break that:
 //!      skipping a block while it holds the client's breakpoint and minifying
 //!      it a turn later is exactly a cache break.
+//!   8. Byte splicing, not re-serialising: the request is scanned once for the
+//!      spans of the values that change (a minified string, an imaged block's
+//!      replacement, an added `cache_control`) and only those spans are
+//!      substituted. Key order, whitespace, number spellings, system and tools
+//!      stay the client's own bytes, so no number is ever re-printed.
+//!   9. Automatic cache breakpoint: once a session has sent two requests in a
+//!      row whose earlier messages matched the previous request, and the
+//!      client placed no `cache_control` on any message, one ephemeral
+//!      breakpoint goes on the last block before the recency window (never a
+//!      5th: Anthropic 400s on it). `--no-auto-cache` / TANUKI_AUTO_CACHE=off.
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -40,7 +50,7 @@ import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
-import { charCount, isObj, minifyJson, rnd, textTokens } from "./serde.ts";
+import { JSON_MIN_CHARS, charCount, isObj, minifyJson, rnd, rustTrim, textTokens } from "./serde.ts";
 
 // Volatile prompt shapes, same patterns as distill.ts's masks (F4). Declared
 // WITHOUT the g flag: .test() on a g-regex is stateful (lastIndex carries
@@ -98,6 +108,7 @@ export interface ProxyCfg {
   maxPages: number; // give up on absurdly large single blocks
   recencyWindow: number; // trailing messages always kept as text (default 1)
   cache: boolean; // place a cache breakpoint on the last imaged message (default on)
+  autoCache: boolean; // add one breakpoint before the recency window once the prefix holds (default on)
   verbatim: Verbatim; // sidecar next to the pages: full · lazy pointer · off
 }
 
@@ -113,11 +124,16 @@ export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   maxPages: 20,
   recencyWindow: 1,
   cache: true,
+  autoCache: true,
   verbatim: "full",
 };
 
 interface ImagedBlock {
   blocks: unknown[];
+  /** the same blocks as compact JSON, exactly the bytes spliced into the request. */
+  json: string[];
+  /** image tokens of the pages alone (0 for a pointer): the estimator's view of them. */
+  pageTok: number;
   origChars: number;
   pages: number;
   savedTokens: number;
@@ -129,6 +145,7 @@ interface ImagedBlock {
 
 /// Stage 0/0.5/1 + imaging for one text block, or null when text stays cheaper.
 function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
+  if (text.length < cfg.minChars) return null; // cheap floor first: chars <= UTF-16 units
   if (scanCredentials(text).length > 0) return null; // rule 6: never image secrets
   const origChars = charCount(text);
   if (origChars < cfg.minChars) return null;
@@ -184,6 +201,8 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
   }
   return {
     blocks,
+    json: blocks.map((b) => JSON.stringify(b)),
+    pageTok: r.tokens,
     origChars,
     pages: r.pages.length,
     savedTokens: rawTok - cost,
@@ -193,7 +212,8 @@ function maybeImage(text: string, cfg: ProxyCfg): ImagedBlock | null {
 }
 
 export interface TransformResult {
-  /** rewritten body when `changed`, else the caller must forward the original bytes. */
+  /** the original bytes with only the changed spans substituted when `changed`,
+   *  else the caller must forward the original bytes. */
   body: string;
   /** false = no block was imaged; result exists only for the diagnostics. */
   changed: boolean;
@@ -208,6 +228,17 @@ export interface TransformResult {
   savedTokensCacheAware: number;
   /** whether a cache_control breakpoint was placed on the imaged prefix. */
   cached: boolean;
+  /** whether the automatic breakpoint before the recency window was added. */
+  autoCache: boolean;
+  /** the estimator's input tokens for the request as FORWARDED (T2b): text via
+   *  textTokens, tool definitions and tool inputs canonical, our pages at their
+   *  render cost. Client-sent images and other opaque blocks count 0. */
+  estTokens: number;
+  /** consecutive requests whose cache break sits in a message the proxy did not
+   *  touch (0 = none); the caller logs it. */
+  clientBreak: number;
+  /** one-shot stderr warning text, set on the request that crosses the threshold. */
+  warn: string | null;
   // F4 diagnostics
   blocks: string[];
   cacheBreak: { index: number; kind: string; rebilled: number } | null;
@@ -242,10 +273,45 @@ export interface ProxySession {
   /// tokens once per conversation switch. The proxy is process-scoped and most
   /// clients spawn one per conversation, so this is rare.
   prevBlocks: string[];
+  /// consecutive requests whose earlier messages matched the previous request
+  /// (cache intact): the auto breakpoint waits for two.
+  stable: number;
+  /// consecutive requests that broke the cache at a `modified` message the proxy
+  /// did not touch, and whether the one-per-session warning was already printed.
+  clientBreaks: number;
+  warned: boolean;
+  /// block text hash -> minify verdict, bounded like seenBlocks: a block is
+  /// scanned and parsed once per session, not once per request (T1b).
+  minifyMemo: Map<string, MinifyMemo>;
+  memoChars: number;
+  /// imaging is a pure function of (block text, config), and rendering pages is
+  /// the expensive step: the verdict (null = "text stays cheaper" included) is
+  /// memoised per session like the minify one. Holds only immutable data.
+  imageMemo: Map<string, ImagedBlock | null>;
+  imageChars: number;
+}
+
+/// `min` null = "leave it alone" (not JSON, too small, or under the 10 % saving).
+interface MinifyMemo {
+  min: string | null;
+  enc: string; // JSON.stringify(min): the bytes spliced in
+  saved: number; // textTokens(original) - textTokens(min)
+  minTok: number; // textTokens(min): the estimator needs it every request
 }
 
 export function newSession(): ProxySession {
-  return { seenBlocks: new Set(), cachingSeen: false, prevBlocks: [] };
+  return {
+    seenBlocks: new Set(),
+    cachingSeen: false,
+    prevBlocks: [],
+    stable: 0,
+    clientBreaks: 0,
+    warned: false,
+    minifyMemo: new Map(),
+    memoChars: 0,
+    imageMemo: new Map(),
+    imageChars: 0,
+  };
 }
 
 
@@ -270,6 +336,171 @@ function cacheAwareSaved(
   return rnd(rawTok * readMult) - rnd(costTok * writeMult);
 }
 
+// ---------------------------------------------------------------- splicing
+/// Where one JSON value sits in the ORIGINAL request text, plus the few
+/// children the rewriter addresses. Offsets are UTF-16 indices here and byte
+/// offsets in the Rust engine; the spliced output is the same text either way.
+interface Span {
+  s: number;
+  e: number;
+  items?: Span[]; // array elements
+  content?: Span; // member "content" (the root's "messages")
+  text?: Span; // member "text"
+  last: number; // end of the last member/element value, -1 when empty
+}
+
+const wsEnd = (raw: string, i: number): number => {
+  while (i < raw.length) {
+    const c = raw.charCodeAt(i);
+    if (c !== 0x20 && c !== 0x0a && c !== 0x0d && c !== 0x09) break;
+    i++;
+  }
+  return i;
+};
+
+/// End of the string literal opening at `i`: the closing quote is the first
+/// one preceded by an even run of backslashes.
+function strEnd(raw: string, i: number): number {
+  let j = i + 1;
+  for (;;) {
+    j = raw.indexOf('"', j);
+    if (j < 0) throw new Error("splice: unterminated string");
+    let k = j - 1;
+    while (raw.charCodeAt(k) === 0x5c) k--;
+    if ((j - 1 - k) % 2 === 0) return j + 1;
+    j++;
+  }
+}
+
+/// End of any value starting at `i` (no allocation: system and tools go by here).
+function valEnd(raw: string, i: number): number {
+  const c = raw.charCodeAt(i);
+  if (c === 0x22) return strEnd(raw, i);
+  if (c === 0x7b || c === 0x5b) {
+    let d = 0;
+    for (;;) {
+      if (i >= raw.length) throw new Error("splice: unterminated value");
+      const x = raw.charCodeAt(i);
+      if (x === 0x22) {
+        i = strEnd(raw, i);
+        continue;
+      }
+      if (x === 0x7b || x === 0x5b) d++;
+      else if ((x === 0x7d || x === 0x5d) && --d === 0) return i + 1;
+      i++;
+    }
+  }
+  while (i < raw.length) {
+    const x = raw.charCodeAt(i);
+    if (x === 0x2c || x === 0x7d || x === 0x5d || x === 0x20 || x === 0x0a || x === 0x0d || x === 0x09) break;
+    i++;
+  }
+  return i;
+}
+
+const keyAt = (raw: string, s: number, e: number): string => {
+  const k = raw.slice(s + 1, e - 1);
+  return k.includes("\\") ? (JSON.parse(raw.slice(s, e)) as string) : k;
+};
+
+/// Duplicate keys: the last one wins, exactly like JSON.parse and serde_json.
+function objSpan(raw: string, s: number, root: boolean): Span {
+  const sp: Span = { s, e: 0, last: -1 };
+  let i = wsEnd(raw, s + 1);
+  if (raw.charCodeAt(i) === 0x7d) {
+    sp.e = i + 1;
+    return sp;
+  }
+  for (;;) {
+    const ke = strEnd(raw, i);
+    const key = keyAt(raw, i, ke);
+    i = wsEnd(raw, wsEnd(raw, ke) + 1);
+    let end: number;
+    if (root ? key === "messages" : key === "content") {
+      sp.content = valSpan(raw, i);
+      end = sp.content.e;
+    } else {
+      end = valEnd(raw, i);
+      if (!root && key === "text") sp.text = { s: i, e: end, last: -1 };
+    }
+    sp.last = end;
+    i = wsEnd(raw, end);
+    if (raw.charCodeAt(i) === 0x2c) {
+      i = wsEnd(raw, i + 1);
+      continue;
+    }
+    sp.e = i + 1;
+    return sp;
+  }
+}
+
+function arrSpan(raw: string, s: number): Span {
+  const sp: Span = { s, e: 0, items: [], last: -1 };
+  let i = wsEnd(raw, s + 1);
+  if (raw.charCodeAt(i) === 0x5d) {
+    sp.e = i + 1;
+    return sp;
+  }
+  for (;;) {
+    const v = valSpan(raw, i);
+    sp.items!.push(v);
+    sp.last = v.e;
+    i = wsEnd(raw, v.e);
+    if (raw.charCodeAt(i) === 0x2c) {
+      i = wsEnd(raw, i + 1);
+      continue;
+    }
+    sp.e = i + 1;
+    return sp;
+  }
+}
+
+function valSpan(raw: string, i: number): Span {
+  const c = raw.charCodeAt(i);
+  if (c === 0x7b) return objSpan(raw, i, false);
+  if (c === 0x5b) return arrSpan(raw, i);
+  return { s: i, e: valEnd(raw, i), last: -1 };
+}
+
+/// One span per element of the top-level "messages" array.
+function scanMessages(raw: string): Span[] {
+  const at = wsEnd(raw, 0);
+  if (raw.charCodeAt(at) !== 0x7b) throw new Error("splice: body is not an object");
+  const items = objSpan(raw, at, true).content?.items;
+  if (items === undefined) throw new Error("splice: no messages array");
+  return items;
+}
+
+const need = <T>(v: T | undefined): T => {
+  if (v === undefined) throw new Error("splice: span missing for a parsed value");
+  return v;
+};
+const kids = (sp: Span | undefined): Span[] => need(need(sp).items);
+
+/// A replacement of raw[s, e): `parts` joined by commas, wrapped in [] when a
+/// string value becomes a block array. A zero-length one is an insertion.
+interface Rep {
+  e: number;
+  parts: string[];
+  wrap: boolean;
+}
+
+const CC = '"cache_control":{"type":"ephemeral"}';
+/** a generated `{...}` block gains the breakpoint as its last member. */
+const withCC = (json: string): string => `${json.slice(0, -1)},${CC}}`;
+
+function splice(raw: string, reps: Map<number, Rep>): string {
+  let out = "";
+  let pos = 0;
+  for (const s of [...reps.keys()].sort((a, b) => a - b)) {
+    if (s < pos) continue; // nested inside a replacement already made
+    const r = reps.get(s)!;
+    out += raw.slice(pos, s) + (r.wrap ? `[${r.parts.join(",")}]` : r.parts.join(","));
+    pos = r.e;
+  }
+  return out + raw.slice(pos);
+}
+
 /// Anthropic accepts at most 4 `cache_control` breakpoints per request and
 /// 400s on a 5th, so count the ones the client already placed (system, tools
 /// and message blocks) before adding ours. Fail-open: a request that worked
@@ -289,39 +520,96 @@ function countBreakpoints(body: Record<string, unknown>): number {
   return n;
 }
 
-/// A number JSON.parse -> JSON.stringify would re-spell: a run of 16+ digits
-/// outside strings (an integer past 2^53, or a float with more digits than a
-/// double keeps). A tool_use id or input like that must reach the API as the
-/// model wrote it, so such a request is never rewritten. Mirrored in proxy.rs.
-function hasWideNumber(raw: string): boolean {
-  let inStr = false;
-  let esc = false;
-  let run = 0;
-  for (let i = 0; i < raw.length; i++) {
-    const c = raw.charCodeAt(i);
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === 0x5c) esc = true;
-      else if (c === 0x22) inStr = false;
-    } else if (c === 0x22) {
-      inStr = true;
-      run = 0;
-    } else if (c >= 0x30 && c <= 0x39) {
-      if (++run >= 16) return true;
-    } else {
-      run = 0;
-    }
+/// The client caches on its own: any message block already carries a breakpoint.
+function clientCaches(messages: unknown[]): boolean {
+  for (const m of messages) {
+    if (!isObj(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) if (isObj(b) && b.cache_control !== undefined) return true;
   }
   return false;
 }
 
-/// Rewrite a /v1/messages body. Returns null when nothing changed (caller
-/// forwards the original bytes untouched).
+/// Cheap upper bound before the JSON.parse in minifyJson: one pass counting the
+/// whitespace outside strings (plus what trim would take off the ends) and
+/// skipping a document that cannot reach the 10 % saving - already-compact JSON
+/// is the common case and costs a full parse to learn nothing. Conservative on
+/// purpose (never skips what minifyJson would rewrite); the real decision stays
+/// minifyJson's. Mirrored in proxy.rs.
+function couldMinify(text: string): boolean {
+  let inStr = false;
+  let esc = false;
+  let ws = 0;
+  let low = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xdc00 && c <= 0xdfff) low++;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === 0x5c) esc = true;
+      else if (c === 0x22) inStr = false;
+    } else if (c === 0x22) inStr = true;
+    else if (c === 0x20 || c === 0x09 || c === 0x0d || c === 0x0a) ws++;
+  }
+  const removed = ws + (text.length - rustTrim(text).length);
+  return removed * 10 >= text.length - low;
+}
+
+/// The estimator's input tokens for a request body (T2b), see TransformResult.
+function estimateTokens(body: Record<string, unknown>, preTok: Map<object, number>): number {
+  let n = 0;
+  const txt = (v: unknown): void => {
+    if (typeof v === "string") n += textTokens(v);
+  };
+  if (typeof body.system === "string") txt(body.system);
+  else if (Array.isArray(body.system)) for (const b of body.system) if (isObj(b)) txt(b.text);
+  if (Array.isArray(body.tools)) for (const t of body.tools) n += textTokens(canonJson(t));
+  for (const m of body.messages as unknown[]) {
+    if (!isObj(m)) continue;
+    if (typeof m.content === "string") {
+      txt(m.content);
+      continue;
+    }
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (!isObj(b)) continue;
+      if (b.type === "text") txt(b.text);
+      else if (b.type === "thinking") txt(b.thinking);
+      else if (b.type === "tool_use") {
+        txt(b.name);
+        if (b.input !== undefined) n += textTokens(canonJson(b.input));
+      } else if (b.type === "tool_result") {
+        if (typeof b.content === "string") n += preTok.get(b) ?? textTokens(b.content);
+        else if (Array.isArray(b.content)) {
+          for (const it of b.content) {
+            if (!isObj(it) || it.type !== "text") continue;
+            const known = preTok.get(it);
+            if (known !== undefined) n += known;
+            else txt(it.text);
+          }
+        }
+      }
+    }
+  }
+  return n;
+}
+
+/// Rewrite a /v1/messages body. Returns null when the body is not a messages
+/// request - or when anything in the scan/splice fails (a body nested past the
+/// stack, a span that does not match the parsed tree): the caller forwards the
+/// original bytes untouched, and this never throws whatever the body.
 export function transformRequestBody(
   raw: string,
   cfg: ProxyCfg,
   session?: ProxySession,
 ): TransformResult | null {
+  try {
+    return rewriteBody(raw, cfg, session);
+  } catch {
+    return null;
+  }
+}
+
+function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefined): TransformResult | null {
   let body: unknown;
   try {
     body = JSON.parse(raw);
@@ -329,10 +617,24 @@ export function transformRequestBody(
     return null;
   }
   if (!isObj(body) || !Array.isArray(body.messages)) return null;
+  const msgs: unknown[] = body.messages;
+  // Spans of the values the rewrite may replace, in the ORIGINAL bytes. The
+  // parsed tree below is still edited in step (diagnostics hash what the API
+  // will see), but it is never printed: the output is `raw` with `reps` applied.
+  const spans = scanMessages(raw);
+  if (spans.length !== msgs.length) throw new Error("splice: span/message count mismatch");
+  const reps = new Map<number, Rep>();
+  const put = (sp: Span, parts: string[], wrap = false): void => {
+    reps.set(sp.s, { e: sp.e, parts: [...parts], wrap }); // a copy: the breakpoint edits it
+  };
+  const touched = new Set<number>(); // messages the proxy rewrote (T8b)
+  const preTok = new Map<object, number>(); // minified tool_result texts: tokens already known
+  const clientCC = clientCaches(msgs);
 
   let imagedBlocks = 0;
   let origChars = 0;
   let imageCount = 0;
+  let pageTok = 0;
   let savedTokens = 0;
   let savedTokensCacheAware = 0;
   // index of the last message we imaged into; where the cache breakpoint goes
@@ -348,6 +650,22 @@ export function transformRequestBody(
   // pessimisation, not an optimisation.
   const seen = new Map<string, number>(); // exact block text -> page count
 
+  const cfgKey = [cfg.level, cfg.distill, cfg.table, cfg.codebook, cfg.font, cfg.minChars, cfg.ratio, cfg.minSave, cfg.maxPages, cfg.verbatim].join("|");
+  const memoImage = (text: string): ImagedBlock | null => {
+    if (session === undefined || text.length < cfg.minChars) return maybeImage(text, cfg);
+    const key = createHash("sha256").update(`${cfgKey}\x00${text}`, "utf8").digest("hex");
+    const hit = session.imageMemo.get(key);
+    if (hit !== undefined) return hit;
+    const done = maybeImage(text, cfg);
+    // ponytail: bounded like the minify memo; a full one restarts empty
+    if (session.imageMemo.size >= 512 || session.imageChars > 64_000_000) {
+      session.imageMemo.clear();
+      session.imageChars = 0;
+    }
+    session.imageMemo.set(key, done);
+    session.imageChars += done === null ? 0 : done.json.reduce((n, j) => n + j.length, 0);
+    return done;
+  };
   const imageBlock = (text: string): ImagedBlock | null => {
     const priorPages = seen.get(text);
     let done: ImagedBlock | null;
@@ -358,8 +676,11 @@ export function transformRequestBody(
         `(${priorPages} PNG page(s)); not repeated]`;
       const rawTok = textTokens(text);
       const costTok = textTokens(marker);
+      const blocks = [{ type: "text", text: marker }];
       done = {
-        blocks: [{ type: "text", text: marker }],
+        blocks,
+        json: blocks.map((b) => JSON.stringify(b)),
+        pageTok: 0,
         origChars: chars,
         pages: 0,
         savedTokens: rawTok - costTok,
@@ -367,13 +688,14 @@ export function transformRequestBody(
         costTok,
       };
     } else {
-      done = maybeImage(text, cfg);
+      done = memoImage(text);
       if (done) seen.set(text, done.pages);
     }
     if (done) {
       imagedBlocks++;
       origChars += done.origChars;
       imageCount += done.pages;
+      pageTok += done.pageTok;
       savedTokens += done.savedTokens;
       // ledger only, never bytes: was this exact block imaged in an earlier
       // request of this session?
@@ -401,39 +723,73 @@ export function transformRequestBody(
   // rule 7: lossless JSON minify of tool results, everywhere, before imaging.
   // Ledger: the block was never sent pretty, so there is no flip - with cache
   // traffic seen, the saving rides a cache write the first time and reads after.
+  // T1b: the verdict (and its saving and its wire bytes) is memoised per session
+  // by block hash, so a history that grows by two messages a turn pays for the
+  // two new blocks, not for all of them again.
   let minifiedBlocks = 0;
   const minifyOff = process.env.TANUKI_MINIFY === "off";
-  const minify = (text: string): string | null => {
-    const m = minifyOff ? null : minifyJson(text);
-    if (m === null) return null;
-    minifiedBlocks++;
-    const saved = textTokens(text) - textTokens(m);
-    savedTokens += saved;
+  const minify = (text: string): { min: string; enc: string; tok: number } | null => {
+    // O(1) rejects first: below the size floor, or not an object/array once trimmed.
+    if (minifyOff || text.length < JSON_MIN_CHARS) return null;
+    const head = rustTrim(text)[0];
+    if (head !== "{" && head !== "[") return null;
     const hash = createHash("sha256").update(`json\x00${text}`, "utf8").digest("hex");
+    let memo = session?.minifyMemo.get(hash);
+    if (memo === undefined) {
+      const m = couldMinify(text) ? minifyJson(text) : null;
+      const minTok = m === null ? 0 : textTokens(m);
+      memo = m === null ? { min: null, enc: "", saved: 0, minTok } : { min: m, enc: JSON.stringify(m), saved: textTokens(text) - minTok, minTok };
+      if (session !== undefined) {
+        // ponytail: bounded like seenBlocks; a full memo restarts empty (pure
+        // cache, never changes the bytes), 32M chars caps the memory.
+        if (session.minifyMemo.size >= 1024 || session.memoChars > 32_000_000) {
+          session.minifyMemo.clear();
+          session.memoChars = 0;
+        }
+        session.minifyMemo.set(hash, memo);
+        session.memoChars += text.length;
+      }
+    }
+    if (memo.min === null) return null;
+    minifiedBlocks++;
+    savedTokens += memo.saved;
     const replayed = session !== undefined && session.seenBlocks.has(hash);
     savedTokensCacheAware +=
-      session === undefined || !session.cachingSeen ? saved : rnd(saved * (replayed ? rate.cacheReadMult : rate.cacheWriteMult));
+      session === undefined || !session.cachingSeen ? memo.saved : rnd(memo.saved * (replayed ? rate.cacheReadMult : rate.cacheWriteMult));
     if (session !== undefined && !replayed) {
       if (session.seenBlocks.size >= 1024) session.seenBlocks.clear();
       session.seenBlocks.add(hash);
     }
-    return m;
+    return { min: memo.min, enc: memo.enc, tok: memo.minTok };
   };
-  // A body we cannot re-serialise without re-spelling a number is forwarded
-  // byte-for-byte: no rewrite at all, diagnostics only.
-  const frozen = hasWideNumber(raw);
-  for (const m of frozen ? [] : body.messages) {
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
     if (!isObj(m) || !Array.isArray(m.content)) continue;
-    for (const block of m.content) {
+    const bspans = kids(spans[i].content);
+    for (let j = 0; j < m.content.length; j++) {
+      const block = m.content[j];
       if (!isObj(block) || block.type !== "tool_result") continue;
+      const bs = bspans[j];
       if (typeof block.content === "string") {
-        const t = minify(block.content);
-        if (t !== null) block.content = t;
+        const r = minify(block.content);
+        if (r !== null) {
+          block.content = r.min;
+          preTok.set(block, r.tok);
+          put(need(bs.content), [r.enc]);
+          touched.add(i);
+        }
       } else if (Array.isArray(block.content)) {
-        for (const item of block.content) {
+        const ispans = kids(bs.content);
+        for (let k = 0; k < block.content.length; k++) {
+          const item = block.content[k];
           if (isObj(item) && item.type === "text" && typeof item.text === "string") {
-            const t = minify(item.text);
-            if (t !== null) item.text = t;
+            const r = minify(item.text);
+            if (r !== null) {
+              item.text = r.min;
+              preTok.set(item, r.tok);
+              put(need(ispans[k].text), [r.enc]);
+              touched.add(i);
+            }
           }
         }
       }
@@ -443,8 +799,8 @@ export function transformRequestBody(
   // rule 3: keep the latest recencyWindow message(s) as text (VIST slow-fast:
   // recent turns reasoned over precisely, distant bulk imaged). Default 1.
   const keep = Math.max(1, cfg.recencyWindow);
-  for (let i = 0; i < (frozen ? 0 : body.messages.length - keep); i++) {
-    const m = body.messages[i];
+  for (let i = 0; i < msgs.length - keep; i++) {
+    const m = msgs[i];
     // Anthropic accepts image blocks only in user-role content.
     if (!isObj(m) || m.role !== "user") continue;
 
@@ -452,32 +808,43 @@ export function transformRequestBody(
       const done = imageBlock(m.content);
       if (done) {
         m.content = done.blocks;
+        put(need(spans[i].content), done.json, true);
+        touched.add(i);
         lastImagedMsg = i;
       }
       continue;
     }
     if (!Array.isArray(m.content)) continue;
     const before = imagedBlocks;
+    const bspans = kids(spans[i].content);
 
     const out: unknown[] = [];
-    for (const block of m.content) {
+    for (let j = 0; j < m.content.length; j++) {
+      const block = m.content[j];
       if (!isObj(block) || block.cache_control !== undefined) {
         out.push(block); // rule 4
         continue;
       }
       if (block.type === "text" && typeof block.text === "string") {
         const done = imageBlock(block.text);
-        if (done) out.push(...done.blocks);
-        else out.push(block);
+        if (done) {
+          out.push(...done.blocks);
+          put(bspans[j], done.json);
+        } else out.push(block);
         continue;
       }
       if (block.type === "tool_result") {
         if (typeof block.content === "string") {
           const done = imageBlock(block.content);
-          if (done) block.content = done.blocks;
+          if (done) {
+            block.content = done.blocks;
+            put(need(bspans[j].content), done.json, true);
+          }
         } else if (Array.isArray(block.content)) {
+          const ispans = kids(bspans[j].content);
           const inner: unknown[] = [];
-          for (const item of block.content) {
+          for (let k = 0; k < block.content.length; k++) {
+            const item = block.content[k];
             if (
               isObj(item) &&
               item.type === "text" &&
@@ -487,6 +854,7 @@ export function transformRequestBody(
               const done = imageBlock(item.text);
               if (done) {
                 inner.push(...done.blocks);
+                put(ispans[k], done.json);
                 continue;
               }
             }
@@ -498,7 +866,10 @@ export function transformRequestBody(
       out.push(block);
     }
     m.content = out;
-    if (imagedBlocks > before) lastImagedMsg = i;
+    if (imagedBlocks > before) {
+      lastImagedMsg = i;
+      touched.add(i);
+    }
   }
 
   // F4 diagnostics run on EVERY parseable request, transform or not: a cache
@@ -510,88 +881,112 @@ export function transformRequestBody(
 
   // F4 diagnostics: collect block hashes for all content blocks
   const blocks: string[] = [];
-  if (Array.isArray(body.messages)) {
-    for (const m of body.messages) {
-      if (!isObj(m)) continue;
-      const role = typeof m.role === "string" ? m.role : "";
-      const content = m.content;
-      
-      // Handle string content
-      if (typeof content === "string") {
+  const flatMsg: number[] = []; // message index of every hashed block (T8b)
+  const flatType: string[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!isObj(m)) continue;
+    const role = typeof m.role === "string" ? m.role : "";
+    const content = m.content;
+
+    // Handle string content
+    if (typeof content === "string") {
+      const hash = createHash("sha256")
+        .update(`${role}\x00`)
+        .update(canonJson(content), "utf8")
+        .digest("hex")
+        .slice(0, 12);
+      blocks.push(hash);
+      flatMsg.push(i);
+      flatType.push("text");
+      continue;
+    }
+
+    // Handle array content
+    if (Array.isArray(content)) {
+      for (const block of content) {
         const hash = createHash("sha256")
-          .update(`${role}\x00${canonJson(content)}`, "utf8")
+          .update(`${role}\x00`)
+          .update(canonJson(block), "utf8")
           .digest("hex")
           .slice(0, 12);
         blocks.push(hash);
-        continue;
-      }
-      
-      // Handle array content
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          const hash = createHash("sha256")
-            .update(`${role}\x00${canonJson(block)}`, "utf8")
-            .digest("hex")
-            .slice(0, 12);
-          blocks.push(hash);
-        }
+        flatMsg.push(i);
+        flatType.push(isObj(block) && typeof block.type === "string" ? block.type : "block");
       }
     }
   }
-  
+
   // F4: cacheBreak analysis vs previous request
   let cacheBreak: { index: number; kind: string; rebilled: number } | null = null;
+  let clientBreak = 0;
+  let warn: string | null = null;
   if (session !== undefined && session.prevBlocks.length > 0) {
     const brk = attributeBreak(session.prevBlocks, blocks);
     if (brk !== null) {
       // Calculate rebilled tokens from text blocks starting at break index
       let rebilled = 0;
       let blockIdx = 0;
-      if (Array.isArray(body.messages)) {
-        for (const m of body.messages) {
-          if (!isObj(m)) continue;
-          const content = m.content;
-          
-          if (typeof content === "string") {
-            if (blockIdx >= brk.index) {
-              rebilled += textTokens(content);
+      for (const m of msgs) {
+        if (!isObj(m)) continue;
+        const content = m.content;
+
+        if (typeof content === "string") {
+          if (blockIdx >= brk.index) {
+            rebilled += textTokens(content);
+          }
+          blockIdx++;
+          continue;
+        }
+
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (blockIdx >= brk.index && isObj(block) && block.type === "text" && typeof block.text === "string") {
+              rebilled += textTokens(block.text);
             }
             blockIdx++;
-            continue;
-          }
-          
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (blockIdx >= brk.index && isObj(block) && block.type === "text" && typeof block.text === "string") {
-                rebilled += textTokens(block.text);
-              }
-              blockIdx++;
-            }
           }
         }
       }
       cacheBreak = { index: brk.index, kind: brk.kind, rebilled };
     }
+    // T8a/T8b streaks. `stable` counts requests whose earlier messages matched
+    // the previous request; a `modified` break inside a message we did not
+    // rewrite is the client's own doing (a proxy-made one, e.g. the recency
+    // window advancing over a block, sits in a touched message).
+    if (brk === null) {
+      session.stable++;
+      session.clientBreaks = 0;
+    } else {
+      session.stable = 0;
+      session.clientBreaks =
+        brk.kind === "modified" && !touched.has(flatMsg[brk.index]) ? session.clientBreaks + 1 : 0;
+      if (session.clientBreaks >= 3 && !session.warned) {
+        session.warned = true;
+        warn =
+          `warning: your client rewrites message ${flatMsg[brk.index]} (block ${brk.index}, ${flatType[brk.index]}) ` +
+          `every turn - the cache never holds`;
+      }
+    }
+    clientBreak = session.clientBreaks;
   }
-  
+
   // F4: toolTax - only when tools advertised AND at least one tool_use exists
   let toolTax: { unused: string[]; tokens: number } | null = null;
   if (Array.isArray(body.tools) && body.tools.length > 0) {
     // Check if any tool_use blocks exist
     let hasToolUse = false;
-    if (Array.isArray(body.messages)) {
-      for (const m of body.messages) {
-        if (!isObj(m) || !Array.isArray(m.content)) continue;
-        for (const block of m.content) {
-          if (isObj(block) && block.type === "tool_use") {
-            hasToolUse = true;
-            break;
-          }
+    for (const m of msgs) {
+      if (!isObj(m) || !Array.isArray(m.content)) continue;
+      for (const block of m.content) {
+        if (isObj(block) && block.type === "tool_use") {
+          hasToolUse = true;
+          break;
         }
-        if (hasToolUse) break;
       }
+      if (hasToolUse) break;
     }
-    
+
     if (hasToolUse) {
       // Collect advertised tool names
       const advertised = new Set<string>();
@@ -600,26 +995,24 @@ export function transformRequestBody(
           advertised.add(t.name);
         }
       }
-      
+
       // Collect used tool names
       const used = new Set<string>();
-      if (Array.isArray(body.messages)) {
-        for (const m of body.messages) {
-          if (!isObj(m) || !Array.isArray(m.content)) continue;
-          for (const block of m.content) {
-            if (isObj(block) && block.type === "tool_use" && typeof block.name === "string") {
-              used.add(block.name);
-            }
+      for (const m of msgs) {
+        if (!isObj(m) || !Array.isArray(m.content)) continue;
+        for (const block of m.content) {
+          if (isObj(block) && block.type === "tool_use" && typeof block.name === "string") {
+            used.add(block.name);
           }
         }
       }
-      
+
       // Calculate unused
       const unused: string[] = [];
       for (const name of advertised) {
         if (!used.has(name)) unused.push(name);
       }
-      
+
       if (unused.length > 0) {
         unused.sort();
         const first8 = unused.slice(0, 8);
@@ -633,7 +1026,7 @@ export function transformRequestBody(
       }
     }
   }
-  
+
   // F4: volatileSystem - scan system prompt for uuid/timestamp/jwt
   let volatileSystem = false;
   const systemText = Array.isArray(body.system)
@@ -642,17 +1035,50 @@ export function transformRequestBody(
   if (systemText.length > 0 && (M_UUID.test(systemText) || M_TS.test(systemText) || M_JWT.test(systemText))) {
     volatileSystem = true;
   }
-  
+
   // Update session prevBlocks for next request
   if (session !== undefined) {
     session.prevBlocks = blocks;
   }
 
-  if (imagedBlocks === 0 && minifiedBlocks === 0) {
-    // Nothing rewritten: the caller forwards the ORIGINAL bytes; this result
-    // exists only to carry the diagnostics into the event log.
-    return { body: raw, changed: false, imagedBlocks, minifiedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached: false, blocks, cacheBreak, toolTax, volatileSystem };
-  }
+  const estTokens = estimateTokens(body, preTok) + pageTok;
+
+  // Breakpoint on message `idx`: the last block of its content. The bytes go in
+  // as a splice: onto a generated block's JSON, or as one more member of the
+  // client's own block. The tree is not touched (generated blocks are shared
+  // with the image memo); `placed` counts what we added.
+  const placed = new Set<number>(); // messages we put a breakpoint on: the tree is never edited
+  const place = (idx: number, auto: boolean): boolean => {
+    const m = msgs[idx];
+    if (!isObj(m)) return false;
+    const cs = need(spans[idx].content);
+    if (typeof m.content === "string") {
+      // only the automatic breakpoint reaches a plain string: the same literal
+      // becomes the one text block that can carry it
+      if (!auto || m.content === "") return false;
+      put(cs, [`{"type":"text","text":${raw.slice(cs.s, cs.e)},${CC}}`], true);
+      placed.add(idx);
+      return true;
+    }
+    if (!Array.isArray(m.content) || m.content.length === 0) return false;
+    const tail = m.content[m.content.length - 1];
+    if (!isObj(tail) || tail.cache_control !== undefined || placed.has(idx)) return false;
+    // thinking blocks and empty text cannot carry one; Anthropic 400s on it
+    if (auto && (tail.type === "thinking" || tail.type === "redacted_thinking" || (tail.type === "text" && tail.text === ""))) return false;
+    if (cs.items === undefined) {
+      // a string imaged into an array: the breakpoint rides its last block
+      const r = need(reps.get(cs.s));
+      r.parts[r.parts.length - 1] = withCC(r.parts[r.parts.length - 1]);
+    } else {
+      const orig = cs.items[cs.items.length - 1];
+      const r = reps.get(orig.s);
+      if (r !== undefined && r.e === orig.e) r.parts[r.parts.length - 1] = withCC(r.parts[r.parts.length - 1]);
+      else if (orig.last < 0) reps.set(orig.s + 1, { e: orig.s + 1, parts: [CC], wrap: false });
+      else reps.set(orig.last, { e: orig.last, parts: [`,${CC}`], wrap: false });
+    }
+    placed.add(idx);
+    return true;
+  };
 
   // Imaged pages are the ideal cache payload: large, byte-stable (asserted in
   // the render tests) and re-sent verbatim on every later turn. The proxy has
@@ -665,18 +1091,47 @@ export function transformRequestBody(
   // prefix under the model's floor rather than erroring, so a size test would
   // only duplicate a rule the API already enforces.
   let cached = false;
-  if (cfg.cache && lastImagedMsg >= 0 && countBreakpoints(body) < MAX_BREAKPOINTS) {
-    const m = body.messages[lastImagedMsg];
-    if (isObj(m) && Array.isArray(m.content) && m.content.length > 0) {
-      const tail = m.content[m.content.length - 1];
-      if (isObj(tail) && tail.cache_control === undefined) {
-        tail.cache_control = { type: "ephemeral" };
-        cached = true;
-      }
-    }
+  if (cfg.cache && lastImagedMsg >= 0 && countBreakpoints(body) + placed.size < MAX_BREAKPOINTS) {
+    cached = place(lastImagedMsg, false);
+  }
+  // T8a: a client that never caches pays full price for its whole history every
+  // turn. After two requests in a row whose earlier messages matched the last
+  // one (so the prefix demonstrably holds) one breakpoint on the last block
+  // before the recency window makes that history a cache read. Never when the
+  // client caches itself, never a 5th breakpoint.
+  let autoCache = false;
+  if (
+    cfg.autoCache &&
+    process.env.TANUKI_AUTO_CACHE !== "off" &&
+    session !== undefined &&
+    session.stable >= 2 &&
+    !clientCC &&
+    msgs.length - keep >= 1 &&
+    countBreakpoints(body) + placed.size < MAX_BREAKPOINTS
+  ) {
+    autoCache = place(msgs.length - keep - 1, true);
   }
 
-  return { body: JSON.stringify(body), changed: true, imagedBlocks, minifiedBlocks, origChars, imageCount, savedTokens, savedTokensCacheAware, cached, blocks, cacheBreak, toolTax, volatileSystem };
+  const changed = reps.size > 0;
+  return {
+    body: changed ? splice(raw, reps) : raw,
+    changed,
+    imagedBlocks,
+    minifiedBlocks,
+    origChars,
+    imageCount,
+    savedTokens,
+    savedTokensCacheAware,
+    cached,
+    autoCache,
+    estTokens,
+    clientBreak,
+    warn,
+    blocks,
+    cacheBreak,
+    toolTax,
+    volatileSystem,
+  };
 }
 
 /// Best-effort usage scrape: works on both plain JSON responses and SSE
@@ -796,6 +1251,12 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 // whether WE placed the breakpoint (as opposed to the client
                 // already caching): separates our win from theirs in the ledger
                 cache_breakpoint: stats?.cached ?? false,
+                // the automatic breakpoint before the recency window (T8a)
+                auto_cache: stats?.autoCache ?? false,
+                // T2b: what the estimator predicted for the forwarded request
+                // next to what Anthropic billed (input + cache reads + creates)
+                est_input_tokens: stats?.estTokens ?? 0,
+                billed_input_tokens: actual,
                 input_tokens: usage.input,
                 cache_read_tokens: usage.cacheRead,
                 cache_create_tokens: usage.cacheCreate,
@@ -803,10 +1264,12 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 // F4 diagnostics
                 blocks: stats?.blocks ?? [],
                 ...(stats?.cacheBreak && { cacheBreak: stats.cacheBreak }),
+                ...(stats && stats.clientBreak > 0 && { client_break: stats.clientBreak }),
                 ...(stats?.toolTax && { toolTax: stats.toolTax }),
                 ...(stats?.volatileSystem && { volatileSystem: stats.volatileSystem }),
               });
               // F4: per-request diagnostic stdout
+              if (stats?.warn) process.stderr.write(`[tanuki proxy] ${stats.warn}\n`);
               if (stats !== null) {
                 let diagLine = "";
                 if (stats.cacheBreak) {
@@ -842,7 +1305,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control skipped · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""} · pretty JSON tool results minified (lossless)\n` +
+        `  rules: system prompt & tools untouched · edits spliced into your own request bytes (nothing else moves) · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control blocks never imaged · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}${cfg.autoCache && process.env.TANUKI_AUTO_CACHE !== "off" ? " · auto cache breakpoint once the prefix holds" : ""} · pretty JSON tool results minified (lossless)\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });

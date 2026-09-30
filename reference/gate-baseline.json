@@ -3,12 +3,20 @@
   "value": 845,
   "better": "lower"
  },
+ "crush.cargo-test-pass.log.out_tokens_o200k": {
+  "value": 253,
+  "better": "lower"
+ },
  "crush.cargo-test-pass.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.cargo-build-fail.log.out_chars": {
   "value": 375,
+  "better": "lower"
+ },
+ "crush.cargo-build-fail.log.out_tokens_o200k": {
+  "value": 107,
   "better": "lower"
  },
  "crush.cargo-build-fail.log.exit_kept": {
@@ -19,12 +27,20 @@
   "value": 234,
   "better": "lower"
  },
+ "crush.pytest-pass.log.out_tokens_o200k": {
+  "value": 47,
+  "better": "lower"
+ },
  "crush.pytest-pass.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.pytest-fail.log.out_chars": {
   "value": 1272,
+  "better": "lower"
+ },
+ "crush.pytest-fail.log.out_tokens_o200k": {
+  "value": 293,
   "better": "lower"
  },
  "crush.pytest-fail.log.exit_kept": {
@@ -35,12 +51,20 @@
   "value": 131,
   "better": "lower"
  },
+ "crush.go-test-pass.log.out_tokens_o200k": {
+  "value": 49,
+  "better": "lower"
+ },
  "crush.go-test-pass.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.go-test-fail.log.out_chars": {
   "value": 192,
+  "better": "lower"
+ },
+ "crush.go-test-fail.log.out_tokens_o200k": {
+  "value": 82,
   "better": "lower"
  },
  "crush.go-test-fail.log.exit_kept": {
@@ -51,12 +75,20 @@
   "value": 96,
   "better": "lower"
  },
+ "crush.npm-install.log.out_tokens_o200k": {
+  "value": 34,
+  "better": "lower"
+ },
  "crush.npm-install.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.git-status.log.out_chars": {
   "value": 215,
+  "better": "lower"
+ },
+ "crush.git-status.log.out_tokens_o200k": {
+  "value": 63,
   "better": "lower"
  },
  "crush.git-status.log.exit_kept": {
@@ -67,12 +99,20 @@
   "value": 838,
   "better": "lower"
  },
+ "crush.git-diff.log.out_tokens_o200k": {
+  "value": 292,
+  "better": "lower"
+ },
  "crush.git-diff.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.docker-ps.log.out_chars": {
-  "value": 824,
+  "value": 560,
+  "better": "lower"
+ },
+ "crush.docker-ps.log.out_tokens_o200k": {
+  "value": 240,
   "better": "lower"
  },
  "crush.docker-ps.log.exit_kept": {
@@ -83,12 +123,20 @@
   "value": 809,
   "better": "lower"
  },
+ "crush.find-list.log.out_tokens_o200k": {
+  "value": 235,
+  "better": "lower"
+ },
  "crush.find-list.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
  "crush.tsc-fail.log.out_chars": {
   "value": 604,
+  "better": "lower"
+ },
+ "crush.tsc-fail.log.out_tokens_o200k": {
+  "value": 197,
   "better": "lower"
  },
  "crush.tsc-fail.log.exit_kept": {
@@ -99,12 +147,212 @@
   "value": 57,
   "better": "lower"
  },
+ "crush.eslint-pass.log.out_tokens_o200k": {
+  "value": 23,
+  "better": "lower"
+ },
  "crush.eslint-pass.log.exit_kept": {
   "value": 1,
   "better": "higher"
  },
+ "crush.cargo-test-fail-1.log.out_chars": {
+  "value": 1721,
+  "better": "lower"
+ },
+ "crush.cargo-test-fail-1.log.out_tokens_o200k": {
+  "value": 496,
+  "better": "lower"
+ },
+ "crush.cargo-test-fail-1.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.cargo-test-fail-2.log.out_chars": {
+  "value": 1777,
+  "better": "lower"
+ },
+ "crush.cargo-test-fail-2.log.out_tokens_o200k": {
+  "value": 508,
+  "better": "lower"
+ },
+ "crush.cargo-test-fail-2.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.npm-test-1.log.out_chars": {
+  "value": 2415,
+  "better": "lower"
+ },
+ "crush.npm-test-1.log.out_tokens_o200k": {
+  "value": 856,
+  "better": "lower"
+ },
+ "crush.npm-test-1.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.npm-test-2.log.out_chars": {
+  "value": 2412,
+  "better": "lower"
+ },
+ "crush.npm-test-2.log.out_tokens_o200k": {
+  "value": 855,
+  "better": "lower"
+ },
+ "crush.npm-test-2.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.cargo-test-json.log.out_chars": {
+  "value": 1777,
+  "better": "lower"
+ },
+ "crush.cargo-test-json.log.out_tokens_o200k": {
+  "value": 545,
+  "better": "lower"
+ },
+ "crush.cargo-test-json.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.ps-aux.log.out_chars": {
+  "value": 1051,
+  "better": "lower"
+ },
+ "crush.ps-aux.log.out_tokens_o200k": {
+  "value": 531,
+  "better": "lower"
+ },
+ "crush.ps-aux.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.df-h.log.out_chars": {
+  "value": 741,
+  "better": "lower"
+ },
+ "crush.df-h.log.out_tokens_o200k": {
+  "value": 345,
+  "better": "lower"
+ },
+ "crush.df-h.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.kubectl-get-pods.log.out_chars": {
+  "value": 525,
+  "better": "lower"
+ },
+ "crush.kubectl-get-pods.log.out_tokens_o200k": {
+  "value": 216,
+  "better": "lower"
+ },
+ "crush.kubectl-get-pods.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.kubectl-get-yaml.log.out_chars": {
+  "value": 572,
+  "better": "lower"
+ },
+ "crush.kubectl-get-yaml.log.out_tokens_o200k": {
+  "value": 205,
+  "better": "lower"
+ },
+ "crush.kubectl-get-yaml.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.kubectl-get-json.log.out_chars": {
+  "value": 476,
+  "better": "lower"
+ },
+ "crush.kubectl-get-json.log.out_tokens_o200k": {
+  "value": 178,
+  "better": "lower"
+ },
+ "crush.kubectl-get-json.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.kubectl-get-yaml-default.log.out_chars": {
+  "value": 4569,
+  "better": "lower"
+ },
+ "crush.kubectl-get-yaml-default.log.out_tokens_o200k": {
+  "value": 1360,
+  "better": "lower"
+ },
+ "crush.kubectl-get-yaml-default.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.terraform-plan.log.out_chars": {
+  "value": 2236,
+  "better": "lower"
+ },
+ "crush.terraform-plan.log.out_tokens_o200k": {
+  "value": 661,
+  "better": "lower"
+ },
+ "crush.terraform-plan.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.terraform-plan-noop.log.out_chars": {
+  "value": 352,
+  "better": "lower"
+ },
+ "crush.terraform-plan-noop.log.out_tokens_o200k": {
+  "value": 80,
+  "better": "lower"
+ },
+ "crush.terraform-plan-noop.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.terraform-plan-fail.log.out_chars": {
+  "value": 475,
+  "better": "lower"
+ },
+ "crush.terraform-plan-fail.log.out_tokens_o200k": {
+  "value": 136,
+  "better": "lower"
+ },
+ "crush.terraform-plan-fail.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.terraform-apply.log.out_chars": {
+  "value": 6123,
+  "better": "lower"
+ },
+ "crush.terraform-apply.log.out_tokens_o200k": {
+  "value": 1791,
+  "better": "lower"
+ },
+ "crush.terraform-apply.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
+ "crush.terraform-apply-change.log.out_chars": {
+  "value": 3152,
+  "better": "lower"
+ },
+ "crush.terraform-apply-change.log.out_tokens_o200k": {
+  "value": 1006,
+  "better": "lower"
+ },
+ "crush.terraform-apply-change.log.exit_kept": {
+  "value": 1,
+  "better": "higher"
+ },
  "crush.weighted_saved_permille": {
-  "value": 799,
+  "value": 839,
+  "better": "higher"
+ },
+ "crush.weighted_saved_tokens_permille_o200k": {
+  "value": 845,
   "better": "higher"
  },
  "distill.ops.out_chars": {
@@ -139,12 +387,20 @@
   "value": 4496,
   "better": "lower"
  },
+ "json.pretty_tokens_after_minify_o200k": {
+  "value": 3679,
+  "better": "lower"
+ },
  "json.roundtrip_exact": {
   "value": 1,
   "better": "higher"
  },
  "json.keep_lines_tokens_after_minify": {
   "value": 4858,
+  "better": "lower"
+ },
+ "json.keep_lines_tokens_after_minify_o200k": {
+  "value": 4322,
   "better": "lower"
  },
  "json.keep_lines_no_line_grew": {
@@ -163,16 +419,82 @@
   "value": 89,
   "better": "higher"
  },
+ "find.vocab_gap_hit1_of_24": {
+  "value": 19,
+  "better": "higher"
+ },
+ "find.vocab_gap_mrr_permille": {
+  "value": 854,
+  "better": "higher"
+ },
+ "crush.new_rules_fired_of_12": {
+  "value": 12,
+  "better": "higher"
+ },
+ "crush.kubectl_yaml_chars_vs_0_22_1": {
+  "value": 572,
+  "better": "lower",
+  "limit": 2847
+ },
+ "delta.cargo-test.second_run_chars": {
+  "value": 1478,
+  "better": "lower"
+ },
+ "delta.cargo-test.second_run_tokens_o200k": {
+  "value": 430,
+  "better": "lower"
+ },
+ "delta.cargo-test.led_by_delta": {
+  "value": 1,
+  "better": "higher"
+ },
+ "delta.npm-test.second_run_chars": {
+  "value": 212,
+  "better": "lower"
+ },
+ "delta.npm-test.second_run_tokens_o200k": {
+  "value": 78,
+  "better": "lower"
+ },
+ "delta.npm-test.led_by_delta": {
+  "value": 1,
+  "better": "higher"
+ },
+ "proxy.memo_warm_pct_of_cold": {
+  "value": 17,
+  "better": "lower-speed",
+  "limit": 35
+ },
+ "proxy.memo_warm_same_bytes": {
+  "value": 1,
+  "better": "higher"
+ },
+ "proxy.splice_bytes_exact": {
+  "value": 1,
+  "better": "higher"
+ },
+ "proxy.auto_cache_schedule_ok": {
+  "value": 1,
+  "better": "higher"
+ },
+ "estimator.drift_pct": {
+  "value": 32.42,
+  "better": "lower"
+ },
+ "estimator.json_drift_pct": {
+  "value": 25.97,
+  "better": "lower"
+ },
  "speed.distill_80k_lines_x_ref": {
-  "value": 2.847,
+  "value": 2.868,
   "better": "lower-speed"
  },
  "speed.find_80k_lines_x_ref": {
-  "value": 4.351,
+  "value": 4.535,
   "better": "lower-speed"
  },
  "speed.distill_scaling_4x": {
-  "value": 3.84,
+  "value": 4.07,
   "better": "lower-speed",
   "limit": 6
  }

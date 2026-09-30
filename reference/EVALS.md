@@ -1020,6 +1020,240 @@ Reproduce: `npm run combined` (add `TANUKI_BIN=<rust binary>` for the
 cross-engine comparison; without it the parity line honestly reports
 `n/a (single engine - nothing was compared)`).
 
+## 16. Find vocabulary gaps, run-rule shapes and delta   *(measured, no model)*
+
+### Vocabulary gaps: `node reference/retrieval-report.mjs`
+
+BM25 (§10) cannot find an answer that shares no word with the ask: "why did the
+service crash" against `FATAL panic: invariant violated in shard-router`. 0.23
+adds a fixed table of log synonyms (15 symmetric groups, about 110 words: crash /
+panic / fatal / abort, slow / latency / timeout / deadline, fail / error /
+exception, auth / 401 / bearer / unauthorized, disk / enospc, and so on) and
+light stemming (plural, `-ed`, `-ing`, `-er`, never below 3 characters). An ask
+word that has no direct hit on a line but a synonym or stem hit counts at **half**
+a direct hit, with tf pinned to 1, so an expansion can tie a direct hit at best
+and never adds onto one. Each `·find·` header now ends with the matched ask words;
+`~` marks a synonym or stem hit (`· panic, crash~`).
+
+The set is committed: `VOCAB_GAP` in `reference/lib/corpus.mjs`, 24 asks over 624
+lines whose noise repeats common ask words as decoys. A control in the report
+fails if any gold line shares a whole word (or a 4+ character substring) with its
+ask, so the set stays a vocabulary-gap set.
+
+| engine | hit@1 | MRR |
+| --- | ---: | ---: |
+| 0.22.1 (before) | 0/24 | 0.000 |
+| 0.23.0, TS and Rust byte-identical | **19/24** | **0.854** |
+
+The five misses are the honest ones: "which request was slow" (`latency=` decoys
+outrank it, rank 2), "network problem reaching the database" (no hit in the top
+8), "when did the server start" (rank 2), "corrupted data on replay" (rank 2),
+"frequent timeouts from peers" (`peer=` decoys, no hit). The seeded find set of §10
+is unchanged (60/60, MRR 1.000) and the retrieval report still reads 11/15. The
+table is hand-picked from log vocabulary; groups holding very common words
+(fail/error) lift little because their idf is low. The gate holds
+`find.vocab_gap_hit1_of_24` and `find.vocab_gap_mrr_permille`.
+
+### 0.23 run rules on real captures
+
+Each fixture under `reference/crush/` is a real capture (kubectl from a k3s node,
+terraform with random/local/null/time providers, both in aisandbox instances;
+cargo and node locally). `node reference/crush-report.mjs --min 60` runs both
+engines on all of them. Chars are the routed answer; tokens are o200k.
+
+| fixture (rule) | raw chars | 0.22.1 answer | 0.23 answer | 0.22.1 tokens | 0.23 tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cargo-test-json (`cargo+ndjson`) | 3,663 | 2,258 | 1,777 | 765 | 545 |
+| ps-aux (`table`) | 1,622 | 1,336 | 1,051 | 597 | 531 |
+| df-h (`table`) | 738 | 929 | 741 | 392 | 345 |
+| docker-ps (`table`) | 767 | 824 | 560 | 247 | 240 |
+| kubectl-get-pods (`table`) | 954 | 744 | 525 | 233 | 216 |
+| kubectl-get-yaml (`managedfields`) | 29,863 | 2,847 | 572 | 839 | 205 |
+| kubectl-get-json (`managedfields`) | 57,891 | 3,763 | 476 | 620 | 178 |
+| terraform-plan | 8,450 | 2,818 | 2,236 | 858 | 661 |
+| terraform-plan-noop | 6,085 | 927 | 352 | 267 | 80 |
+| terraform-plan-fail | 6,580 | 1,211 | 475 | 391 | 136 |
+| terraform-apply-change | 9,715 | 3,752 | 3,152 | 1,227 | 1,006 |
+
+Weighted over all 29 fixtures: 79.9 % of chars removed under 0.22.1, **83.9 %**
+now (gate `crush.weighted_saved_permille` 799 -> 839; in o200k tokens 845 permille).
+The lossless rules were checked for content: a table keeps the whitespace-normalised
+text of every line (asserted on four real fixtures and twelve local commands:
+`docker images/ps -a`, `lsblk`, `ss -tln`, `ps aux`, `pip list`, `lscpu`, `df -h`);
+managedFields blocks are replaced by one marker and everything else replays
+byte-exact against the input; terraform keeps every `#`/`+`/`-`/`~` line, the
+`Plan:` summary and every error, ANSI included. About 2,300 random inputs
+(seven seeds) run through both engines produced no divergence after one fix
+(whitespace-only output reported `rule generic` in TS only).
+
+**A regression the first version of the kubectl rule had, and its fix.** Dropping
+managedFields made the 505-line YAML small enough to hand back inline: 7,327
+chars and 2,478 tokens, against the 2,847 chars / 839 tokens 0.22.1 had answered
+(its list-cap showed the first 200 raw lines). More useful to a reader, but a
+larger answer than before, and the gate rows `out_chars` / `out_tokens` said so.
+The rule now compares against what the run wrapper answered without it (the
+never-grow yardstick) and falls back to the stash map when the inline document
+would be bigger, with the map's line counts, repeats and first/last lines taken
+from the cleaned document (`distill map (managedFields dropped): ...`), not from
+the bookkeeping. `crush.kubectl_yaml_chars_vs_0_22_1` carries a hard limit of
+2,847. Limits: the stash still holds the raw capture, so a `fetch` slice of the
+JSON contains managedFields; kubectl output WITHOUT managedFields is still capped
+at 200 lines by the older list-cap rule (lossy; the stash keeps everything).
+
+### Delta between runs
+
+Second run of the same command in one stash (`routeOutput`, both engines
+byte-identical): a run whose output leads with what changed against the previous
+run, and blocks identical to it collapsed into pointers.
+
+| pair (real `cargo test` / `node --test`) | run 2 raw | run 2 alone | run 2 after run 1 | o200k alone -> after |
+| --- | ---: | ---: | ---: | ---: |
+| cargo test: 1 failure fixed, 1 new, 2 unchanged | 2,047 | 1,777 | 1,478 | 508 -> 430 |
+| npm test x2, identical modulo timings | 2,353 | 2,412 | 212 | 855 -> 78 |
+
+The npm pair reads `output identical` plus one pointer (88 % saved against -3 % for
+the run alone); a failing run followed by a 95-char passing run leads with
+`exit 101 -> 0 · 3 fixed · 0 new` and the three test names. Limits: unchanged blocks
+are compared as sets of normalised lines, so a change that only touches a masked
+token (a timestamp, a duration, a 4+ digit number in parentheses) reads as
+identical; fixed/new lists use test-runner vocabulary. Every routed run of 400+
+chars is now stashed (content-addressed, so identical bytes dedupe) plus a
+20-byte index file per command; neither engine garbage-collects the stash.
+
+The gate holds `crush.new_rules_fired_of_12`, `delta.cargo-test.second_run_chars`,
+`delta.npm-test.second_run_chars` (and their o200k tokens) and that the second run
+leads with a delta block.
+
+## 17. Comparison with rtk and context-mode   *(measured, small sample)*
+
+`reference/compare-report.mjs` (method and sandbox recipe in its header) runs
+[rtk](https://github.com/rtk-ai/rtk) v0.50.0 and
+[context-mode](https://github.com/mksglu/context-mode) 1.0.169 on the committed
+`reference/crush/` captures and scores each tool's output in o200k tokens and by
+**planted-answer survival**: 1-5 strings per fixture, chosen as content rather
+than layout and verified present in the raw bytes (a spelling list where a tool
+legitimately says the same thing another way, e.g. rtk's `84 passed` against
+`82 passed` + `2 passed`). Everything was installed inside a throwaway aisandbox
+instance (context-mode with Bun, since `npm i -g` refuses Node 20), never on the
+host. Replay: tanuki via `run -- <cmd>` through a shim named after the tool (the
+production path); rtk via `rtk pipe -f <filter>` where it has one, else through
+the same shim; context-mode via `ctx_execute(intent=question)` and
+`ctx_batch_execute(queries=[question])`, a fresh server per call. Tanuki figures
+here are from the 0.22.1 bundle measured at the time; 12 of the committed
+fixtures have questions (the 0.23 fixtures are not scored).
+
+**Faithful replay only** (9 of 12 fixtures: every tool saw the format it asks its
+child for):
+
+| tool | o200k tokens out | saved vs raw | answers kept | fixtures with every answer |
+| --- | ---: | ---: | ---: | ---: |
+| raw (no tool) | 8,362 | - | 26/26 | 9/9 |
+| tanuki-context `run` | 1,561 | 81 % | 24/26 | 8/9 |
+| rtk | **1,045** | **88 %** | 21/26 | 7/9 |
+| context-mode `ctx_execute` + intent | 1,886 | 77 % | 22/26 | 7/9 |
+| context-mode `ctx_batch_execute` | 3,878 | 54 % | 24/26 | 8/9 |
+
+Fewest tokens among the arms that kept every answer: rtk on 5 fixtures, tanuki on
+2, raw on 2.
+
+**All 12 fixtures** (rtk's `go test` and `docker ps` filters ask for formats the
+shim cannot provide, so those three rows are replay artefacts, marked in the tool
+output; with real docker and go rtk would very likely do fine):
+
+| tool | tokens out | saved | answers kept | fixtures complete |
+| --- | ---: | ---: | ---: | ---: |
+| raw | 8,667 | - | 36/36 | 12/12 |
+| tanuki-context `run` | 1,932 | 78 % | 34/36 | 11/12 |
+| rtk | 1,064 | 88 % | 21/36 | 7/12 |
+| context-mode `ctx_execute` | 2,217 | 74 % | 32/36 | 10/12 |
+| context-mode `ctx_batch_execute` | 4,506 | 48 % | 32/36 | 10/12 |
+
+**Where each wins, plainly.**
+
+- **rtk is smaller almost everywhere both are comparable**: 88 % against 81 % saved,
+  and below tanuki on cargo-build-fail, pytest-pass/fail, git-diff and npm-install
+  (pytest-fail 132 tokens against 294: tanuki's output is *larger than raw* on
+  small outputs because the fixed `[tanuki run] exit N ...` header and fetch
+  pointer cost 35-50 tokens that a 100-token result cannot absorb). It pays in
+  answers: on cargo-test-pass it keeps only the totals (the warning names go), on
+  the 400-path find list none of the three planted paths, and it prints no pointer
+  to the full output (`rtk recall` covers failures and truncation only).
+- **tanuki wins** on cargo-test-pass (272 tokens with 3/3 answers; rtk 16 tokens
+  with 1/3; context-mode needs 1,078 for 3/3) and git-status, and is the only tool
+  that emits an exact recovery pointer where an answer was cut (find list: 1/3
+  kept, `fetch <id>` for the rest). Its own numbers here do not include 0.23.
+- **context-mode** is never smaller than raw on outputs under 5 KB (they come back
+  verbatim plus a fence; `ctx_batch_execute` adds 128 tokens of index headers to a
+  9-token `npm install`). Its real workflow, a model writing filter code over a
+  sandbox, cannot be replayed without a model and is not scored.
+- **No tool dominates**: on outputs of 300 tokens or fewer every tool, tanuki
+  included, mostly adds noise over reading raw; the gains are in the two large
+  fixtures (cargo-test-pass 2,086 tokens, find list 5,278).
+
+Fairness: questions and answers were written before the first run; afterwards I
+(a) rewrote answers as content-level strings with accepted spellings and (b) added
+the unfaithful-replay exclusions, both in the competitors' favour. The sample is
+12 fixtures (one, `tsc-fail`, synthetic in the manifest), one machine, one run
+(every arm is deterministic). A vendor's own benchmark would use its own corpus;
+this one is tanuki's, chosen before the tools were compared but not neutral.
+
+## 18. Nightly read-back   *(needs an API key; local results below)*
+
+`reference/readback-nightly.mjs` seeds the 14 needles of §2, plants them in a log
+(`needleCorpus`), renders it through the real CLI, sends **only the pages** (never
+the verbatim sidecar) to a model, and scores exact containment per needle kind.
+`.github/workflows/nightly.yml` runs it on a schedule and on `workflow_dispatch`
+against `anthropic` when the `ANTHROPIC_API_KEY` secret exists (it skips cleanly
+otherwise), keeping a `readback-history` artifact of every run. The Claude number
+is the one that matters and is **not measured here**: the environment that built
+0.23 has no key, and the workflow itself was never executed on GitHub.
+
+What a local model says, run through the same script (ollama, `temperature 0`):
+
+| arm | model | result |
+| --- | --- | ---: |
+| pages, 80-line page (336 image tokens) | qwen3-vl:8b-instruct | **0/14** |
+| pages, tiny font (224 tokens) | qwen3-vl:8b-instruct | 0/14 |
+| pages | gemma4:e4b | 0/14 |
+| 14 needle lines only (112 tokens) | qwen3-vl:8b-instruct / gemma4:e4b | 0/14 / 1/14 |
+| **text control**: the document as text, no image | qwen3.5:9b | **13/14** (normal and tiny font) |
+| text control | qwen3.5:2b | 4/14 (cannot follow the extraction instruction) |
+
+The positive control is the reason to believe the 0/14. Before it, the harness
+itself was wrong twice (the prompt said `sha256:<hex>` and `HH:MM:SS.mmm` while
+models answered the bare hex and no trailing `Z`; filler timestamps invited
+dumping), which read correct answers as misses (control 11/14, sha256 0/2). With
+the prompt spelling each shape and digests scored on their hex payload, the 9b
+text control reads 13/14 and both misses are omissions; every value it emitted
+was byte-exact. So 0/14 at native scale is a real capability limit of 8B local
+vision models on ~10 px glyphs, not a scorer bug. An upscaling diagnosis (not a
+product feature: Claude's pixel-exact patching expects the native scale) made
+qwen3-vl read 5/14 at 3x (sha256 2/2, file:line:col 2/2), all remaining misses
+being glyph confusions (`45c55f8bd0a6` as `45c55f6bd0a6`). `verify` (§7) exists
+for exactly that class of error.
+
+## 19. The estimator against a real tokenizer   *(measured, no model)*
+
+`bun reference/gate.mjs` counts **o200k_base** tokens (`gpt-tokenizer`, a
+devDependency; the package still has zero runtime dependencies) next to the
+package's own `textTokens` and gates `estimator.drift_pct`, the mean per-payload
+|estimate - o200k| / o200k over every committed real capture, raw and routed, so
+over- and under-counts on different payloads cannot cancel. It is 32.4 % now
+(seeded JSON pair: 26.0 %), gated downward only.
+
+The bias is one-sided. Measured on the original twelve fixtures, token-weighted:
+estimator 13,701 against o200k 10,589, **+29.4 %**; per payload from -17 % (tiny
+outputs such as eslint "no issues") to +157 % (routed pytest-pass, 47 real tokens
+against 121 estimated), systematic on short punctuation- and number-heavy output
+(pytest, docker, tsc +47 to +157 %) and mild on long prose-like logs (cargo 17-26 %).
+Two caveats. The estimator was fitted to Claude's tokenizer (§9); o200k is
+OpenAI's, so this is drift against a *different* real tokenizer, not against the
+Claude bill. `tanuki_stats` reports that comparison (`estimatorRatioPct`) once the
+proxy has logged billed tokens next to its estimates. And the runtime estimator is
+deliberately unchanged: the parity harness and every pricing decision are
+defined on it. Over-counting makes imaging and minify decisions more
+conservative, not more aggressive.
+
 ## Reproduce
 
 ```
@@ -1037,6 +1271,9 @@ bun reference/adversarial-report.mjs            # --n 200 for tighter bounds
 node reference/crush-report.mjs --min 60        # rtk-style run rules on committed real outputs
 node reference/retrieval-report.mjs --min 60    # now includes the find-words column
 node reference/combined-report.mjs --min 90     # composed routes: selection x table x codebook x pages
+bun reference/gate.mjs                          # the no-regression gate: o200k, delta, vocab-gap, proxy splice/memo/auto-cache
+node reference/compare-report.mjs score out.json # rtk / context-mode comparison (collect step: header of the file)
+node reference/readback-nightly.mjs --provider ollama --control text   # read-back; anthropic needs ANTHROPIC_API_KEY
 
 # the lossless spine: stash it, fetch it, diff it (--no-redact: the default
 # fetch masks credential-shaped values, so byte-identity needs the mask off)

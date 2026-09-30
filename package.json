@@ -1,6 +1,6 @@
 {
   "name": "tanuki-context",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "description": "Cut 79-91% of the input tokens your logs and command output cost. MCP server or drop-in proxy: park bytes outside the conversation, fetch exact slices, draw a slice as dense PNG pages when that is cheaper - and it says when plain text is cheaper instead. Zero dependencies.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
@@ -41,7 +41,9 @@
     "retrieval": "node reference/retrieval-report.mjs",
     "crush": "node reference/crush-report.mjs --min 60",
     "combined": "node reference/combined-report.mjs --min 90",
-    "gate": "bun reference/gate.mjs"
+    "gate": "bun reference/gate.mjs",
+    "compare": "node reference/compare-report.mjs",
+    "readback": "node reference/readback-nightly.mjs"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": ">=0.3.0",
@@ -57,6 +59,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "gpt-tokenizer": "^4.0.0",
     "typebox": "^1.0.0",
     "zod": "^4.0.0"
   },

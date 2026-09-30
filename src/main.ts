@@ -26,7 +26,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.22.1";
+export const VERSION = "0.23.0";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------------------ stages
@@ -1096,6 +1096,7 @@ export function main(): void {
         maxPages: num("--max-pages", PROXY_DEFAULTS.maxPages),
         recencyWindow: num("--recency", parseNum(process.env.TANUKI_RECENCY, PROXY_DEFAULTS.recencyWindow)),
         cache: !argv.includes("--no-cache"),
+        autoCache: !argv.includes("--no-cache") && !argv.includes("--no-auto-cache"),
         verbatim: parseVerbatim(flagVal(argv, "--verbatim")),
       });
       break;

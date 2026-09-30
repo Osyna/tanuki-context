@@ -1,0 +1,145 @@
+[0m[1mterraform_data.note: Refreshing state... [id=f8652bbd-73cc-94d3-7971-045e8221698e][0m
+[0m[1mdata.http.check: Reading...[0m[0m
+[0m[1mrandom_id.id[0]: Refreshing state... [id=3a1LgA][0m
+[0m[1mrandom_id.id[3]: Refreshing state... [id=IPOhPw][0m
+[0m[1mrandom_id.id[1]: Refreshing state... [id=8QND2Q][0m
+[0m[1mrandom_id.id[9]: Refreshing state... [id=Iesl8w][0m
+[0m[1mrandom_id.id[5]: Refreshing state... [id=LuV-fA][0m
+[0m[1mrandom_id.id[4]: Refreshing state... [id=tvXMgw][0m
+[0m[1mrandom_id.id[6]: Refreshing state... [id=CAckQg][0m
+[0m[1mrandom_id.id[2]: Refreshing state... [id=F5IteQ][0m
+[0m[1mrandom_id.id[8]: Refreshing state... [id=CZULjw][0m
+[0m[1mrandom_id.id[7]: Refreshing state... [id=uObbJA][0m
+[0m[1mrandom_pet.pet[9]: Refreshing state... [id=eminent-guppy][0m
+[0m[1mrandom_pet.pet[18]: Refreshing state... [id=kind-lobster][0m
+[0m[1mrandom_pet.pet[13]: Refreshing state... [id=exotic-horse][0m
+[0m[1mrandom_pet.pet[20]: Refreshing state... [id=good-ocelot][0m
+[0m[1mrandom_pet.pet[1]: Refreshing state... [id=endless-molly][0m
+[0m[1mrandom_pet.pet[17]: Refreshing state... [id=integral-monitor][0m
+[0m[1mrandom_pet.pet[6]: Refreshing state... [id=eminent-molly][0m
+[0m[1mrandom_pet.pet[21]: Refreshing state... [id=thankful-clam][0m
+[0m[1mrandom_pet.pet[22]: Refreshing state... [id=causal-alpaca][0m
+[0m[1mrandom_pet.pet[24]: Refreshing state... [id=in-tapir][0m
+[0m[1mrandom_pet.pet[14]: Refreshing state... [id=relevant-dinosaur][0m
+[0m[1mrandom_pet.pet[23]: Refreshing state... [id=gentle-whale][0m
+[0m[1mrandom_pet.pet[8]: Refreshing state... [id=fond-whippet][0m
+[0m[1mrandom_pet.pet[7]: Refreshing state... [id=balanced-corgi][0m
+[0m[1mrandom_pet.pet[11]: Refreshing state... [id=social-mullet][0m
+[0m[1mrandom_pet.pet[10]: Refreshing state... [id=dashing-raccoon][0m
+[0m[1mrandom_pet.pet[12]: Refreshing state... [id=kind-kid][0m
+[0m[1mrandom_pet.pet[16]: Refreshing state... [id=kind-bison][0m
+[0m[1mrandom_pet.pet[2]: Refreshing state... [id=bold-eft][0m
+[0m[1mrandom_pet.pet[3]: Refreshing state... [id=prime-sole][0m
+[0m[1mrandom_pet.pet[5]: Refreshing state... [id=guiding-turtle][0m
+[0m[1mrandom_pet.pet[4]: Refreshing state... [id=intense-sole][0m
+[0m[1mrandom_pet.pet[19]: Refreshing state... [id=liberal-stork][0m
+[0m[1mrandom_pet.pet[15]: Refreshing state... [id=useful-skunk][0m
+[0m[1mrandom_pet.pet[0]: Refreshing state... [id=bursting-bass][0m
+[0m[1mdata.external.info: Reading...[0m[0m
+[0m[1mtime_static.t: Refreshing state... [id=2026-09-30T08:56:08Z][0m
+[0m[1mdata.local_file.input: Reading...[0m[0m
+[0m[1mdata.local_file.input: Read complete after 0s [id=3e43d0fbaee70cacc072599ff2c9951198021c3e][0m
+[0m[1mlocal_file.out[6]: Refreshing state... [id=9a438b9154e89f1f79275c9db2484a3f7f34838d][0m
+[0m[1mlocal_file.out[13]: Refreshing state... [id=c1c54cd608bd11f90dbd9aa6bedfeca1391b012b][0m
+[0m[1mlocal_file.out[15]: Refreshing state... [id=95e01480010d40ffb0e2b6336423bda50f12c156][0m
+[0m[1mlocal_file.out[2]: Refreshing state... [id=85067714de1152c56260a559be5017f5d3178058][0m
+[0m[1mlocal_file.out[17]: Refreshing state... [id=d21af2a0276b142029881f8f8d19e4cfd18d02d7][0m
+[0m[1mlocal_file.out[9]: Refreshing state... [id=3cb4406560cab32434d671481727f3ca3637b54c][0m
+[0m[1mlocal_file.out[0]: Refreshing state... [id=516ebac8f7d73a7e0e9d0c2b27d84dbe06819f29][0m
+[0m[1mlocal_file.out[1]: Refreshing state... [id=320ea2e538565c498482a75d07bde578521b958a][0m
+[0m[1mlocal_file.out[8]: Refreshing state... [id=1352b2d44b1dae12e335a34929f28b4455a812e3][0m
+[0m[1mlocal_file.out[23]: Refreshing state... [id=f33f16dc114e1f3ef27fd88c197345a318427f64][0m
+[0m[1mlocal_file.out[3]: Refreshing state... [id=cb79c08d6d745b6b32892f82f3ad58753ea0035f][0m
+[0m[1mlocal_file.out[24]: Refreshing state... [id=9c425b7226c7fe9b3e6a18a3d057e4218813b708][0m
+[0m[1mdata.external.info: Read complete after 0s [id=-][0m
+[0m[1mlocal_file.out[5]: Refreshing state... [id=154b9c9a43033e0102ca064c60303a42f9230050][0m
+[0m[1mlocal_file.out[16]: Refreshing state... [id=d1ad1c23ecebf146881831be522fa4f0211cc21e][0m
+[0m[1mlocal_file.out[7]: Refreshing state... [id=125c8454df3909f3d82a7e1f247e51dfd0caf70f][0m
+[0m[1mlocal_file.out[14]: Refreshing state... [id=50ae12975347adae1f2f2dbd24865fa46b7baa99][0m
+[0m[1mlocal_file.out[20]: Refreshing state... [id=3bbfc016323d775bbf527620c3e8c3838148b377][0m
+[0m[1mlocal_file.out[21]: Refreshing state... [id=28b9c0da10cd0e6147d55268cdf33e95d8302e0a][0m
+[0m[1mlocal_file.out[19]: Refreshing state... [id=8bafed0c573883bcd654a25c728061a873f9157b][0m
+[0m[1mlocal_file.out[11]: Refreshing state... [id=015732dcfc8a5284e50f820d7f71826099931173][0m
+[0m[1mlocal_file.out[4]: Refreshing state... [id=72129e0846607da64623a9b5fec42875bb100f80][0m
+[0m[1mlocal_file.out[12]: Refreshing state... [id=b7abe6bda58d32fce84944d2b9cba9c8eeefa86f][0m
+[0m[1mlocal_file.out[22]: Refreshing state... [id=41e57828a1c9744f97b8c8da4e8d798324c2dfa8][0m
+[0m[1mlocal_file.out[18]: Refreshing state... [id=b6492540ba43d38f0ea192d95c397c0055904b8d][0m
+[0m[1mlocal_file.out[10]: Refreshing state... [id=0e40611e4e20f5caac9f6a6b51ed03f09838aedc][0m
+[0m[1mnull_resource.n[3]: Refreshing state... [id=3382814470156809847][0m
+[0m[1mnull_resource.n[2]: Refreshing state... [id=351626875339390017][0m
+[0m[1mnull_resource.n[0]: Refreshing state... [id=6153710893721415023][0m
+[0m[1mnull_resource.n[4]: Refreshing state... [id=4080924659780723105][0m
+[0m[1mnull_resource.n[1]: Refreshing state... [id=6264823501897357647][0m
+[0m[1mdata.http.check: Read complete after 1s [id=https://checkpoint-api.hashicorp.com/v1/check/terraform][0m
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  [32m+[0m create[0m
+  [33m~[0m update in-place[0m
+[31m-[0m/[32m+[0m destroy and then create replacement[0m
+
+Terraform will perform the following actions:
+
+[1m  # local_file.out[3][0m must be [1m[31mreplaced[0m
+[0m[31m-[0m/[32m+[0m[0m resource "local_file" "out" {
+      [33m~[0m[0m content              = <<-EOT
+            prime-sole hello-input
+        EOT -> (known after apply) [31m# forces replacement[0m[0m
+      [33m~[0m[0m content_base64sha256 = "2zlj2tMeYjTlKSKpJlyg/JAv6G/z6v32+QNR47iMF4Q=" -> (known after apply)
+      [33m~[0m[0m content_base64sha512 = "uM+tcTe+mgyy+Ov+J7jwTGAJLYxi9zAoZgTHPiKOKvGfzKxqcGtU92cHHWO8GCsp4V9F/LIhvVFn8UB6UMgWzw==" -> (known after apply)
+      [33m~[0m[0m content_md5          = "8684ea7d5cacda50f9647e37998e8299" -> (known after apply)
+      [33m~[0m[0m content_sha1         = "cb79c08d6d745b6b32892f82f3ad58753ea0035f" -> (known after apply)
+      [33m~[0m[0m content_sha256       = "db3963dad31e6234e52922a9265ca0fc902fe86ff3eafdf6f90351e3b88c1784" -> (known after apply)
+      [33m~[0m[0m content_sha512       = "b8cfad7137be9a0cb2f8ebfe27b8f04c60092d8c62f730286604c73e228e2af19fccac6a706b54f767071d63bc182b29e15f45fcb221bd5167f1407a50c816cf" -> (known after apply)
+      [33m~[0m[0m id                   = "cb79c08d6d745b6b32892f82f3ad58753ea0035f" -> (known after apply)
+        [90m# (3 unchanged attributes hidden)[0m[0m
+    }
+
+[1m  # random_pet.extra[0][0m will be created
+[0m  [32m+[0m[0m resource "random_pet" "extra" {
+      [32m+[0m[0m id        = (known after apply)
+      [32m+[0m[0m length    = 3
+      [32m+[0m[0m separator = "-"
+    }
+
+[1m  # random_pet.extra[1][0m will be created
+[0m  [32m+[0m[0m resource "random_pet" "extra" {
+      [32m+[0m[0m id        = (known after apply)
+      [32m+[0m[0m length    = 3
+      [32m+[0m[0m separator = "-"
+    }
+
+[1m  # random_pet.pet[3][0m must be [1m[31mreplaced[0m
+[0m[31m-[0m/[32m+[0m[0m resource "random_pet" "pet" {
+      [33m~[0m[0m id        = "prime-sole" -> (known after apply)
+      [33m~[0m[0m keepers   = { [31m# forces replacement[0m[0m
+          [33m~[0m[0m "idx" = "3" [33m->[0m[0m "changed"
+            [90m# (1 unchanged element hidden)[0m[0m
+        }
+        [90m# (2 unchanged attributes hidden)[0m[0m
+    }
+
+[1m  # terraform_data.note[0m will be updated in-place
+[0m  [33m~[0m[0m resource "terraform_data" "note" {
+        id     = "f8652bbd-73cc-94d3-7971-045e8221698e"
+      [33m~[0m[0m input  = "v1" [33m->[0m[0m "v2"
+      [33m~[0m[0m output = "v1" -> (known after apply)
+    }
+
+[1mPlan:[0m [0m4 to add, 1 to change, 2 to destroy.
+[0m[1mterraform_data.note: Modifying... [id=f8652bbd-73cc-94d3-7971-045e8221698e][0m[0m
+[0m[1mlocal_file.out[3]: Destroying... [id=cb79c08d6d745b6b32892f82f3ad58753ea0035f][0m[0m
+[0m[1mterraform_data.note: Modifications complete after 0s [id=f8652bbd-73cc-94d3-7971-045e8221698e][0m
+[0m[1mlocal_file.out[3]: Destruction complete after 0s[0m
+[0m[1mrandom_pet.extra[0]: Creating...[0m[0m
+[0m[1mrandom_pet.extra[1]: Creating...[0m[0m
+[0m[1mrandom_pet.extra[1]: Creation complete after 0s [id=singularly-informed-barnacle][0m
+[0m[1mrandom_pet.pet[3]: Destroying... [id=prime-sole][0m[0m
+[0m[1mrandom_pet.extra[0]: Creation complete after 0s [id=daily-exciting-iguana][0m
+[0m[1mrandom_pet.pet[3]: Destruction complete after 0s[0m
+[0m[1mrandom_pet.pet[3]: Creating...[0m[0m
+[0m[1mrandom_pet.pet[3]: Creation complete after 0s [id=adapting-grackle][0m
+[0m[1mlocal_file.out[3]: Creating...[0m[0m
+[0m[1mlocal_file.out[3]: Creation complete after 0s [id=2f69c75576d98846551d4c717a7412d2ed39d2e0][0m
+[0m[1m[32m
+Apply complete! Resources: 4 added, 1 changed, 2 destroyed.[0m

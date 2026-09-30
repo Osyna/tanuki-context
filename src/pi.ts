@@ -24,9 +24,11 @@
 //! needs the file's own layout.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
-import { RUN_INLINE_MAX, routeOutput } from "./crush.ts";
+import { routeOutput } from "./crush.ts";
+import { DELTA_MIN } from "./delta.ts";
 import { charCount, minifyJson } from "./serde.ts";
 import { TOOLS, type Knob } from "./tools.ts";
 
@@ -70,6 +72,29 @@ function lastStep(command: string): string[] | null {
 /// omp appends `Wall time: …` (and the exit code, truncation notice) to a bash
 /// result; the JSON is what comes before it.
 const FOOTER = "\n\nWall time: ";
+
+/// `gh api` prints compact one-line JSON off a TTY (`--jq .` keeps it compact:
+/// measured), and omp cuts a result line at 768 bytes before any tool_result
+/// hook runs. So the tool_call hook wraps a lone `gh api` step in a subshell
+/// that pretty-prints with `jq .` only when jq accepts the body (a text
+/// endpoint or an error body stays gh's own bytes) and exits with gh's own
+/// code. `$(…)` drops trailing newlines; tool_result strips the wrapper again
+/// to see a plain `gh api`.
+const PRETTY_HEAD = "(o=$(";
+const PRETTY_TAIL = `); rc=$?; printf '%s\\n' "$o" | jq . 2>/dev/null || printf '%s\\n' "$o"; exit $rc) #tanuki-pretty`;
+let jqFound: boolean | undefined;
+/// The wrapped form of a `gh api` command that is one simple step (no pipe,
+/// redirect, list, substitution) and asks for plain JSON (no --jq/--template/
+/// --include/--silent/--help); null when it must be left alone.
+function prettyGhApi(command: string): string | null {
+  const c = command.trim();
+  if (/[|;&<>\n`]|\$\(/.test(c)) return null;
+  const w = c.split(/\s+/);
+  if (w[0] !== "gh" || w[1] !== "api") return null;
+  if (w.some((a) => /^--(jq|template|include|silent|verbose|help)\b/.test(a) || /^-[a-z]*[qtih]/.test(a))) return null;
+  jqFound ??= (process.env.PATH ?? "").split(":").some((d) => d !== "" && existsSync(`${d}/jq`));
+  return jqFound ? PRETTY_HEAD + c + PRETTY_TAIL : null;
+}
 
 interface ToolResultEvent {
   toolName: string;
@@ -178,12 +203,19 @@ export default function (pi: ExtensionAPI) {
     client = null;
   });
 
+  pi.on("tool_call", async (event: { toolName: string; input?: { command?: unknown } }) => {
+    if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off" || process.env.TANUKI_MINIFY === "off") return;
+    const command = prettyGhApi(String(event.input?.command ?? ""));
+    if (command !== null) return { input: { ...event.input, command } };
+  });
+
   pi.on("tool_result", async (event: ToolResultEvent) => {
     if (process.env.TANUKI_ROUTE === "off" || FILE_TOOLS.has(event.toolName)) return;
     const blocks = event.content ?? [];
     if (blocks.length === 0 || blocks.some((b) => b.type !== "text")) return;
     const text = blocks.map((b) => b.text ?? "").join("\n");
-    const argv = event.toolName === "bash" ? lastStep(String(event.input?.command ?? "")) : null;
+    const command = String(event.input?.command ?? "");
+    const argv = event.toolName === "bash" ? lastStep(command.startsWith(PRETTY_HEAD) && command.endsWith(PRETTY_TAIL) ? command.slice(PRETTY_HEAD.length, -PRETTY_TAIL.length) : command) : null;
     const cmd = argv?.[0]?.split("/").pop() ?? "";
     // lossless first: JSON output (`docker inspect`, `npm view --json`) is data
     // that distill would drop lines from. Our own results are already shaped
@@ -194,7 +226,7 @@ export default function (pi: ExtensionAPI) {
       const min = minifyJson(cut === -1 ? text : text.slice(0, cut), true);
       if (min !== null) return { content: [{ type: "text" as const, text: cut === -1 ? min : min + text.slice(cut) }] };
     }
-    if (argv === null || !ROUTED.has(cmd) || charCount(text) <= RUN_INLINE_MAX) return;
+    if (argv === null || !ROUTED.has(cmd) || charCount(text) <= DELTA_MIN) return; // routeOutput records runs from DELTA_MIN up (delta vs the previous run); the shrink check below keeps the original when routing does not help
     const code = event.details?.exitCode ?? (event.isError ? 1 : 0);
     let out = routeOutput(argv, text, code, null, (id) => `stashed: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
     // omp truncates before this hook, so the stash holds its view, not every line.

@@ -4,7 +4,8 @@
 // rust-branch binary is present — the same file against the Rust engine via
 // TANUKI_BIN, asserting identical estimate numbers.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 
 const LOG = Array.from({ length: 300 }, (_, i) => `2026-07-26 INFO copied /srv/data/batch/segment_${i % 7}.parquet ok`).join("\n");
@@ -148,6 +149,27 @@ describe("pi extension bash router", () => {
     }
   });
 
+  // A 2 KB `npm test` is under RUN_INLINE_MAX, yet its second identical run
+  // must still reach routeOutput so it can collapse to a delta.
+  test("a mid-size test run repeated in the same stash comes back shorter the second time", async () => {
+    const prev = process.env.TANUKI_STASH;
+    process.env.TANUKI_STASH = mkdtempSync(`${tmpdir()}/tanuki-delta-test-`);
+    try {
+      const mid = Array.from({ length: 60 }, (_, i) => `  ✓ suite case number ${i} passes (${i} ms)`).join("\n") + "\n  ✗ suite broken\n\n61 tests, 1 failed";
+      expect(mid.length).toBeGreaterThan(1500);
+      expect(mid.length).toBeLessThan(8000);
+      const ev = { toolName: "bash", input: { command: "npm test" }, content: [{ type: "text", text: mid }], details: { exitCode: 1 }, isError: true };
+      await route(ev);
+      const second = await route(ev);
+      expect(second).toBeDefined();
+      expect(second!.content[0]!.text).toContain("[tanuki delta] vs previous run");
+      expect(second!.content[0]!.text.length).toBeLessThan(mid.length / 2);
+    } finally {
+      if (prev === undefined) delete process.env.TANUKI_STASH;
+      else process.env.TANUKI_STASH = prev;
+    }
+  });
+
   // Lossless JSON: a data tool's pretty-printed reply loses its indentation
   // and the spaces between tokens; strings (spaces, "\n" escapes, big
   // integers) come through byte-exact, and file views never change shape.
@@ -184,6 +206,56 @@ describe("pi extension bash router", () => {
       expect(await route({ toolName: "mcp__x__y", input: {}, content: [{ type: "text", text: PRETTY }] })).toBeUndefined();
     } finally {
       delete process.env.TANUKI_MINIFY;
+    }
+  });
+
+  // omp cuts a result line at 768 bytes BEFORE tool_result, and `gh api` is
+  // compact one-line JSON off a TTY (`--jq .` keeps it so), so tool_call wraps
+  // a lone `gh api` in `jq .`.
+  const rewrite = async (command: string) => {
+    const r = (await ext.handlers.get("tool_call")!({ toolName: "bash", input: { command, timeout: 5 } }, {})) as { input: Record<string, unknown> } | undefined;
+    return r === undefined ? undefined : r.input;
+  };
+  test("tool_call wraps a lone gh api step in a jq-or-verbatim subshell and keeps the other input fields", async () => {
+    const r = await rewrite("gh api repos/o/r");
+    expect(r).toEqual({ command: `(o=$(gh api repos/o/r); rc=$?; printf '%s\\n' "$o" | jq . 2>/dev/null || printf '%s\\n' "$o"; exit $rc) #tanuki-pretty`, timeout: 5 });
+    expect((await rewrite("gh api -X POST repos/o/r/issues -f title='a b'"))!.command).toContain("exit $rc)");
+    // the wrapped form still routes as gh (minify sees through it)
+    const out = await route({ toolName: "bash", input: { command: r!.command }, content: [{ type: "text", text: PRETTY }] });
+    expect(JSON.parse(out!.content[0]!.text)).toEqual(JSON.parse(PRETTY));
+  });
+  test("the wrapper pretty-prints JSON, keeps a text body verbatim, and always exits with gh's code", async () => {
+    const bin = mkdtempSync(`${tmpdir()}/tanuki-fakegh-`);
+    writeFileSync(`${bin}/gh`, '#!/bin/sh\nprintf "%s" "$FAKE_BODY"; echo "gh: oops" >&2; exit "${FAKE_RC:-0}"\n', { mode: 0o755 });
+    const run = (command: string, env: Record<string, string>) =>
+      spawnSync("bash", ["-c", command], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env }, encoding: "utf8" });
+    try {
+      const cmd = (await rewrite("gh api repos/o/r"))!.command as string;
+      const ok = run(cmd, { FAKE_BODY: '{"a":[1,2],"b":"x y"}' });
+      expect([ok.status, ok.stdout]).toEqual([0, '{\n  "a": [\n    1,\n    2\n  ],\n  "b": "x y"\n}\n']);
+      const zen = run(cmd, { FAKE_BODY: "Keep it logically awesome." });
+      expect([zen.status, zen.stdout]).toEqual([0, "Keep it logically awesome.\n"]);
+      const nf = run(cmd, { FAKE_BODY: '{"message":"Not Found"}', FAKE_RC: "1" });
+      expect(nf.status).toBe(1);
+      expect(nf.stdout).toContain('"message": "Not Found"');
+      expect(nf.stderr).toContain("gh: oops");
+    } finally {
+      rmSync(bin, { recursive: true });
+    }
+  });
+  test("tool_call leaves pipes, redirects, lists, --jq/-q/--template/-t/-i, other commands alone; env switches disable it", async () => {
+    for (const c of ["gh api x | head", "gh api x > o.json", "cd d && gh api x", "gh api x; echo", "gh api x --jq .name", "gh api x -q .name", "gh api x --template '{{.a}}'", "gh api x -t '{{.a}}'", "gh api -i x", "gh api x --silent",
+      "gh pr list", "curl https://x", "echo $(gh api x)", "cargo test"]) {
+      expect(await rewrite(c)).toBeUndefined();
+    }
+    expect(await ext.handlers.get("tool_call")!({ toolName: "read", input: { command: "gh api x" } }, {})).toBeUndefined();
+    for (const k of ["TANUKI_ROUTE", "TANUKI_MINIFY"]) {
+      process.env[k] = "off";
+      try {
+        expect(await rewrite("gh api repos/o/r")).toBeUndefined();
+      } finally {
+        delete process.env[k];
+      }
     }
   });
 });

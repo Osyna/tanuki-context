@@ -63,7 +63,84 @@ function termFreq(lower: string, word: string): number {
   return full > 0 ? full : any ? 1 / 3 : 0;
 }
 
-function stashDir(): string {
+/// Vocabulary gaps: "root cause of the crash" shares no word with `FATAL panic`.
+/// A small fixed table of log vocabulary (symmetric groups, matched on stems)
+/// plus light stemming lets an ask word also hit a synonym or an inflection of
+/// itself. Such a hit counts at half a direct hit's score, with tf pinned to 1
+/// and only when the line has no direct hit for that word, so an expansion can
+/// tie a direct hit at best, never add onto one. Extend from real logs; keep it small.
+const SYN_GROUPS: string[][] = [
+  ["crash", "panic", "fatal", "abort", "segfault", "sigsegv", "sigabrt", "oom", "killed"],
+  ["slow", "latency", "timeout", "timed", "deadline", "delay", "stall", "hang"],
+  ["fail", "failure", "error", "err", "exception", "fault"],
+  ["auth", "authentication", "authorization", "token", "bearer", "unauthorized", "forbidden", "401", "403", "credential", "login"],
+  ["permission", "denied", "eacces", "forbidden", "403"],
+  ["disk", "space", "enospc", "full", "storage"],
+  ["net", "network", "connection", "refused", "reset", "unreachable", "dns", "socket", "econnrefused"],
+  ["start", "boot", "init", "listening", "ready", "launch", "startup"],
+  ["stop", "shutdown", "exit", "terminated", "sigterm", "halt"],
+  ["memory", "heap", "oom", "leak", "alloc"],
+  ["missing", "absent", "notfound", "404", "enoent"],
+  ["deploy", "rollout", "release", "upgrade"],
+  ["corrupt", "corruption", "mismatch", "invalid", "malformed"],
+  ["limit", "quota", "throttle", "ratelimit", "429"],
+  ["config", "configuration", "setting"],
+];
+
+/// Light suffix strip on an ASCII word: plural first (-es after s/x/z/ch/sh, else
+/// -s but not -ss), then one of -ing/-ed/-er; a stem never drops under 3 chars.
+function stem(w: string): string {
+  const cut = (s: string, k: number): string => (s.length - k >= 3 ? s.slice(0, s.length - k) : s);
+  let s = w;
+  if (/(?:s|x|z|ch|sh)es$/.test(s)) s = cut(s, 2);
+  else if (s.endsWith("s") && !s.endsWith("ss")) s = cut(s, 1);
+  if (s.endsWith("ing")) return cut(s, 3);
+  if (s.endsWith("ed") || s.endsWith("er")) return cut(s, 2);
+  return s;
+}
+
+const SYN_INDEX = new Map<string, number[]>();
+SYN_GROUPS.forEach((g, gi) => {
+  for (const m of g) {
+    const k = stem(m);
+    const at = SYN_INDEX.get(k) ?? [];
+    if (!at.includes(gi)) at.push(gi);
+    SYN_INDEX.set(k, at);
+  }
+});
+
+/// Stems an ask word may also match: its own and its synonym groups'. null for
+/// anything that is not a plain ASCII word (after trimming edge punctuation).
+function variantStems(word: string): Set<string> | null {
+  let a = 0;
+  let b = word.length;
+  while (a < b && !isWordUnit(word.charCodeAt(a))) a++;
+  while (b > a && !isWordUnit(word.charCodeAt(b - 1))) b--;
+  const key = word.slice(a, b);
+  if (key.length === 0) return null;
+  for (let i = 0; i < key.length; i++) if (!isWordUnit(key.charCodeAt(i))) return null;
+  const k = stem(key);
+  const set = new Set([k]);
+  for (const gi of SYN_INDEX.get(k) ?? []) for (const m of SYN_GROUPS[gi]) set.add(stem(m));
+  return set;
+}
+
+/// The stems of every word-unit run in a lowercased line.
+function lineStems(lower: string): Set<string> {
+  const out = new Set<string>();
+  let s = -1;
+  for (let i = 0; i <= lower.length; i++) {
+    const u = i < lower.length && isWordUnit(lower.charCodeAt(i));
+    if (u && s === -1) s = i;
+    else if (!u && s !== -1) {
+      out.add(stem(lower.slice(s, i)));
+      s = -1;
+    }
+  }
+  return out;
+}
+
+export function stashDir(): string {
   const env = process.env.TANUKI_STASH;
   if (env !== undefined && env !== "") return env;
   return `${process.env.HOME ?? ""}/.tanuki/stash`;
@@ -80,12 +157,29 @@ function stashPath(id: string): string {
   return `${stashDir()}/${id}`;
 }
 
+/// Read-only lookup for other modules (delta): the stashed text, or null for an
+/// unshaped id or a missing/unreadable file.
+export function stashRead(id: string): string | null {
+  try {
+    return readFileSync(stashPath(id), "utf8");
+  } catch {
+    return null;
+  }
+}
+
 export interface Stashed {
   id: string;
   overview: string;
 }
 
-export function stashText(text: string): Stashed {
+/** A cleaned view of the capture the overview describes instead of the raw
+ *  bytes (kubectl without managedFields); `note` names what was removed. */
+export interface MapView {
+  text: string;
+  note: string;
+}
+
+export function stashText(text: string, view?: MapView): Stashed {
   const id = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
   const dir = stashDir();
   // The stash deliberately holds unredacted bytes, so it is owner-only
@@ -95,7 +189,9 @@ export function stashText(text: string): Stashed {
 
   const bytes = Buffer.byteLength(text, "utf8");
   const segments = text.split("\n");
-  const stats = distillLog(text, null, 2).stats as {
+  const mapText = view?.text ?? text;
+  const mapSegs = view === undefined ? segments : mapText.split("\n");
+  const stats = distillLog(mapText, null, 2).stats as {
     origLines: number;
     outLines: number;
     savedPct: number;
@@ -105,7 +201,7 @@ export function stashText(text: string): Stashed {
 
   const lines: string[] = [
     `stashed ${id} · ${bytes} bytes · ${segments.length} lines`,
-    `distill map: ${stats.origLines} -> ${stats.outLines} lines · ${stats.savedPct}% of chars removable · ${stats.importantKept} error/warn lines`,
+    `distill map${view === undefined ? "" : ` (${view.note})`}: ${stats.origLines} -> ${stats.outLines} lines · ${stats.savedPct}% of chars removable · ${stats.importantKept} error/warn lines`,
   ];
   if (stats.topRepeats.length > 0) {
     lines.push("top repeats:");
@@ -115,13 +211,13 @@ export function stashText(text: string): Stashed {
     }
   }
   let last = "";
-  for (let i = segments.length - 1; i >= 0; i--) {
-    if (segments[i] !== "") {
-      last = segments[i];
+  for (let i = mapSegs.length - 1; i >= 0; i--) {
+    if (mapSegs[i] !== "") {
+      last = mapSegs[i];
       break;
     }
   }
-  lines.push(`first: ${truncateChars(rustTrim(segments[0]), 160)}`);
+  lines.push(`first: ${truncateChars(rustTrim(mapSegs[0]), 160)}`);
   lines.push(`last: ${truncateChars(rustTrim(last), 160)}`);
   lines.push(`fetch: tanuki_fetch {"id":"${id}","query":"<regex>"} or {"id":"${id}","lines":"a-b"}`);
   return { id, overview: lines.join("\n") };
@@ -180,38 +276,69 @@ export function fetchSlice(
     let total = 0;
     for (const d of dl) total += d;
     const avg = total / N;
-    const idf = tf.map((col) => {
-      const df = col.filter((f) => f > 0).length;
+    // variant hits: expansion-only lines (no direct hit for that word)
+    const vsets = words.map(variantStems);
+    // a token's stem is a prefix of the token, so a line holding none of a word's
+    // stems as a substring cannot match; tokenise only the lines that pass
+    const cache: (Set<string> | undefined)[] = new Array(N);
+    const vh = words.map((_, j) => {
+      const vs = vsets[j];
+      const out = new Uint8Array(N);
+      if (vs === null) return out;
+      const arr = [...vs];
+      const col = tf[j];
+      for (let i = 0; i < N; i++) {
+        const l = lowers[i];
+        if (col[i] !== 0 || !arr.some((s) => l.includes(s))) continue;
+        const st = (cache[i] ??= lineStems(l));
+        for (const s of st) {
+          if (vs.has(s)) {
+            out[i] = 1;
+            break;
+          }
+        }
+      }
+      return out;
+    });
+    const idf = tf.map((col, j) => {
+      let df = col.filter((f) => f > 0).length;
+      if (df === 0) for (let i = 0; i < N; i++) df += vh[j][i];
       return Math.log(1 + (N - df + 0.5) / (df + 0.5));
     });
-    interface Anchor { line: number; score: number }
+    // `mask`: bit 2j = word j hit directly, bit 2j+1 = hit through a synonym/stem
+    interface Anchor { line: number; score: number; mask: number }
     const anchors: Anchor[] = [];
     for (let i = 0; i < N; i++) {
       let score = 0;
-      let hit = false;
+      let mask = 0;
       for (let j = 0; j < words.length; j++) {
         const f = tf[j][i];
         if (f > 0) {
-          hit = true;
+          mask |= 1 << (2 * j);
           score += (idf[j] * (f * (FIND_K1 + 1))) / (f + FIND_K1 * (1 - FIND_B + (FIND_B * dl[i]) / avg));
+        } else if (vh[j][i] !== 0) {
+          mask |= 2 << (2 * j);
+          score += ((idf[j] * (1 * (FIND_K1 + 1))) / (1 + FIND_K1 * (1 - FIND_B + (FIND_B * dl[i]) / avg))) * 0.5;
         }
       }
       // integer micro-points: ordering and the window max are exact, so a last-bit
       // difference between the engines' ln() cannot reorder two lines
-      if (hit) anchors.push({ line: i + 1, score: rnd(score * 1e6) });
+      if (mask !== 0) anchors.push({ line: i + 1, score: rnd(score * 1e6), mask });
     }
+    const termsOf = (mask: number): string =>
+      words.flatMap((w, j) => ((mask >> (2 * j)) & 1 ? [w] : (mask >> (2 * j)) & 2 ? [`${w}~`] : [])).join(", ");
     const h = anchors.length;
     if (h === 0) return `·find· ${words.length} words · 0 lines matched`;
     // Top K anchors by (score desc, line asc)
     const k = Math.min(Math.max(1, top), 32);
     const topAnchors = anchors.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.line - b.line)).slice(0, k);
     // Build windows: each anchor -> [max(1,n-2), min(N,n+2)]
-    interface Window { start: number; end: number; score: number }
+    interface Window { start: number; end: number; score: number; terms: string }
     const windows: Window[] = [];
     for (const anc of topAnchors) {
       const start = Math.max(1, anc.line - 2);
       const end = Math.min(N, anc.line + 2);
-      windows.push({ start, end, score: anc.score });
+      windows.push({ start, end, score: anc.score, terms: termsOf(anc.mask) });
     }
     // Merge overlapping/adjacent windows
     windows.sort((a, b) => a.start - b.start);
@@ -222,13 +349,16 @@ export function fetchSlice(
       } else {
         const last = merged[merged.length - 1];
         last.end = Math.max(last.end, win.end);
-        last.score = Math.max(last.score, win.score);
+        if (win.score > last.score) {
+          last.score = win.score;
+          last.terms = win.terms;
+        }
       }
     }
     // Output
     const parts: string[] = [];
     for (const win of merged) {
-      parts.push(`·find· L${win.start}-${win.end} score ${(rnd(win.score / 1e5) / 10).toFixed(1)}`);
+      parts.push(`·find· L${win.start}-${win.end} score ${(rnd(win.score / 1e5) / 10).toFixed(1)} · ${win.terms}`);
       parts.push(segments.slice(win.start - 1, win.end).join("\n"));
     }
     parts.push(`·find· ${words.length} words · ${h} lines matched · ${merged.length} windows`);

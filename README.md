@@ -159,8 +159,20 @@ test suite::broken ... FAILED
 stashed: tanuki_fetch {"id":"2ab362e1c9fc","query":"<regex>"} or {"id":"2ab362e1c9fc","lines":"a-b"}
 ```
 
+omp cuts every result line at 768 bytes *before* a hook sees it, and `gh api`
+prints compact one-line JSON when it is not on a terminal, so its answer used to
+arrive cut mid-string. A lone `gh api ...` step (no `--jq`/`--template`, no
+pipe or redirect) is now rewritten before it runs to
+`(o=$(gh api ...); rc=$?; printf '%s\n' "$o" | jq . 2>/dev/null || printf '%s\n' "$o"; exit $rc)`:
+the JSON arrives pretty-printed (so no line hits the cap), the exit code is gh's,
+and anything jq cannot parse is passed through verbatim. `gh api repos/Osyna/tanuki-context`
+went from one 5,910-char line cut at 768 bytes to 149 complete lines that parse;
+`.../commits?per_page=3` then shrank 14 % under the lines-kept minify. Needs `jq`
+on PATH; otherwise the step runs unchanged.
+
 `TANUKI_ROUTE=off` turns the router off; `TANUKI_MINIFY=off` keeps JSON results
-indented (hook and proxy). `TANUKI_BIN=/path/to/tanuki-context`
+indented (hook and proxy) and leaves `gh api` alone; `TANUKI_DELTA=off` turns off
+the run-to-run delta ([below](#run-the-one-to-try-first)). `TANUKI_BIN=/path/to/tanuki-context`
 runs the tools on the Rust binary instead of Node; the stash is shared, so a
 routed output fetches the same on either engine.
 
@@ -238,9 +250,10 @@ npx tanuki-context proxy
 ```
 tanuki-context proxy on http://127.0.0.1:8484 -> https://api.anthropic.com
   level=0 distill=false codebook=false font=normal recency=1 minChars=4000 ratio=0.75 minSave=300
-  rules: system prompt & tools untouched · in-place blocks only · last 1 message(s) kept as text
-         · secrets never imaged · cache_control skipped · identical blocks imaged once
-         · imaged prefix marked cacheable · pretty JSON tool results minified (lossless)
+  rules: system prompt & tools untouched · edits spliced into your own request bytes (nothing else moves)
+         · in-place blocks only · last 1 message(s) kept as text · secrets never imaged
+         · cache_control blocks never imaged · identical blocks imaged once · imaged prefix marked cacheable
+         · auto cache breakpoint once the prefix holds · pretty JSON tool results minified (lossless)
   point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
 ```
 
@@ -260,17 +273,36 @@ unchanged rather than the request failing.
 One rewrite is lossless and applies everywhere, the latest message included: a
 `tool_result` that is pretty-printed JSON loses the whitespace between its
 tokens (strings byte-exact). It is the same output for the same input on every
-request, so the block never changes under the API's prompt cache. A request
-holding a number the JSON round-trip would re-spell (16+ digits outside a
-string) is forwarded byte-for-byte, untouched.
+request, so the block never changes under the API's prompt cache.
 
-The Rust binary re-serialises a rewritten request with object keys sorted
-(serde_json), where the Node engine keeps your client's order; the content is
-the same. Whether key order alone moves the API cache is unverified. A request
-that images nothing and holds no pretty JSON result is forwarded byte-for-byte
-by both, and `TANUKI_MINIFY=off` keeps it that way for JSON results too.
+A rewritten request is your own request with only the changed values replaced,
+byte for byte: key order, spacing, escapes and number spellings of everything
+else (system prompt, tools, every other message) reach the API exactly as your
+client wrote them, in both engines, so an id past 2^53 or `1.50` is never
+re-printed. A request that images nothing and holds no pretty JSON result is
+forwarded untouched; `TANUKI_MINIFY=off` turns the JSON minify off. Each block is
+minified once per session (a memo keyed by its hash, with a whitespace pre-check
+that skips already-compact JSON without a parse): 200 messages of 28 KB pretty
+JSON cost 17 % as much on the second request of a session as on the first.
 
-Knobs worth knowing: `--distill` drops repeated log noise before drawing,
+**Cache breakpoint.** If your client never places a `cache_control` on a
+message, the proxy adds one after two consecutive requests whose earlier messages
+matched (the prefix demonstrably holds), on the last block before the recency
+window: never a fifth breakpoint, never on a thinking or empty block, never when
+you placed one yourself. `--no-auto-cache` or `TANUKI_AUTO_CACHE=off` turns it
+off; `--no-cache` turns off every breakpoint. It has not been measured against
+the live API. If your client rewrites the same message on three requests in a row
+(a timestamp inside a message, say) the cache never holds; the proxy says so once
+on stderr and logs `client_break` per request.
+
+The events log now carries the estimator's predicted input tokens next to the
+billed ones (`input + cache_read + cache_creation`), and `tanuki_stats` reports
+`estimatedInputTokens`, `billedInputTokens` and `estimatorRatioPct` (100 = the
+estimator that gates imaging matches the bill; below 100 it under-predicts).
+Client-sent images and unknown block types count 0 in the estimate.
+
+Knobs worth knowing: `--no-auto-cache` (or `TANUKI_AUTO_CACHE=off`) skips the
+automatic breakpoint, `--distill` drops repeated log noise before drawing,
 `--min-chars 4000` sets how big a block has to be before it is worth touching,
 `--recency 1` is how many recent messages stay text, `--port` and `--upstream`
 move it somewhere else.
@@ -296,7 +328,7 @@ installed it globally.
 | `estimate <file>` | Prices the file. Renders nothing. Add `--model`, `--cached`, `--distill`, `--codebook`, `--font tiny`. |
 | `run -- <command>` | Runs your command, prints a shrunk version of the output, stashes the full thing. |
 | `stash <file>` | Parks the file and returns a map of it plus an id. |
-| `fetch <id>` | Pulls slices back out with `--query <regex>`, `--lines 40-90`, or `--find "free words"` (BM25-ranked windows: plain language works, rare words outweigh common ones; never imaged). |
+| `fetch <id>` | Pulls slices back out with `--query <regex>`, `--lines 40-90`, or `--find "free words"` (BM25-ranked windows: plain language works, rare words outweigh common ones, log synonyms and inflections match at half weight, each window header lists the ask words it matched; never imaged). |
 | `verify <id> <value>` | Checks a value against the stored original. No model involved. |
 | `render <file> [level] [outdir]` | Writes the actual PNG pages to a directory. |
 | `distill <file>` | Prints the text with repeated lines collapsed, errors untouched. |
@@ -327,6 +359,34 @@ fetch: tanuki_fetch {"id":"e82f2452b264","query":"<regex>"} or {"id":"e82f2452b2
 
 The exit code is preserved, the error and warning lines are all still there, and
 the full 394 KB is one `fetch` away whenever you want it.
+
+**More output types (0.23).** `run` also reads the *shape* of what a command
+printed. NDJSON lines lose the whitespace between tokens (per line, strings
+untouched); column-aligned tables (`docker ps`, `kubectl get`, `ps aux`,
+`df -h`, `pip list`) get one TAB between columns instead of padding (no cell is
+ever split; needs 10 % saved); `kubectl ... -o yaml|json --show-managed-fields`
+drops `metadata.managedFields` (server bookkeeping) and says how many lines went;
+`terraform plan/apply` collapses the `Refreshing state...` / `Reading...` /
+`Read complete` progress lines into one count line while every `#`, `+`, `-`, `~`
+diff line, the `Plan:` summary and every error stay byte-exact. Rules chain
+(`cargo+ndjson`, `table+list-cap`) and the full capture is stashed as always.
+On real captures: a kubectl YAML dump of 29,863 chars comes back as 572 (0.22.1:
+2,847, mostly the first 200 lines of bookkeeping); a `terraform plan` of 6,085
+chars with nothing to change, 352; `docker ps` 824 -> 560. A document whose
+cleaned form is still bigger than the answer 0.22.1 gave falls back to the stash
+map, described from the cleaned text, never to a larger answer.
+
+**Delta between runs.** Run the same command again in the same directory and the
+answer leads with what changed instead of repeating itself:
+`[tanuki delta] vs previous run 9f8c1c7644bb · exit 101 (same) · 1 fixed · 1 new`,
+the fixed and new failing tests, changed counts (`was:` / `now:`), and every
+block identical to the previous run collapses to
+`(same as previous run: 4 lines, fetch id 9f8c1c7644bb)`. Two `npm test` runs that
+differ only in timings: 2,353 -> 212 chars (2,412 alone; 832 -> 78 o200k
+tokens). The previous run lives in the stash, one `fetch` away.
+`TANUKI_DELTA=off` turns it off. Caveat: a change that only touches a masked token
+(a timestamp, a duration) reads as identical, and the fixed/new lists rely on
+test-runner vocabulary.
 
 ### stash, fetch, verify: the exact-bytes path
 
@@ -497,7 +557,7 @@ section.
 | `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
 | `stash` | content beyond the window | n/a, a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation, a capability. | [§7](reference/EVALS.md) |
 | `fetch` + match-count | slice retrieval | n/a | **retrieval precision 73.3%** across 5 strategies | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
-| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count (pure rare-word asks tied; an answer sharing no word with the ask is still missed) | Rare words now outweigh the ones on every line. Never imaged. | [§10](reference/EVALS.md) |
+| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count (pure rare-word asks tied); 0.23 adds a fixed log-synonym table and light stemming: on 24 asks whose answer shares no whole word with the ask, right line first **19/24 vs 0/24** | Rare words outweigh the ones on every line; a synonym counts half a direct hit. Never imaged. | [§10](reference/EVALS.md), [§16](reference/EVALS.md) |
 | JSON minify (0.22) | pretty-printed JSON tool results (proxy, omp/pi hook) | **17-28%** fewer o200k tokens one-line (proxy), **11-20%** with line breaks kept (hook), on real `npm view --json`, `gh api \| jq .`, `gh run list --json`, `docker inspect` | lossless: whitespace between tokens only, strings and number spellings byte-exact; cache-stable (same bytes from the first request) | Default on, `TANUKI_MINIFY=off` to disable. File views never touched. | this README |
 | `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop. Covers the sidecar's residual. | [§7](reference/EVALS.md) |
 | Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
@@ -514,7 +574,7 @@ section.
 | Fail-open | any transform throw | n/a | survives malformed, astral-plane and null-byte bodies | Essential. A throw used to kill every in-flight call. | [§6](reference/EVALS.md) |
 | Session diagnostics (0.20) | every proxied request | n/a (diagnosis, not savings) | cache-break attribution, never-invoked tool tax, volatile-system-prompt flag; zero forwarded bytes changed | ctxdiff's questions answered live; found a real classifier bug via a Rust panic. | [§14](reference/EVALS.md) |
 | **(accounting)** | | | | | |
-| `textTokens` (class-weighted) | every routing decision | n/a | real content **median 3.3% / worst 16.2%**, vs `chars/4` at 38.3% / 65.6% | Fixed a 3× error in both directions. One documented bound: 239% on pure camelCase blobs. | [§9](reference/EVALS.md) |
+| `textTokens` (class-weighted) | every routing decision | n/a | real content **median 3.3% / worst 16.2%** vs `chars/4` at 38.3% / 65.6% (fit against Claude counts); against OpenAI's o200k on the committed command outputs it **over-counts by 29%** (token-weighted; mean per-payload error 32%), worst on short punctuation-heavy output | Fixed a 3× error in both directions. Over-counting only makes imaging and minify decisions more conservative. Documented bounds: 239% on pure camelCase blobs; the o200k drift is gated so it cannot grow. | [§9](reference/EVALS.md), [§19](reference/EVALS.md) |
 | Output-share reporting | every workload | n/a | **output = 53.3% of spend** | **The ceiling: no input-side tool can cut more than 46.7% of the bill.** Tightens as the tool succeeds. | [§6](reference/EVALS.md) |
 
 **The three-line version.** Unconditional value: `distill` (30 to 94%), `table`
@@ -653,10 +713,16 @@ reimplemented from scratch, measured, and credits:
 
 **A model-free gate on committed and seeded inputs fails the build if any of
 these gets worse** versus `reference/gate-baseline.json`: run-rule savings per
-real command output, distill size with its planted answers, id catch rate,
-`find` ranking, JSON minify, proxy saving (estimator tokens, not billed ones),
-imaging cost, and speed as a ratio to a fixed workload in the same process.
-Model-dependent figures (read-back accuracy, billed tokens) are outside it.
+real command output (chars and o200k tokens, and that each 0.23 rule fires),
+delta second-run size, distill size with its planted answers, id catch rate,
+`find` ranking (seeded set and the vocabulary-gap set), JSON minify, proxy saving
+(estimator tokens, not billed ones), proxy memo timing, byte-exact splicing and
+the automatic-breakpoint schedule, the estimator's drift from o200k, imaging
+cost, and speed as a ratio to a fixed workload in the same process.
+Model-dependent figures (read-back accuracy, billed tokens) are outside it; a
+nightly job ([EVALS §18](reference/EVALS.md)) measures read-back when an API key
+is configured, and [EVALS §17](reference/EVALS.md) compares the run rules with rtk
+and context-mode, including where rtk is smaller.
 `bun reference/gate.mjs` runs in CI after the tests; `--update` records a new
 baseline and refuses while anything regressed.
 

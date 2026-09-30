@@ -40,6 +40,10 @@ export function pxStats(): object {
   let actual = 0;
   let output = 0;
   let savedCacheAware = 0;
+  // T2b: the estimator's prediction next to what was billed, over the rows
+  // that carry both (an error response bills nothing and scrapes no usage)
+  let estimated = 0;
+  let estBilled = 0;
   // F4 diagnostic accumulators
   let cacheBreakCount = 0;
   let cacheBreakRebilled = 0;
@@ -69,10 +73,16 @@ export function pxStats(): object {
     baseline += asU64(o["baseline_tokens"]) ?? 0;
     const ca = o["saved_tokens_cache_aware"];
     savedCacheAware += typeof ca === "number" && Number.isSafeInteger(ca) ? ca : 0;
-    actual +=
+    const billed =
       (asU64(o["input_tokens"]) ?? 0) +
       (asU64(o["cache_read_tokens"]) ?? 0) +
       (asU64(o["cache_create_tokens"]) ?? 0);
+    actual += billed;
+    const est = asU64(o["est_input_tokens"]) ?? 0;
+    if (est > 0 && billed > 0) {
+      estimated += est;
+      estBilled += billed;
+    }
     output += asU64(o["output_tokens"]) ?? 0;
     
     // F4: collect cache break stats
@@ -134,6 +144,14 @@ export function pxStats(): object {
       output > 0 ? new Float(rnd((output / (actual + output)) * 1000.0) / 10.0) : null,
   };
   
+  // T2b: how far the estimator that gates every imaging decision sits from the
+  // bill (100 = exact). Only when the log has rows that carry both figures.
+  if (estBilled > 0) {
+    result.estimatedInputTokens = estimated;
+    result.billedInputTokens = estBilled;
+    result.estimatorRatioPct = new Float(rnd((estimated / estBilled) * 1000.0) / 10.0);
+  }
+
   // F4: cache break stats line (only when applicable)
   if (cacheBreakCount > 0 && lastBreak !== null) {
     result.cacheBreaks = `cache breaks: ${cacheBreakCount}/${requests} requests · ${cacheBreakRebilled} tok rebilled · last: block ${lastBreak.index} ${lastBreak.kind}`;

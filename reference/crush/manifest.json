@@ -121,6 +121,184 @@
       "exit": 0,
       "lines": 0,
       "synthetic": true
+    },
+    {
+      "file": "cargo-test-fail-1.log",
+      "cmd": [
+        "cargo",
+        "test"
+      ],
+      "exit": 101,
+      "lines": 67,
+      "pair": "cargo-test",
+      "run": 1
+    },
+    {
+      "file": "cargo-test-fail-2.log",
+      "cmd": [
+        "cargo",
+        "test"
+      ],
+      "exit": 101,
+      "lines": 69,
+      "pair": "cargo-test",
+      "run": 2
+    },
+    {
+      "file": "npm-test-1.log",
+      "cmd": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "lines": 80,
+      "pair": "npm-test",
+      "run": 1
+    },
+    {
+      "file": "npm-test-2.log",
+      "cmd": [
+        "npm",
+        "test"
+      ],
+      "exit": 0,
+      "lines": 80,
+      "pair": "npm-test",
+      "run": 2
+    },
+    {
+      "file": "cargo-test-json.log",
+      "cmd": [
+        "cargo",
+        "test",
+        "--",
+        "-Z",
+        "unstable-options",
+        "--format",
+        "json",
+        "--report-time"
+      ],
+      "exit": 101,
+      "lines": 31
+    },
+    {
+      "file": "ps-aux.log",
+      "cmd": [
+        "ps",
+        "aux"
+      ],
+      "exit": 0,
+      "lines": 17
+    },
+    {
+      "file": "df-h.log",
+      "cmd": [
+        "df",
+        "-h",
+        "-x",
+        "fuse.rclone"
+      ],
+      "exit": 0,
+      "lines": 13
+    },
+    {
+      "file": "kubectl-get-pods.log",
+      "cmd": [
+        "kubectl",
+        "get",
+        "pods",
+        "-A"
+      ],
+      "exit": 0,
+      "lines": 10
+    },
+    {
+      "file": "kubectl-get-yaml.log",
+      "cmd": [
+        "kubectl",
+        "get",
+        "deployments,services,configmaps",
+        "-A",
+        "-o",
+        "yaml",
+        "--show-managed-fields"
+      ],
+      "exit": 0,
+      "lines": 973
+    },
+    {
+      "file": "kubectl-get-json.log",
+      "cmd": [
+        "kubectl",
+        "get",
+        "deployments,services,configmaps",
+        "-A",
+        "-o",
+        "json",
+        "--show-managed-fields"
+      ],
+      "exit": 0,
+      "lines": 1225
+    },
+    {
+      "file": "kubectl-get-yaml-default.log",
+      "cmd": [
+        "kubectl",
+        "get",
+        "deployments,services,configmaps",
+        "-A",
+        "-o",
+        "yaml"
+      ],
+      "exit": 0,
+      "lines": 490
+    },
+    {
+      "file": "terraform-plan.log",
+      "cmd": [
+        "terraform",
+        "plan"
+      ],
+      "exit": 0,
+      "lines": 125
+    },
+    {
+      "file": "terraform-plan-noop.log",
+      "cmd": [
+        "terraform",
+        "plan"
+      ],
+      "exit": 0,
+      "lines": 79
+    },
+    {
+      "file": "terraform-plan-fail.log",
+      "cmd": [
+        "terraform",
+        "plan"
+      ],
+      "exit": 1,
+      "lines": 89
+    },
+    {
+      "file": "terraform-apply.log",
+      "cmd": [
+        "terraform",
+        "apply",
+        "-auto-approve"
+      ],
+      "exit": 0,
+      "lines": 951
+    },
+    {
+      "file": "terraform-apply-change.log",
+      "cmd": [
+        "terraform",
+        "apply",
+        "-auto-approve"
+      ],
+      "exit": 0,
+      "lines": 145
     }
   ]
 }

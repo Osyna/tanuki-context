@@ -95,3 +95,65 @@ export function needleCorpus(r, needles) {
   });
   return lines.join("\n") + "\n";
 }
+
+/**
+ * Vocabulary-gap set for `find`: 24 plain-language asks, each with ONE gold line
+ * in a 600-line noisy log. No ask word is a whole word of its gold line (and no
+ * ask word of 4+ letters is a substring of it); the gold shares only a synonym
+ * (15 asks, one per synonym group, so two golds never tie on one group) or a
+ * word stem (9 asks) with the ask. The noise repeats common ask words
+ * (service, server, request, database, process, retry) on purpose: a
+ * surface-word search is drawn to those lines.
+ */
+export const VOCAB_GAP = [
+  ["why did the service crash", "FATAL panic: invariant violated in shard-router"],
+  ["which request was slow", "WARN handler exceeded deadline after 30000ms path=/v1/export"],
+  ["login attempt for the invoicing user", "WARN 401 unauthorized principal=svc-billing"],
+  ["disk problem on the node", "ERROR volume full /dev/nvme0n1p2 97%"],
+  ["network problem reaching the database", "ERROR dns lookup db-primary.internal:5432 returned servfail"],
+  ["when did the server start", "INFO listening on 0.0.0.0:8443 after cold boot"],
+  ["who stops the scheduler", "INFO sigterm received, draining pid=812"],
+  ["memory usage grew overnight", "WARN heap at 94% of cap, gc pause=800ms"],
+  ["what is missing from the store", "ERROR 404 bucket=assets key=logo.svg"],
+  ["bad configuration value", "ERROR invalid setting retention_days=-3"],
+  ["rate limiting kicked in", "WARN throttle engaged bucket drained 429"],
+  ["which release is live", "INFO rollout 7/7 complete version=4.2.0"],
+  ["corrupted data on replay", "ERROR checksum mismatch segment=0007"],
+  ["permission problem on the cron task", "ERROR eacces opening /etc/schedule.lock"],
+  ["frequent timeouts from peers", "WARN timed out waiting on 10.0.4.2:8443"],
+  ["retrying uploads", "WARN retry 3/5 upload chunk=88"],
+  ["compacting segments", "INFO compacted segment ids=3..9 in 41ms"],
+  ["indexing documents", "INFO indexed 4210 document batches"],
+  ["deleting snapshots", "INFO deleted snapshot snap-0043"],
+  ["restarting collectors", "INFO restart collector pid=4411"],
+  ["closing streams", "INFO closed stream id=41"],
+  ["rotating certificates", "INFO rotated certificate serial=7f"],
+  ["scheduling jobs", "INFO scheduled job 88"],
+  ["validating payloads", "INFO validated payload size=8kb"],
+];
+
+const NOISE = [
+  (n) => `INFO request served path=/v1/items/${n} status=200 latency=${n % 41}ms`,
+  (n) => `INFO worker heartbeat ok pool=${n % 9}`,
+  (n) => `DEBUG cache hit key=k${n}`,
+  (n) => `WARN retry status=502 backoff=${1 + (n % 8)}s`,
+  (n) => `ERROR request failed status=502 peer=10.0.${n % 9}.${n % 200}`,
+  (n) => `INFO service health check ok tick=${n}`,
+  (n) => `INFO database pool size=${n % 32}`,
+  (n) => `INFO server accepted connection id=${n}`,
+  (n) => `INFO user session refreshed sid=${n}`,
+  (n) => `INFO process tick scheduler lag=${n % 7}ms`,
+];
+
+/** 600 noise lines with the 24 gold lines spliced in at seeded positions. */
+export function vocabGapCorpus() {
+  const r = lcg(2718);
+  const lines = Array.from({ length: 600 }, (_, i) => {
+    const ts = `2026-07-27T10:${String((i / 10) % 60 | 0).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
+    return `${ts} ${UNITS[(r() * UNITS.length) | 0]} ${NOISE[(r() * NOISE.length) | 0]((r() * 1000) | 0)}`;
+  });
+  const golds = VOCAB_GAP.map(([, g], i) => `2026-07-27T11:00:${String(i).padStart(2, "0")}Z relay ${g}`);
+  // spread by stride so no two golds share a +-2 window; 600/24 = 25 lines apart
+  golds.forEach((g, i) => lines.splice(i * 25 + 3 + i + ((r() * 15) | 0), 0, g));
+  return { text: lines.join("\n") + "\n", asks: VOCAB_GAP.map(([ask], i) => ({ ask, gold: golds[i] })) };
+}

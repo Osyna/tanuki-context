@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/ledger-1d75e0b47ee2583e)
+{ "type": "suite", "event": "started", "test_count": 13 }
+{ "type": "test", "event": "started", "name": "tests::balance_of_nothing_is_zero" }
+{ "type": "test", "event": "started", "name": "tests::balance_sums_entries" }
+{ "type": "test", "event": "started", "name": "tests::fee_is_deducted" }
+{ "type": "test", "event": "started", "name": "tests::fee_never_negative" }
+{ "type": "test", "event": "started", "name": "tests::fee_rounds_toward_zero" }
+{ "type": "test", "event": "started", "name": "tests::interest_compounds_yearly" }
+{ "type": "test", "event": "started", "name": "tests::interest_zero_years_is_principal" }
+{ "type": "test", "event": "started", "name": "tests::parse_handles_whitespace" }
+{ "type": "test", "event": "started", "name": "tests::parse_plain_amount" }
+{ "type": "test", "event": "started", "name": "tests::parse_rejects_garbage" }
+{ "type": "test", "event": "started", "name": "tests::report_matches_golden" }
+{ "type": "test", "event": "started", "name": "tests::split_evenly_keeps_total" }
+{ "type": "test", "event": "started", "name": "tests::split_evenly_spreads_remainder" }
+{ "type": "test", "name": "tests::fee_is_deducted", "event": "ok", "exec_time": 0.000001273 }
+{ "type": "test", "name": "tests::balance_sums_entries", "event": "ok", "exec_time": 0.000001903 }
+{ "type": "test", "name": "tests::balance_of_nothing_is_zero", "event": "ok", "exec_time": 0.000001062 }
+{ "type": "test", "name": "tests::interest_zero_years_is_principal", "event": "ok", "exec_time": 0.000000371 }
+{ "type": "test", "name": "tests::fee_never_negative", "event": "failed", "exec_time": 0.000024827, "stdout": "\nthread 'tests::fee_never_negative' (487030) panicked at src/lib.rs:99:9:\nassertion failed: apply_fee(50, 200) >= 0\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "tests::interest_compounds_yearly", "event": "ok", "exec_time": 0.000000771 }
+{ "type": "test", "name": "tests::fee_rounds_toward_zero", "event": "ok", "exec_time": 0.000000671 }
+{ "type": "test", "name": "tests::parse_plain_amount", "event": "ok", "exec_time": 0.000003717 }
+{ "type": "test", "name": "tests::parse_rejects_garbage", "event": "ok", "exec_time": 0.000006863 }
+{ "type": "test", "name": "tests::split_evenly_keeps_total", "event": "ok", "exec_time": 0.000001463 }
+{ "type": "test", "name": "tests::parse_handles_whitespace", "event": "failed", "exec_time": 0.000043272, "stdout": "\nthread 'tests::parse_handles_whitespace' (487034) panicked at src/lib.rs:104:9:\nassertion `left == right` failed\n  left: Err(\"bad amount \\\"$ 7.00\\\": invalid digit found in string\")\n right: Ok(700)\n" }
+{ "type": "test", "name": "tests::report_matches_golden", "event": "failed", "exec_time": 0.000017903, "stdout": "\nthread 'tests::report_matches_golden' (487037) panicked at src/lib.rs:113:13:\nreport differs from golden:\n--- got ---\nITEM      AMOUNT\nrent      120000\nfood       45000\nfuel       18000\nphone       6000\ngym         3500\ntea         1200\nTOTAL     193700\n--- want ---\nITEM      AMOUNT\nrent      120000\nfood       45000\nfuel       18000\nphone       6000\ngym         3500\ntea         1200\nTOTAL     193000\n--- end ---\n" }
+{ "type": "test", "name": "tests::split_evenly_spreads_remainder", "event": "ok", "exec_time": 0.000000891 }
+{ "type": "suite", "event": "failed", "passed": 10, "failed": 3, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.000264807 }
+error: test failed, to rerun pass `--lib`

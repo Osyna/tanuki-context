@@ -1,0 +1,69 @@
+   Compiling ledger v0.1.0 (/tmp/ctxrules/cargo-demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/ledger-1d75e0b47ee2583e)
+
+running 13 tests
+test tests::balance_of_nothing_is_zero ... ok
+test tests::balance_sums_entries ... ok
+test tests::fee_rounds_toward_zero ... ok
+test tests::fee_is_deducted ... ok
+test tests::interest_zero_years_is_principal ... ok
+test tests::fee_never_negative ... ok
+test tests::interest_compounds_yearly ... FAILED
+test tests::parse_handles_whitespace ... FAILED
+test tests::parse_plain_amount ... ok
+test tests::parse_rejects_garbage ... ok
+test tests::split_evenly_keeps_total ... ok
+test tests::split_evenly_spreads_remainder ... ok
+test tests::report_matches_golden ... FAILED
+
+failures:
+
+---- tests::interest_compounds_yearly stdout ----
+
+thread 'tests::interest_compounds_yearly' (487199) panicked at src/lib.rs:89:9:
+assertion `left == right` failed
+  left: 110000
+ right: 110250
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::parse_handles_whitespace stdout ----
+
+thread 'tests::parse_handles_whitespace' (487201) panicked at src/lib.rs:104:9:
+assertion `left == right` failed
+  left: Err("bad amount \"$ 7.00\": invalid digit found in string")
+ right: Ok(700)
+
+---- tests::report_matches_golden stdout ----
+
+thread 'tests::report_matches_golden' (487204) panicked at src/lib.rs:113:13:
+report differs from golden:
+--- got ---
+ITEM      AMOUNT
+rent      120000
+food       45000
+fuel       18000
+phone       6000
+gym         3500
+tea         1200
+TOTAL     193700
+--- want ---
+ITEM      AMOUNT
+rent      120000
+food       45000
+fuel       18000
+phone       6000
+gym         3500
+tea         1200
+TOTAL     193000
+--- end ---
+
+
+failures:
+    tests::interest_compounds_yearly
+    tests::parse_handles_whitespace
+    tests::report_matches_golden
+
+test result: FAILED. 10 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

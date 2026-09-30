@@ -49,7 +49,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { opsCorpus } from "./lib/corpus.mjs";
+import { opsCorpus, vocabGapCorpus } from "./lib/corpus.mjs";
 import { callTools } from "./lib/mcp.mjs";
 import { hex, lcg, UNITS } from "./lib/rand.mjs";
 
@@ -351,6 +351,53 @@ control(
   `${counts[0].unit}=${counts[0].n} over ${counts[1].unit}=${counts[1].n}; if the marker ever stops reporting raw\n` +
     "        counts this flips, and the unit question stops being answerable from text at all",
 );
+
+// ---- vocabulary gaps: asks whose answer shares no surface word ----------------
+// `find` only. Every gold line shares a synonym or a word stem with its ask and
+// no whole word (guarded below), so surface BM25 cannot rank it first except by
+// luck; the noise repeats common ask words as decoys. Reported as hit@1 and MRR
+// over the printed window scores, like the gate's find set.
+const VG = vocabGapCorpus();
+const vgWords = (s) => s.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
+const vgShared = VG.asks.filter(({ ask, gold }) => {
+  const gw = new Set(vgWords(gold));
+  const gl = gold.toLowerCase();
+  return vgWords(ask).some((w) => gw.has(w) || (w.length >= 4 && gl.includes(w)));
+});
+control(
+  `vocab-gap fixture: ${VG.asks.length} asks, none shares a surface word with its gold line`,
+  VG.asks.length >= 20 && vgShared.length === 0,
+  vgShared.map((a) => `"${a.ask}"`).join(", "),
+);
+const vgStash = await callTools(CMD, ARGS, [{ name: "tanuki_stash", arguments: { text: VG.text } }], OPTS);
+const VGID = /stashed ([0-9a-f]{12})/.exec(vgStash[0].text)?.[1];
+const vgOut = await callTools(
+  CMD,
+  ARGS,
+  VG.asks.map(({ ask }) => ({ name: "tanuki_fetch", arguments: { id: VGID, find: ask, top: 8, redact: false } })),
+  OPTS,
+);
+const vgGoldLine = (gold) => VG.text.split("\n").indexOf(gold) + 1;
+let vgHit1 = 0;
+let vgMrr = 0;
+const vgMiss = [];
+VG.asks.forEach(({ ask, gold }, i) => {
+  const at = vgGoldLine(gold);
+  const ranked = [...vgOut[i].text.matchAll(/^·find· L(\d+)-(\d+) score (\S+)/gm)]
+    .map((m) => ({ a: +m[1], b: +m[2], s: +m[3] }))
+    .sort((x, y) => y.s - x.s || x.a - y.a);
+  const rank = ranked.findIndex((w) => w.a <= at && at <= w.b);
+  if (rank === 0) vgHit1++;
+  else vgMiss.push(`"${ask}" -> rank ${rank === -1 ? "none" : rank + 1}`);
+  vgMrr += rank === -1 ? 0 : 1 / (rank + 1);
+});
+console.log(
+  `\nvocabulary gaps (find, ${VG.asks.length} asks, ${VG.text.split("\n").length - 1} lines): ` +
+    `hit@1 ${vgHit1}/${VG.asks.length}, MRR ${(vgMrr / VG.asks.length).toFixed(3)}` +
+    (vgMiss.length ? `\n  misses: ${vgMiss.join("; ")}` : ""),
+);
+// 17/24 = 70%: a clear majority. Before synonyms and stems this set scored far lower.
+control(`vocab-gap hit@1 is a clear majority (>= 17 of ${VG.asks.length})`, vgHit1 >= 17, `${vgHit1} measured`);
 
 // ---- gate -------------------------------------------------------------------
 if (failures > 0) {

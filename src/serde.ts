@@ -149,6 +149,15 @@ export function minifyJson(text: string, keepLines = false): string | null {
   } catch {
     return null;
   }
+  const out = stripJsonSpace(t, keepLines);
+  return charCount(out) * 10 > charCount(text) * 9 ? null : out;
+}
+
+/** The whitespace-only pass of `minifyJson`: `t` must already be valid JSON.
+ *  ASCII whitespace outside strings goes (newlines too unless `keepLines`),
+ *  every byte inside a string stays. Also the per-line minify of the NDJSON
+ *  crush rule. */
+export function stripJsonSpace(t: string, keepLines = false): string {
   let out = "";
   let inStr = false;
   let esc = false;
@@ -166,8 +175,7 @@ export function minifyJson(text: string, keepLines = false): string | null {
       from = i + 1;
     }
   }
-  out += t.slice(from);
-  return charCount(out) * 10 > charCount(text) * 9 ? null : out;
+  return out + t.slice(from);
 }
 
 /**
