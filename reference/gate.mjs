@@ -356,6 +356,26 @@ function sectionProxyBytes(ctx, put) {
   const plain = run("q0");
   const client = run([{ type: "text", text: "q0", cache_control: { type: "ephemeral" } }]);
   put("proxy.auto_cache_schedule_ok", plain.join() === "0,0,1" && client.join() === "1,1,1" ? 1 : 0, "higher");
+  // --prune-tools: a 26-tool list shaped like Claude Code's (four everyday tools, the rest big and
+  // never called across 20+ conversations). The stub keeps names and first lines: tokens saved per
+  // request, and the same tool bytes on the next request even after the evidence changes.
+  const pad = (n, s) => Array.from({ length: n }, (_, i) => `${s} clause ${i} of the long usage contract, with detail ${(i * 7919) % 1000}.`).join(" ");
+  const tool = (name, n) => ({ name, description: `${name} does one job.\n${pad(n, name)}`, input_schema: { type: "object", properties: { arg: { type: "string", description: pad(n >> 2, name) } }, required: ["arg"] } });
+  const used = ["Bash", "Read", "Edit", "Grep"];
+  const names = [...used, ...Array.from({ length: 22 }, (_, i) => `Tool${i}`)];
+  const tools = names.map((n, i) => tool(n, used.includes(n) ? 8 : 12 + (i % 5) * 6));
+  const map = Object.fromEntries(names.map((n) => [n, { adv: 25, used: used.includes(n) ? 12 : 0 }]));
+  const psess = newSession();
+  psess.toolUsage = { load: () => map, bump: () => {} };
+  const preq = (turn) => JSON.stringify({ model: "claude-sonnet-4-5", tools, messages: [msg("user", "q0"), ...(turn ? [msg("assistant", "a0"), msg("user", "q1")] : [])] });
+  const pcfg = { ...cfg, pruneTools: "stub" };
+  const p1 = transformRequestBody(preq(0), pcfg, psess);
+  for (const n of names) if (!used.includes(n)) map[n].used = 9; // the evidence turns; this conversation keeps its list
+  const p2 = transformRequestBody(preq(1), pcfg, psess);
+  const toolsOf = (b) => b.slice(b.indexOf('"tools"'), b.indexOf('"messages"'));
+  put("proxy.prune_tokens_saved_per_request", p1?.prunedTools?.tokens ?? 0, "higher");
+  put("proxy.prune_kept_tools", JSON.parse(p1?.body ?? "{}").tools?.filter((t) => JSON.stringify(t.input_schema) !== '{"type":"object"}').length ?? 0, "higher");
+  put("proxy.prune_bytes_stable", p1 && p2 && toolsOf(p1.body) === toolsOf(p2.body) ? 1 : 0, "higher");
 }
 
 /** 8. estimator drift: how far src/serde.ts textTokens is from o200k on the

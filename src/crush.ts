@@ -6,8 +6,9 @@
 
 import { DELTA_MIN, diffRuns, previousRun, recordRun, runKey, type Delta } from "./delta.ts";
 import { distillLog } from "./distill.ts";
-import { charCount, pct, rustTrim, stripJsonSpace } from "./serde.ts";
-import { stashText, type MapView, type Stashed } from "./stash.ts";
+import { logStash } from "./ledger.ts";
+import { charCount, pct, rustTrim, stripJsonSpace, textTokens } from "./serde.ts";
+import { stashId, stashText, type MapView, type Stashed } from "./stash.ts";
 
 /** Chars (~2k tokens) of command output handed back inline. */
 // ponytail: fixed budget; make it a knob if real usage ever wants one.
@@ -67,13 +68,21 @@ export function routeOutput(
     return lines.join("\n");
   };
   const out = compose(crushed, delta?.body ?? null, false);
-  if (crushed.rule === null || !crushed.rule.includes("managedfields")) return out;
+  if (crushed.rule === null || !crushed.rule.includes("managedfields")) return finish(out);
   // Dropping managedFields makes a document readable inline, but a larger
   // answer than the run wrapper gave before that rule existed is a
   // regression: then it is the map, described from the cleaned document.
   const before = compose(crushOutput(cmd, captured, code, false), null, false);
-  if (charCount(out) <= charCount(before)) return out;
-  return compose(crushed, delta?.body ?? null, true, { text: crushed.text, note: "managedFields dropped" });
+  if (charCount(out) <= charCount(before)) return finish(out);
+  return finish(compose(crushed, delta?.body ?? null, true, { text: crushed.text, note: "managedFields dropped" }));
+
+  /** Every answer that points at (or maps) the stash is a ledger row: the
+   *  tokens it saved now, so a later fetch can be charged against them. */
+  function finish(answer: string): string {
+    const id = stashId(captured);
+    if (answer.includes(id)) logStash(id, crushed.rule ?? "distill", textTokens(captured) - textTokens(answer));
+    return answer;
+  }
 }
 
 export interface Crushed {

@@ -1267,6 +1267,48 @@ deliberately unchanged: the parity harness and every pricing decision are
 defined on it. Over-counting makes imaging and minify decisions more
 conservative, not more aggressive.
 
+## 20. Net savings, fetch back-off, tool pruning   *(measured live)*
+
+Setup: Claude Code 2.1.285, `claude -p --model claude-sonnet-5-5`, `CLAUDE_CONFIG_DIR=~/.tanuki/claude`, through `tanuki-context proxy`; runs interleaved across arms, fresh copy and stash per run, bootstrap 95 % intervals.
+
+**Net accounting and back-off.** Task: 40 calibration values that a checker reveals five at a time behind a 9 KB verbose trace that distill collapses (so the model has to `fetch`); `tanuki-context run -- python3 check.py` in CLAUDE.md; 8 sessions per arm.
+
+| | back-off on | back-off off |
+|---|---|---|
+| solved | 8/8 | 8/8 |
+| billed input tokens / session | 560,743 [461K, 681K] | 526,599 [417K, 648K] |
+| paired on-off, billed input | +34,145 [-98,660, +190,859] | |
+| paired on-off, cost | +$0.0096 [-$0.025, +$0.049] | |
+| fetches / session (mean, median) | 14.0, 14 | 54.2, 5.5 |
+| ledger: saved / fetched back (tokens/session) | 50,266 / 7,508 | 119,247 / 8,083 |
+
+No gain, so the back-off is removed. Why it cannot win here: the fixture's 9,210-char output is 3,780 tokens raw, 318 as the normal answer; shown whole it is 3,821 (+3,503 per run); a fetch of the lines the model needed returns about 500. Break-even is about seven fetches per run, live median was 1-2. The accounting stays: fetched-back tokens are 6.8 % of what the stashes saved (8,083 of 119,247, back-off off).
+
+**Tool pruning.** 5 tasks (create a file, fix a failing unit test, rename across files, summarise docs, collect TODOs) x 4 reps per arm; the evidence file came from 5 warm-up conversations, so `--prune-min 5` (default 20 needs more history; 5 is a stress setting that also stubs `Read`, which the warm-up tasks never called). Claude Code sends 26 tools here (72,103 chars of definitions, about 20K tokens).
+
+| arm | solved | input tokens / request | cache-read share | cost / session |
+|---|---|---|---|---|
+| off | 20/20 | 38,157 | 89.6 % | $0.0709 [0.0696, 0.0722] |
+| stub | 20/20 | 16,675 | 74.9 % | $0.0587 [0.0570, 0.0609] |
+| drop | 20/20 | 15,168 | 72.1 % | $0.0574 [0.0561, 0.0589] |
+
+Paired against off: input per request -21,490 [-21,528, -21,452] (stub), -22,993 [-23,029, -22,956] (drop); cost -$0.0121 [-0.0139, -0.0100] and -$0.0135 [-0.0151, -0.0118]. No tool errors and no call of an unadvertised tool in any arm. The tool bytes are identical on every request of a session (`proxy.prune_bytes_stable`). Open, not measured: a task that genuinely needs a pruned tool (the stub is meant to recover it; `drop` recovers on the next session), sessions longer than 5 requests, and whether the cached prefix survives across many sessions at `--prune-min 20`.
+
+**Recovery of a pruned tool.** The evidence (10 conversations) had `Read` and `NotebookEdit` advertised and never called, so both were stubbed / dropped. Two tasks that use them, 5 reps per arm, same setup (an earlier `nb` run was discarded: the harness had not allowed `NotebookEdit`, so `off` and `stub` failed on permission, not on pruning).
+
+| task | arm | solved | tool errors | calls | input/request | cost / session |
+|---|---|---|---|---|---|---|
+| nb (edit a notebook cell) | off | 5/5 | 0 | Read 5, NotebookEdit 5 | 38,109 | $0.0253 |
+| | stub | 5/5 | 1 (an unrelated `Edit` refusal) | Read 5, NotebookEdit 5 | 16,675 | $0.0156 |
+| | drop | 5/5 | 5 (`Edit`: "File is a Jupyter Notebook. Use the NotebookEdit") | Bash 10, Edit 5 | 15,203 | $0.0268 |
+| readfile (count lines of a file) | off / stub / drop | 5/5 each | 0 | Bash only | 37,958 / 16,458 / 14,968 | $0.0598 / $0.0513 / $0.0507 |
+
+`stub`: the stubbed `Read` and `NotebookEdit` were called with their real arguments straight away, with no validation error, so the stub costs nothing here. `drop`: the model met the client's hint at a tool that was no longer advertised, fell back to `Bash` (a small script rewriting the notebook JSON) and solved 5/5, at one more turn (4.0 against 3.0) and $0.0268 against $0.0253 for `off`. So recovery works in both modes; `stub` recovers with no detour, `drop` with a detour, which is why `stub` is the default. Nothing was changed in the design. Still open: tasks that need a pruned tool with arguments the model cannot guess.
+
+**Own MCP schemas.** `tools/list` default surface: 893 estimator tokens for six tools (render 215, estimate 253, fetch 183, verify 102, stash 82, stats 48). About 3 % of Claude Code's own furniture, so not trimmed.
+
+**Vision side (Tier 10).** SPIRAL (arXiv 2608.02109, Qwen3-VL-8B VTCBench 35.10 -> 54.02): github.com/Tianyu-Liang-seu/SPIRAL holds only LICENSE, README and assets; the README says code, checkpoints and data recipes are "coming soon", the four checkpoints are listed as "Coming soon" and no Hugging Face model exists. Not runnable, so the readback-nightly figure (0/14 for the local VLM) is unchanged. RenderRank (2609.35069) releases `nlpai-lab/RenderRank-2B`, a text reranker over rendered documents, not a page reader.
+
 ## Reproduce
 
 ```

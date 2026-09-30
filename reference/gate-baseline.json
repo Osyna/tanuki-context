@@ -500,5 +500,17 @@
   "value": 4.07,
   "better": "lower-speed",
   "limit": 6
+ },
+ "proxy.prune_tokens_saved_per_request": {
+  "value": 12132,
+  "better": "higher"
+ },
+ "proxy.prune_kept_tools": {
+  "value": 4,
+  "better": "higher"
+ },
+ "proxy.prune_bytes_stable": {
+  "value": 1,
+  "better": "higher"
  }
 }

@@ -8,7 +8,7 @@
 // compressed bytes for identical pixels, so pages are compared as pixels.
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pngPixels } from "./lib/png.mjs";
@@ -83,15 +83,40 @@ const CASES = [
   `{"messages":[{"role":"user","content":[{"type":"text","text":${JSON.stringify(BIG)}}, {} ]},{"role":"user","content":"latest"}]}`,
 ];
 
+// --prune-tools: one shared piece of usage evidence (a file per engine, same bytes) and a
+// tool list with a multi-line unicode description, a cache_control tool and a typed tool.
+// Three requests in one session: the list is reduced on the first, the second reuses the
+// verdict (same bytes), the third is a different list whose history calls one of its tools.
+const USAGE = JSON.stringify({ Bash: { adv: 9, used: 9 }, Grep: { adv: 9, used: 0 }, Notebook: { adv: 9, used: 0 }, Cached: { adv: 9, used: 0 }, Late: { adv: 9, used: 0 }, Few: { adv: 2, used: 0 } });
+const SCHEMA = '{"type":"object","properties":{"path":{"type":"string","description":"x"}},"required":["path"]}';
+const PTOOLS =
+  `[{"name":"Bash","description":"Run a command.\\nMore.","input_schema":${SCHEMA}},` +
+  `{"input_schema":${SCHEMA},"description":"  caf\\u00e9 \\u2603 \\"quoted\\" search tool, first line only \\r\\nsecond","name":"Grep"},` +
+  `{"name":"Notebook","description":"Edit notebooks","input_schema":${SCHEMA}},` +
+  `{"name":"Cached","description":"c","input_schema":${SCHEMA},"cache_control":{"type":"ephemeral"}},` +
+  '{"type":"web_search_20250305","name":"Late","max_uses":3},' +
+  `{"name":"Few","description":"rarely advertised","input_schema":${SCHEMA}}]`;
+const PLIST = [
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS},"messages":[{"role":"user","content":"hi"}]}`,
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"},{"role":"user","content":"again"}]}`,
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS.replace('"name":"Few"', '"name":"Fewer"')},"messages":[{"role":"user","content":"go"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Grep","input":{"path":"a"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}]}`,
+  // other conversations that force / have called a pruned tool: that tool stays whole (their own decision)
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS},"tool_choice":{"type":"tool","name":"Notebook"},"messages":[{"role":"user","content":"other"}]}`,
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS},"messages":[{"role":"user","content":"third"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Notebook","input":{"path":"a"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}]}`,
+  // the memoised conversation of requests 1-2 now forces a pruned tool: the client's own list goes out
+  `{"model":"m","max_tokens":16,"tools":${PTOOLS},"tool_choice":{"type":"tool","name":"Notebook"},"messages":[{"role":"user","content":"hi"}]}`,
+];
+const usageFile = (label) => { const f = join(tmpdir(), `tanuki-usage-parity-${process.pid}-${label}.json`); writeFileSync(f, USAGE); return f; };
+
 const EVENTS = join(tmpdir(), `tanuki-proxy-parity-${process.pid}.jsonl`);
 
 /// Post every body of `bodies` in order through one proxy process (one session)
 /// and return what upstream received for each.
-async function runEngine(label, cmd, args, bodies) {
+async function runEngine(label, cmd, args, bodies, extraEnv = {}) {
   const port = 18000 + Math.floor(Math.random() * 2000);
   const p = spawn(cmd, [...args, "--port", String(port), "--upstream", `http://127.0.0.1:${upPort}`], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, TANUKI_EVENTS: EVENTS },
+    env: { ...process.env, TANUKI_EVENTS: EVENTS, TANUKI_TOOL_USAGE: join(tmpdir(), `tanuki-usage-parity-${process.pid}-default-${label}.json`), ...extraEnv },
   });
   let ready = false;
   p.stderr.on("data", (d) => { if (String(d).includes("proxy on")) ready = true; });
@@ -114,6 +139,9 @@ const TS_ARGS = [process.env.TANUKI_TS_CLI ?? "dist/cli.js", "proxy"];
 const [ts] = await runEngine("ts", "node", TS_ARGS, [REQ]);
 const tsConv = await runEngine("ts", "node", [...TS_ARGS, "--auto-cache"], CONV); // the breakpoint is opt-in
 const tsCases = await runEngine("ts", "node", TS_ARGS, CASES);
+const pruneModes = [["stub", "--prune-tools", "stub", "--prune-min", "3"], ["drop", "--prune-tools", "drop", "--prune-min", "3"]];
+const tsPrune = {};
+for (const [m, ...a] of pruneModes) tsPrune[m] = await runEngine("ts", "node", [...TS_ARGS, ...a], PLIST, { TANUKI_TOOL_USAGE: usageFile(`ts-${m}`) });
 // The Rust engine is a sibling worktree, not a dependency, so it is absent in
 // a plain CI checkout. Compare cross-engine when it is there; otherwise still
 // assert the single-engine invariants (breakpoint placement, recency window
@@ -123,8 +151,11 @@ const haveRust = existsSync(RS_BIN);
 const [rs] = haveRust ? await runEngine("rust", RS_BIN, ["proxy"], [REQ]) : [null];
 const rsConv = haveRust ? await runEngine("rust", RS_BIN, ["proxy", "--auto-cache"], CONV) : null;
 const rsCases = haveRust ? await runEngine("rust", RS_BIN, ["proxy"], CASES) : null;
+const rsPrune = {};
+if (haveRust) for (const [m, ...a] of pruneModes) rsPrune[m] = await runEngine("rust", RS_BIN, ["proxy", ...a], PLIST, { TANUKI_TOOL_USAGE: usageFile(`rs-${m}`) });
 upstream.close();
 rmSync(EVENTS, { force: true });
+for (const f of readdirSync(tmpdir())) if (f.startsWith(`tanuki-usage-parity-${process.pid}-`)) rmSync(join(tmpdir(), f), { force: true });
 
 const jt = JSON.parse(ts);
 const last = jt.messages[0].content.at(-1);
@@ -191,6 +222,24 @@ const casesPixels = !haveRust || tsCases.every((b, i) => {
   return x.length === y.length && x.every((d, j) => d.w === y[j].w && d.h === y[j].h && d.px.equals(y[j].px));
 });
 console.log(`pages of the extra cases pixel-identical: ${casesPixels}`);
-const ok = same && convSame && casesSame && casesPixels && imgSame && spliced && minified && convOk && last?.cache_control?.type === "ephemeral";
+// --prune-tools: raw bytes across engines, and the single-engine invariants (the tools that must
+// survive do, the verdict is byte-stable across requests 1 and 2, a called tool is never reduced).
+const toolNames = (b) => JSON.parse(b).tools.map((t) => t.name);
+const toolsBytes = (b) => b.slice(b.indexOf('"tools"'), b.indexOf('"messages"'));
+const pruneSame = !haveRust || pruneModes.every(([m]) => tsPrune[m].every((b, i) => rawCompare(`raw bodies (prune-tools ${m}, request ${i + 1})`, b, rsPrune[m][i])));
+const pruneOk =
+  toolNames(tsPrune.stub[0]).join() === "Bash,Grep,Notebook,Cached,Late,Few" &&
+  JSON.parse(tsPrune.stub[0]).tools[1].description === "caf\u00e9 \u2603 \"quoted\" search tool, first line only" &&
+  JSON.stringify(JSON.parse(tsPrune.stub[0]).tools[2]) === '{"name":"Notebook","description":"Edit notebooks","input_schema":{"type":"object"}}' &&
+  toolNames(tsPrune.drop[0]).join() === "Bash,Cached,Late,Few" &&
+  toolsBytes(tsPrune.drop[0]) === toolsBytes(tsPrune.drop[1]) &&
+  toolNames(tsPrune.drop[2]).join() === "Bash,Grep,Cached,Late,Fewer" &&
+  [3, 4].every((i) => ["stub", "drop"].every((m) => JSON.stringify(JSON.parse(tsPrune[m][i]).tools[2]) === JSON.stringify(JSON.parse(PLIST[i]).tools[2]))) &&
+  // the evidence moved during the session (Grep was called in request 3, Few's advertise count crossed 3)
+  toolNames(tsPrune.drop[3]).join() === "Bash,Grep,Notebook,Cached,Late" &&
+  toolNames(tsPrune.drop[4]).join() === "Bash,Grep,Notebook,Cached,Late" &&
+  ["stub", "drop"].every((m) => toolsBytes(tsPrune[m][5]) === toolsBytes(PLIST[5]));
+console.log(`prune-tools verdict kept byte-stable, called tool kept: ${pruneOk}`);
+const ok = same && convSame && casesSame && casesPixels && pruneSame && pruneOk && imgSame && spliced && minified && convOk && last?.cache_control?.type === "ephemeral";
 console.log(ok ? "\nPASS" : "\nFAIL");
 process.exit(ok ? 0 : 1);

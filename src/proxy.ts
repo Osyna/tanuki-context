@@ -1,7 +1,10 @@
 //! Implicit mode: a local Anthropic middlebox, the pxpipe deployment shape
 //! without pxpipe's structural flaw. Rules that keep it injection-shaped-free:
 //!
-//!   1. The system prompt and tool definitions are NEVER touched.
+//!   1. The system prompt and tool definitions are NEVER touched - except by the
+//!      opt-in `--prune-tools`, which decides ONCE per conversation (from
+//!      cross-session usage evidence) which never-called tools to reduce, and
+//!      forwards the same bytes on every later request so the cached prefix holds.
 //!   2. Nothing moves between roles or positions: an oversized text block is
 //!      replaced IN PLACE by a short overt marker + PNG page blocks, in the
 //!      same user-role message (Anthropic allows image blocks in user content
@@ -51,7 +54,8 @@ import { createHash } from "node:crypto";
 import { compressText } from "./ladder.ts";
 import { renderText, type Font } from "./render.ts";
 import { eventsPath } from "./stats.ts";
-import { JSON_MIN_CHARS, charCount, isObj, minifyJson, rnd, rustTrim, textTokens } from "./serde.ts";
+import { JSON_MIN_CHARS, charCount, isObj, minifyJson, rnd, rustTrim, textTokens, truncateChars } from "./serde.ts";
+import { fileUsage, type UsageStore } from "./toolusage.ts";
 
 // Volatile prompt shapes, same patterns as distill.ts's masks (F4). Declared
 // WITHOUT the g flag: .test() on a g-regex is stateful (lastIndex carries
@@ -111,6 +115,8 @@ export interface ProxyCfg {
   cache: boolean; // place a cache breakpoint on the last imaged message (default on)
   autoCache: boolean; // add one breakpoint before the recency window once the prefix holds (default off)
   verbatim: Verbatim; // sidecar next to the pages: full · lazy pointer · off
+  pruneTools: "off" | "stub" | "drop"; // leave never-called tools out of the request, decided once per conversation (default off)
+  pruneMin: number; // ...only tools advertised in at least this many conversations and called in none
 }
 
 export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
@@ -127,6 +133,8 @@ export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   cache: true,
   autoCache: false,
   verbatim: "full",
+  pruneTools: "off",
+  pruneMin: 20,
 };
 
 interface ImagedBlock {
@@ -245,6 +253,8 @@ export interface TransformResult {
   cacheBreak: { index: number; kind: string; rebilled: number } | null;
   toolTax: { unused: string[]; tokens: number } | null;
   volatileSystem: boolean;
+  /** tools left out (dropped, or reduced to a stub) by --prune-tools, and the tokens that saved. */
+  prunedTools: { names: string[]; tokens: number } | null;
 }
 
 export interface ProxySession {
@@ -290,6 +300,17 @@ export interface ProxySession {
   /// memoised per session like the minify one. Holds only immutable data.
   imageMemo: Map<string, ImagedBlock | null>;
   imageChars: number;
+  /// --prune-tools: the decision per conversation (tool list + first message), made on
+  /// its first request and reused byte-for-byte after - a tool list that changes
+  /// mid-conversation would rewrite the cached prefix. null = nothing to prune.
+  /// Bounded: the oldest conversation goes at 2000.
+  pruneMemo: Map<string, PrunedList | null>;
+  /// where the per-tool usage evidence lives; null = none (no counting, no pruning).
+  toolUsage: UsageStore | null;
+  /// conversations already counted (tool list + first message, cache_control stripped) ->
+  /// the tool names already counted as used in each. Insertion order = age: the oldest
+  /// goes first when the map is full.
+  convs: Map<string, Set<string>>;
 }
 
 /// `min` null = "leave it alone" (not JSON, too small, or under the 10 % saving).
@@ -312,6 +333,9 @@ export function newSession(): ProxySession {
     memoChars: 0,
     imageMemo: new Map(),
     imageChars: 0,
+    pruneMemo: new Map(),
+    toolUsage: null,
+    convs: new Map(),
   };
 }
 
@@ -347,6 +371,7 @@ interface Span {
   items?: Span[]; // array elements
   content?: Span; // member "content" (the root's "messages")
   text?: Span; // member "text"
+  toolsAt?: number; // root only: where the "tools" value starts
   last: number; // end of the last member/element value, -1 when empty
 }
 
@@ -423,6 +448,7 @@ function objSpan(raw: string, s: number, root: boolean): Span {
     } else {
       end = valEnd(raw, i);
       if (!root && key === "text") sp.text = { s: i, e: end, last: -1 };
+      if (root && key === "tools") sp.toolsAt = i;
     }
     sp.last = end;
     i = wsEnd(raw, end);
@@ -463,13 +489,14 @@ function valSpan(raw: string, i: number): Span {
   return { s: i, e: valEnd(raw, i), last: -1 };
 }
 
-/// One span per element of the top-level "messages" array.
-function scanMessages(raw: string): Span[] {
+/// One span per element of the top-level "messages" array, and where "tools" starts.
+function scanRoot(raw: string): { messages: Span[]; toolsAt?: number } {
   const at = wsEnd(raw, 0);
   if (raw.charCodeAt(at) !== 0x7b) throw new Error("splice: body is not an object");
-  const items = objSpan(raw, at, true).content?.items;
+  const root = objSpan(raw, at, true);
+  const items = root.content?.items;
   if (items === undefined) throw new Error("splice: no messages array");
-  return items;
+  return { messages: items, toolsAt: root.toolsAt };
 }
 
 const need = <T>(v: T | undefined): T => {
@@ -609,6 +636,140 @@ export function transformRequestBody(
   }
 }
 
+// ------------------------------------------------------------ tool pruning
+/// A tool list, reduced once. `parts` are the array's elements as forwarded (the
+/// client's own bytes for a kept tool, a stub for a reduced one).
+interface PrunedList {
+  parts: string[];
+  parsed: unknown[];
+  names: string[];
+  tokens: number;
+}
+
+/// Byte ranges of the elements of the JSON array starting at `at`.
+function elemRanges(raw: string, at: number): [number, number][] {
+  const out: [number, number][] = [];
+  let i = wsEnd(raw, at + 1);
+  if (raw.charCodeAt(i) === 0x5d) return out;
+  for (;;) {
+    const e = valEnd(raw, i);
+    out.push([i, e]);
+    i = wsEnd(raw, e);
+    if (raw.charCodeAt(i) !== 0x2c) return out;
+    i = wsEnd(raw, i + 1);
+  }
+}
+
+/// Names the request already uses: every tool_use in its history, plus a forced
+/// tool_choice. Never pruned, and credited as used.
+function calledNames(body: Record<string, unknown>): Set<string> {
+  const out = new Set<string>();
+  for (const m of body.messages as unknown[]) {
+    if (!isObj(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) if (isObj(b) && b.type === "tool_use" && typeof b.name === "string") out.add(b.name);
+  }
+  if (isObj(body.tool_choice) && body.tool_choice.type === "tool" && typeof body.tool_choice.name === "string") out.add(body.tool_choice.name);
+  return out;
+}
+
+/// The stub a reduced tool keeps: name, its description's first line, an open
+/// object schema. Still callable - the client validates the real arguments and
+/// its own error names what was missing - so a wrongly pruned tool is one retry
+/// away, not gone. Built by hand so both engines print the same key order.
+function stubJson(name: string, description: unknown): string {
+  const d = typeof description === "string" ? truncateChars(rustTrim(description.split("\n")[0]), 160) : "";
+  return `{"name":${JSON.stringify(name)},"description":${JSON.stringify(d)},"input_schema":{"type":"object"}}`;
+}
+
+/// Decide, once per CONVERSATION, which tools this client never calls. Only
+/// client-defined tools with a schema and no cache_control are candidates; one
+/// is pruned when the usage evidence shows it advertised in at least
+/// `cfg.pruneMin` conversations and called in none, and the request's own
+/// history does not call it. The verdict is memoised by the conversation key
+/// (tool list + first message), so every later request of the conversation
+/// forwards the same bytes - the tools sit at the head of the cached prefix and
+/// must never change under it - while a conversation that starts after the
+/// evidence crossed the threshold is pruned even in a long-running proxy. The
+/// unused tools cross `pruneMin` together, so the pruned set rarely differs from
+/// one conversation to the next. The memo is bounded like the conversation map.
+function prunedList(raw: string, at: number, body: Record<string, unknown>, conv: string, cfg: ProxyCfg, session: ProxySession): { memo: PrunedList | null; end: number } {
+  const end = valEnd(raw, at);
+  const called = calledNames(body);
+  if (session.pruneMemo.has(conv)) {
+    // a tool this request forces or already called is never hidden: it gets the client's
+    // own list (one cache miss, never a 400). In stub mode that is the recovery path: a
+    // stubbed tool the model called is shown whole from then on.
+    const memo = session.pruneMemo.get(conv)!;
+    return { memo: memo !== null && memo.names.some((n) => called.has(n)) ? null : memo, end };
+  }
+  const tools = body.tools as unknown[];
+  const ranges = elemRanges(raw, at);
+  if (ranges.length !== tools.length) throw new Error("splice: span/tool count mismatch");
+  const usage = session.toolUsage === null ? {} : session.toolUsage.load();
+  const list: PrunedList = { parts: [], parsed: [], names: [], tokens: 0 };
+  tools.forEach((t, i) => {
+    const u = isObj(t) && typeof t.name === "string" ? usage[t.name] : undefined;
+    const candidate =
+      isObj(t) &&
+      typeof t.name === "string" &&
+      (t.type === undefined || t.type === "custom") &&
+      isObj(t.input_schema) &&
+      t.cache_control === undefined &&
+      !called.has(t.name) &&
+      u !== undefined &&
+      u.adv >= cfg.pruneMin &&
+      u.used === 0;
+    if (!candidate) {
+      list.parts.push(raw.slice(ranges[i][0], ranges[i][1]));
+      list.parsed.push(t);
+      return;
+    }
+    const tool = t as Record<string, unknown>;
+    list.names.push(tool.name as string);
+    list.tokens += textTokens(canonJson(tool));
+    if (cfg.pruneTools === "stub") {
+      const stub = stubJson(tool.name as string, tool.description);
+      list.parts.push(stub);
+      list.parsed.push(JSON.parse(stub));
+      list.tokens -= textTokens(canonJson(list.parsed[list.parsed.length - 1]));
+    }
+  });
+  const memo = list.names.length > 0 ? list : null;
+  if (session.pruneMemo.size >= CONVS_MAX) session.pruneMemo.delete(session.pruneMemo.keys().next().value as string);
+  session.pruneMemo.set(conv, memo);
+  return { memo, end };
+}
+
+/// A `cache_control` member with its comma: a client moving its breakpoint must not make
+/// the same conversation look new. Same pattern in proxy.rs.
+const CC_MEMBER = /,\s*"cache_control"\s*:\s*\{[^{}]*\}|"cache_control"\s*:\s*\{[^{}]*\}\s*,?/g;
+const CONVS_MAX = 2000;
+
+/// The conversation a request belongs to: its tool list plus its first message, cache_control ignored.
+function convKey(raw: string, at: number, first: Span): string {
+  return createHash("sha256").update(raw.slice(at, valEnd(raw, at)), "utf8").update("\0").update(raw.slice(first.s, first.e).replace(CC_MEMBER, ""), "utf8").digest("hex");
+}
+
+/// Count this request in the usage evidence: the tools it advertises (once per
+/// conversation - the same list and first message, breakpoints ignored) and the
+/// tools it uses (its history's tool_use blocks and a forced tool_choice; once per
+/// conversation and name). `hidden` = tools this request's forwarded list left
+/// out: the client did advertise them, but the model never saw them, so a "never
+/// called" there is no evidence and they are not counted as advertised.
+function countToolUsage(conv: string, tools: unknown[], body: Record<string, unknown>, hidden: string[], session: ProxySession): void {
+  const store = session.toolUsage;
+  if (store === null) return;
+  const known = session.convs.get(conv);
+  const credited = known ?? new Set<string>();
+  const adv = known !== undefined ? [] : tools.flatMap((t) => (isObj(t) && typeof t.name === "string" && !hidden.includes(t.name) ? [t.name] : []));
+  const used = [...calledNames(body)].filter((n) => !credited.has(n));
+  if (adv.length === 0 && used.length === 0 && known !== undefined) return;
+  if (known === undefined && session.convs.size >= CONVS_MAX) session.convs.delete(session.convs.keys().next().value as string);
+  for (const n of used) credited.add(n);
+  session.convs.set(conv, credited);
+  store.bump(adv, used);
+}
+
 function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefined): TransformResult | null {
   let body: unknown;
   try {
@@ -621,7 +782,8 @@ function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefin
   // Spans of the values the rewrite may replace, in the ORIGINAL bytes. The
   // parsed tree below is still edited in step (diagnostics hash what the API
   // will see), but it is never printed: the output is `raw` with `reps` applied.
-  const spans = scanMessages(raw);
+  const root = scanRoot(raw);
+  const spans = root.messages;
   if (spans.length !== msgs.length) throw new Error("splice: span/message count mismatch");
   const reps = new Map<number, Rep>();
   const put = (sp: Span, parts: string[], wrap = false): void => {
@@ -630,6 +792,23 @@ function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefin
   const touched = new Set<number>(); // messages the proxy rewrote (T8b)
   const preTok = new Map<object, number>(); // minified tool_result texts: tokens already known
   const clientCC = msgs.some((m) => isObj(m) && scanBreakpoints(m.content) > 0); // the client caches on its own
+
+  // --prune-tools: reduce the tool list once per conversation (see prunedList). Usage
+  // is counted either way, so the evidence fills while pruning is still off.
+  let prunedTools: TransformResult["prunedTools"] = null;
+  if (session !== undefined && root.toolsAt !== undefined && spans.length > 0 && Array.isArray(body.tools) && body.tools.length > 0) {
+    const tools = body.tools;
+    const conv = convKey(raw, root.toolsAt, spans[0]);
+    if (cfg.pruneTools !== "off") {
+      const { memo, end } = prunedList(raw, root.toolsAt, body, conv, cfg, session);
+      if (memo !== null) {
+        reps.set(root.toolsAt, { e: end, parts: memo.parts, wrap: true });
+        body.tools = memo.parsed;
+        prunedTools = { names: memo.names, tokens: memo.tokens };
+      }
+    }
+    countToolUsage(conv, tools, body, prunedTools?.names ?? [], session);
+  }
 
   let imagedBlocks = 0;
   let origChars = 0;
@@ -1132,6 +1311,7 @@ function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefin
     cacheBreak,
     toolTax,
     volatileSystem,
+    prunedTools,
   };
 }
 
@@ -1178,6 +1358,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
   const client = upstream.protocol === "https:" ? https : http;
   // one ledger session per proxy process: replay detection + cache evidence
   const session = newSession();
+  session.toolUsage = fileUsage();
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -1268,6 +1449,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 ...(stats && stats.clientBreak > 0 && { client_break: stats.clientBreak }),
                 ...(stats?.toolTax && { toolTax: stats.toolTax }),
                 ...(stats?.volatileSystem && { volatileSystem: stats.volatileSystem }),
+                ...(stats?.prunedTools && { pruned_tools: stats.prunedTools.names.length, pruned_tool_tokens: stats.prunedTools.tokens }),
               });
               // F4: per-request diagnostic stdout
               if (stats?.warn) process.stderr.write(`[tanuki proxy] ${stats.warn}\n`);
@@ -1278,6 +1460,9 @@ export function startProxy(cfg: ProxyCfg): http.Server {
                 }
                 if (stats.toolTax) {
                   diagLine += ` · toolTax ${stats.toolTax.tokens}tok`;
+                }
+                if (stats.prunedTools) {
+                  diagLine += ` · pruned ${stats.prunedTools.names.length} tools (-${stats.prunedTools.tokens}tok)`;
                 }
                 if (diagLine.length > 0) {
                   process.stderr.write(`[tanuki proxy]${diagLine}\n`);
@@ -1302,11 +1487,12 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     const port = addr !== null && typeof addr === "object" ? addr.port : cfg.port;
     const knobs =
       `level=${cfg.level} distill=${cfg.distill} codebook=${cfg.codebook} font=${cfg.font} ` +
-      `recency=${cfg.recencyWindow} minChars=${cfg.minChars} ratio=${cfg.ratio} minSave=${cfg.minSave}`;
+      `recency=${cfg.recencyWindow} minChars=${cfg.minChars} ratio=${cfg.ratio} minSave=${cfg.minSave}` +
+      (cfg.pruneTools === "off" ? "" : ` pruneTools=${cfg.pruneTools} pruneMin=${cfg.pruneMin}`);
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · edits spliced into your own request bytes (nothing else moves) · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control blocks never imaged · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}${cfg.cache && (cfg.autoCache || process.env.TANUKI_AUTO_CACHE === "on") ? " · auto cache breakpoint once the prefix holds" : ""} · pretty JSON tool results minified (lossless)\n` +
+        `  rules: ${cfg.pruneTools === "off" ? "system prompt & tools untouched" : `system prompt untouched · tools never called in ${cfg.pruneMin}+ conversations ${cfg.pruneTools === "stub" ? "reduced to stubs" : "dropped"}, decided once per conversation`} · edits spliced into your own request bytes (nothing else moves) · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control blocks never imaged · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}${cfg.cache && (cfg.autoCache || process.env.TANUKI_AUTO_CACHE === "on") ? " · auto cache breakpoint once the prefix holds" : ""} · pretty JSON tool results minified (lossless)\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });

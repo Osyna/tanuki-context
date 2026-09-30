@@ -215,8 +215,13 @@ function pruneStash(dir: string, keep: string): void {
   } catch {}
 }
 
+/// The id `stashText` files `text` under: a 12-char lowercase sha256 prefix.
+export function stashId(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
+}
+
 export function stashText(text: string, view?: MapView): Stashed {
-  const id = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
+  const id = stashId(text);
   const dir = stashDir();
   // The stash deliberately holds unredacted bytes, so it is owner-only
   // rather than whatever umask says (0755/0644 by default).

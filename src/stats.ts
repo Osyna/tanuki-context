@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stashNet } from "./ledger.ts";
 import { Float, asStr, asU64, isObj, rnd } from "./serde.ts";
 
 export function eventsPath(): string {
@@ -24,7 +25,16 @@ export function eventsPath(): string {
   return join(home, ".pxpipe", "events.jsonl");
 }
 
+/// The events-log summary plus, when the stash has a ledger, the NET savings of
+/// what was stashed: tokens saved minus the tokens the model paid to fetch back.
 export function pxStats(): object {
+  const r = eventStats() as Record<string, unknown>;
+  const net = stashNet();
+  if (net !== null) r.stashNet = net;
+  return r;
+}
+
+function eventStats(): object {
   const path = eventsPath();
   let content: string;
   try {
@@ -52,6 +62,9 @@ export function pxStats(): object {
   let toolTaxTokens = 0;
   let lastToolTaxUnused: string[] = [];
   let volatileSystemCount = 0;
+  let prunedRequests = 0;
+  let prunedTokens = 0;
+  let lastPrunedTools = 0;
   
   for (const l of content.split("\n")) {
     if (l.trim().length === 0) {
@@ -108,6 +121,14 @@ export function pxStats(): object {
       }
     }
     
+    // --prune-tools: tools left out of the forwarded request
+    const prunedNow = asU64(o["pruned_tools"]) ?? 0;
+    if (prunedNow > 0) {
+      prunedRequests++;
+      prunedTokens += asU64(o["pruned_tool_tokens"]) ?? 0;
+      lastPrunedTools = prunedNow;
+    }
+
     // F4: count volatile system prompts
     if (o["volatileSystem"] === true) {
       volatileSystemCount++;
@@ -168,6 +189,10 @@ export function pxStats(): object {
     result.toolTax = `tool tax: ${tokPerRequest} tok/request never invoked (${names})`;
   }
   
+  if (prunedRequests > 0) {
+    result.toolPrune = `tool prune: ${rnd(prunedTokens / prunedRequests)} tok/request left out (${lastPrunedTools} tools, ${prunedRequests} requests)`;
+  }
+
   // F4: volatile system prompt warning (only when applicable)
   if (volatileSystemCount > 0) {
     result.volatileSystem = `volatile system prompt: uuid/timestamp/jwt content busts the prefix cache`;

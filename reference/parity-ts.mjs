@@ -367,10 +367,12 @@ const requests = [
   { jsonrpc: "2.0", id: 59, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "ÉRROR crashing", top: 4 } } },
   { jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "tanuki_fetch", arguments: { id: vgId, find: "stop halting shutdowns", top: 32 } } },
 ];
+// One stash per engine: the two sessions run at once, and the ledger they append to
+// (tanuki_stats reads it) would otherwise interleave differently in each.
 const env = { TANUKI_EVENTS: events, TANUKI_STASH: tmp };
 const [tsOut, rsOut] = await Promise.all([
-  mcpSession(TS[0], [...TS.slice(1)], requests, { cwd: ROOT, env }),
-  mcpSession(BIN, [], requests, { cwd: ROOT, env }),
+  mcpSession(TS[0], [...TS.slice(1)], requests, { cwd: ROOT, env: { ...env, TANUKI_STASH: path.join(tmp, "mcp-ts") } }),
+  mcpSession(BIN, [], requests, { cwd: ROOT, env: { ...env, TANUKI_STASH: path.join(tmp, "mcp-rs") } }),
 ]);
 // A dead engine yields zero replies, and `0 === 0` would sail through a pure
 // equality check while the loop below compares nothing and the file prints ALL

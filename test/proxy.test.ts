@@ -11,6 +11,11 @@ import { PROXY_DEFAULTS, attributeBreak, newSession, startProxy, transformReques
 
 const CFG: ProxyCfg = { ...PROXY_DEFAULTS, port: 0, upstream: "http://127.0.0.1:1" };
 
+// startProxy counts tool usage into a file; never the developer's own ~/.tanuki/tool-usage.json
+const USAGE_FILE = `/tmp/tanuki-tool-usage-test-${process.pid}.json`;
+process.env.TANUKI_TOOL_USAGE = USAGE_FILE;
+afterAll(() => rmSync(USAGE_FILE, { force: true }));
+
 const BIG = Array.from(
   { length: 300 },
   (_, i) =>

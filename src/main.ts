@@ -22,11 +22,12 @@ import { lazyPointer, parseVerbatim, scanNeedles, scanCredentials, redactCredent
 import { PROXY_DEFAULTS, startProxy } from "./proxy.ts";
 import { estimateText, parseFont, renderText, type Page, type Rendered } from "./render.ts";
 import { Float, asBool, asStr, asU64, charCount, isObj, jget, jstring, pct, rnd, textTokens } from "./serde.ts";
+import { logFetch, logStash } from "./ledger.ts";
 import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.23.0";
+export const VERSION = "0.24.0";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------------------ stages
@@ -522,6 +523,7 @@ export function toolCompress(args: unknown): unknown[] {
 export function toolStash(args: unknown): unknown[] {
   const text = asStr(jget(args, "text")) ?? "";
   const s = stashText(text);
+  logStash(s.id, "stash", textTokens(text) - textTokens(s.overview));
   return [{ type: "text", text: s.overview }];
 }
 
@@ -563,6 +565,8 @@ function fetchRendered(id: string, query: string | null, lines: string | null, f
     r.pages.length <= 6 &&
     scanCredentials(slice).length === 0 &&
     (verbatim === "off" || !side.dense);
+  // net-savings ledger: what this read-back cost the model (pages when they won)
+  logFetch(id, wins ? cost : rawTok);
   return { slice, rawTok, r, side, sideTok, wins };
 }
 export function toolFetch(args: unknown): unknown[] {
@@ -874,6 +878,13 @@ const VALUE_FLAGS: Record<string, true> = {
   "--verbatim": true,
 };
 
+/** `--prune-tools [stub|drop]` (bare flag = stub) or TANUKI_PRUNE_TOOLS=stub|drop|on|off; off unless asked. */
+function parsePrune(argv: string[]): "off" | "stub" | "drop" {
+  const v = flagVal(argv, "--prune-tools");
+  const word = argv.includes("--prune-tools") ? (v === "stub" || v === "drop" ? v : "stub") : envOr("TANUKI_PRUNE_TOOLS", "off");
+  return word === "drop" ? "drop" : word === "stub" || word === "on" ? "stub" : "off";
+}
+
 /** Positional arguments from `from` on, skipping flags AND their values. */
 function positionals(argv: string[], from: number): string[] {
   const out: string[] = [];
@@ -1098,6 +1109,8 @@ export function main(): void {
         cache: !argv.includes("--no-cache"),
         autoCache: argv.includes("--auto-cache"),
         verbatim: parseVerbatim(flagVal(argv, "--verbatim")),
+        pruneTools: parsePrune(argv),
+        pruneMin: num("--prune-min", PROXY_DEFAULTS.pruneMin),
       });
       break;
     }
