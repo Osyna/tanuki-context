@@ -13,6 +13,7 @@ every version, verified by `npm run parity`.
 ## 0.22.1
 
 - **`TANUKI_MINIFY=off`** turns the 0.22 JSON minify off in the proxy (both engines) and the omp/pi hook. Reason: the Rust proxy re-serialises a rewritten request with object keys sorted (serde_json without `preserve_order`), the Node one in the client's order, and rule 7 makes a rewrite common - the first pretty JSON result in a session re-orders every key before it, tool schemas included. Whether the API cache sees key order is unverified; this is the escape hatch. `preserve_order` was tried and breaks 169 MCP parity cases, where the Node engine deliberately mirrors serde's sorted output.
+- **The omp/pi hook no longer minifies `tanuki_*` results.** A `tanuki_fetch {lines: "a-b"}` slice of a stashed pretty JSON file lost its indentation, so the slice the model asked for came back re-shaped.
 - **Corrected figure.** 0.22.0 quoted 40 % / 35 % fewer tokens for the JSON minify; that was the package's own estimator on a synthetic document. With the o200k tokenizer on four real payloads (`npm view --json`, `gh api | jq .`, `gh run list --json`, `docker inspect`): 17-28 % one-line (proxy), 11-20 % with line breaks kept (hook), and a flat `gh api` object is left alone by the hook (under 10 % of chars saved). The README's gate paragraph also claimed it measured "every figure the package is sold on"; it measures the model-free ones only, and now says so.
 
 ## 0.22.0
