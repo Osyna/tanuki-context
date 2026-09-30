@@ -10,6 +10,11 @@ Versions are lockstep across the two engines: the TypeScript package on `main`
 and the single Rust binary on the `rust` branch produce byte-identical output at
 every version, verified by `npm run parity`.
 
+## 0.22.1
+
+- **`TANUKI_MINIFY=off`** turns the 0.22 JSON minify off in the proxy (both engines) and the omp/pi hook. Reason: the Rust proxy re-serialises a rewritten request with object keys sorted (serde_json without `preserve_order`), the Node one in the client's order, and rule 7 makes a rewrite common - the first pretty JSON result in a session re-orders every key before it, tool schemas included. Whether the API cache sees key order is unverified; this is the escape hatch. `preserve_order` was tried and breaks 169 MCP parity cases, where the Node engine deliberately mirrors serde's sorted output.
+- **Corrected figure.** 0.22.0 quoted 40 % / 35 % fewer tokens for the JSON minify; that was the package's own estimator on a synthetic document. With the o200k tokenizer on four real payloads (`npm view --json`, `gh api | jq .`, `gh run list --json`, `docker inspect`): 17-28 % one-line (proxy), 11-20 % with line breaks kept (hook), and a flat `gh api` object is left alone by the hook (under 10 % of chars saved). The README's gate paragraph also claimed it measured "every figure the package is sold on"; it measures the model-free ones only, and now says so.
+
 ## 0.22.0
 
 - **`find` ranks by BM25.** A word on every line (`error`, `request`, `the`) used to score the same 3 points as the one word that mattered, so a plain-language ask ranked the odd line below every ordinary failure. Now each word weighs by how rare it is (IDF), a repeated word saturates (k1 1.2) and long lines are discounted (b 0.75); whole-word hits count one, embedded hits (`error_code`) a third. Measured on a real 6,000-line journal with asks mixing common and rare words: right line first 25/200 against 11/200 (one common word plus one rare: 10 against 0; pure rare-word asks tied). Scores print to one decimal and are kept as integer micro-points, so both engines order lines identically; up to 16 distinct words now count (was 8). Also fixes a parity gap: the Rust engine only tested the first occurrence of a word for a word boundary.

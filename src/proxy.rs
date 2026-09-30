@@ -436,8 +436,12 @@ pub fn transform_request_body(
     // byte-for-byte: no rewrite at all, diagnostics only.
     let frozen = has_wide_number(raw);
     let mut minified_blocks = 0usize;
+    let minify_off = std::env::var("TANUKI_MINIFY").as_deref() == Ok("off");
     {
         let mut minify = |text: &str| -> Option<String> {
+            if minify_off {
+                return None;
+            }
             let m = minify_json(text)?;
             minified_blocks += 1;
             let saved = crate::text_tokens(text) as i64 - crate::text_tokens(&m) as i64;

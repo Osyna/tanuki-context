@@ -159,7 +159,8 @@ test suite::broken ... FAILED
 stashed: tanuki_fetch {"id":"2ab362e1c9fc","query":"<regex>"} or {"id":"2ab362e1c9fc","lines":"a-b"}
 ```
 
-`TANUKI_ROUTE=off` turns the router off. `TANUKI_BIN=/path/to/tanuki-context`
+`TANUKI_ROUTE=off` turns the router off; `TANUKI_MINIFY=off` keeps JSON results
+indented (hook and proxy). `TANUKI_BIN=/path/to/tanuki-context`
 runs the tools on the Rust binary instead of Node; the stash is shared, so a
 routed output fetches the same on either engine.
 
@@ -251,7 +252,8 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
 
 It prints its own rules on startup because those rules are the reason it is safe
 to leave running. Your system prompt and your tool definitions are never touched.
-The most recent message always stays as text. Anything holding a secret is left
+The most recent message always stays as text (a pretty-printed JSON tool result
+in it loses its indentation, nothing else). Anything holding a secret is left
 alone. If a transform throws for any reason, your original bytes are forwarded
 unchanged rather than the request failing.
 
@@ -261,6 +263,12 @@ tokens (strings byte-exact). It is the same output for the same input on every
 request, so the block never changes under the API's prompt cache. A request
 holding a number the JSON round-trip would re-spell (16+ digits outside a
 string) is forwarded byte-for-byte, untouched.
+
+The Rust binary re-serialises a rewritten request with object keys sorted
+(serde_json), where the Node engine keeps your client's order; the content is
+the same. Whether key order alone moves the API cache is unverified. A request
+that images nothing and holds no pretty JSON result is forwarded byte-for-byte
+by both, and `TANUKI_MINIFY=off` keeps it that way for JSON results too.
 
 Knobs worth knowing: `--distill` drops repeated log noise before drawing,
 `--min-chars 4000` sets how big a block has to be before it is worth touching,
@@ -489,8 +497,8 @@ section.
 | `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
 | `stash` | content beyond the window | n/a, a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation, a capability. | [§7](reference/EVALS.md) |
 | `fetch` + match-count | slice retrieval | n/a | **retrieval precision 73.3%** across 5 strategies | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
-| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count; the gate's noisy corpus **60/60 vs 0/60** | Rare words now outweigh the ones on every line. Never imaged. | [§10](reference/EVALS.md) |
-| JSON minify (0.22) | pretty-printed JSON tool results (proxy, omp/pi hook) | **-40%** estimated tokens (proxy, one line) / **-35%** (hook, line breaks kept) on a GitHub-API-shaped document | lossless: whitespace between tokens only, strings and number spellings byte-exact; cache-stable (same bytes from the first request) | Default on. File views never touched. | this README |
+| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count (pure rare-word asks tied; an answer sharing no word with the ask is still missed) | Rare words now outweigh the ones on every line. Never imaged. | [§10](reference/EVALS.md) |
+| JSON minify (0.22) | pretty-printed JSON tool results (proxy, omp/pi hook) | **17-28%** fewer o200k tokens one-line (proxy), **11-20%** with line breaks kept (hook), on real `npm view --json`, `gh api \| jq .`, `gh run list --json`, `docker inspect` | lossless: whitespace between tokens only, strings and number spellings byte-exact; cache-stable (same bytes from the first request) | Default on, `TANUKI_MINIFY=off` to disable. File views never touched. | this README |
 | `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop. Covers the sidecar's residual. | [§7](reference/EVALS.md) |
 | Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
 | Redaction on `fetch` | secrets in returned slices | n/a | **2 false positives in 166,985 lines**, both real secrets | Essential. `fetch` returned secrets as text until 0.18. | [§8](reference/EVALS.md) |
@@ -643,14 +651,14 @@ reimplemented from scratch, measured, and credits:
   measured for token savings and rejected (0-14 % *more* tokens than minified
   JSON), which is why the JSON rewrite here only drops whitespace.
 
-**No release makes a number worse.** `bun reference/gate.mjs` (in CI after the
-tests) measures every figure the package is sold on, model-free on committed or
-seeded inputs - run-rule savings per real command output, distill size with its
-planted answers, id catch rate, `find` ranking, JSON minify, proxy saving,
-imaging cost, and speed as a ratio to a fixed workload in the same process -
-and fails if any moved against its direction versus
-`reference/gate-baseline.json`. `--update` records a new baseline and refuses
-while anything regressed.
+**A model-free gate on committed and seeded inputs fails the build if any of
+these gets worse** versus `reference/gate-baseline.json`: run-rule savings per
+real command output, distill size with its planted answers, id catch rate,
+`find` ranking, JSON minify, proxy saving (estimator tokens, not billed ones),
+imaging cost, and speed as a ratio to a fixed workload in the same process.
+Model-dependent figures (read-back accuracy, billed tokens) are outside it.
+`bun reference/gate.mjs` runs in CI after the tests; `--update` records a new
+baseline and refuses while anything regressed.
 
 **Rust instead of Node.** Same engine, one static binary, held byte-exact and
 pixel-exact with the npm package by a parity harness:
