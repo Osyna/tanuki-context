@@ -64,7 +64,7 @@ pub fn record_run(key: &str, id: &str, code: i32) {
 static RE_TS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?").unwrap()
 });
-static RE_PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\([0-9]{4,}\)").unwrap());
+static RE_PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(thread '[^']*' )\([0-9]+\)").unwrap());
 static RE_DUR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(^|[^A-Za-z0-9_.])[0-9]+(?:\.[0-9]+)?(?:ns|µs|μs|us|ms|s)([^A-Za-z0-9_]|$)").unwrap()
 });
@@ -82,7 +82,7 @@ static RE_FAIL: LazyLock<Regex> = LazyLock::new(|| {
 /// this are "the same line".
 fn norm(line: &str) -> String {
     let s = RE_TS.replace_all(line.trim(), "<ts>");
-    let s = RE_PID.replace_all(&s, "(#)");
+    let s = RE_PID.replace_all(&s, "${1}(#)");
     let mut s = s.into_owned();
     // twice: "1s 2s" - the first match consumes the space the second one needs
     for _ in 0..2 {
@@ -263,6 +263,10 @@ mod tests {
         assert_eq!(norm("ptr 0xdeadbeef01 x"), "ptr 0x# x");
         // short ids, words ending in s, and version-like tokens are data, not noise
         assert_eq!(norm("(123) items tests v1.2s3"), "(123) items tests v1.2s3");
+        // a count in parentheses is data; only the test-thread id is run noise
+        assert_ne!(norm("(1204 items)"), norm("(1205 items)"));
+        assert_ne!(norm("(1204)"), norm("(1205)"));
+        assert_eq!(norm("thread 'a' (376631) panicked"), norm("thread 'a' (487199) panicked"));
     }
 
     #[test]
@@ -334,6 +338,13 @@ mod tests {
         let d = diff_runs("cccccccccccc", 0, "5 passed\nx", 2, "6 passed\ny", 0);
         assert!(d.head.contains(&"was: 5 passed".to_string()), "{:?}", d.head);
         assert!(d.head.contains(&"now: 6 passed".to_string()), "{:?}", d.head);
+    }
+
+    #[test]
+    fn a_changed_parenthesised_count_is_not_identical() {
+        let d = diff_runs("dddddddddddd", 0, "done (1204 items)\nx", 2, "done (1205 items)\nx", 0);
+        assert!(!d.head[0].contains("output identical"), "{:?}", d.head);
+        assert!(d.body.contains("done (1205 items)"), "{}", d.body);
     }
 
     #[test]

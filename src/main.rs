@@ -1292,7 +1292,7 @@ fn main() {
                 max_pages: num("--max-pages", d.max_pages as f64) as usize,
                 recency_window: num("--recency", env_recency) as usize,
                 cache: !args.iter().any(|a| a == "--no-cache"),
-                auto_cache: !args.iter().any(|a| a == "--no-cache" || a == "--no-auto-cache"),
+                auto_cache: args.iter().any(|a| a == "--auto-cache"),
                 verbatim: needles::Verbatim::parse(&json!(sval("--verbatim").map(String::as_str))),
             });
         }

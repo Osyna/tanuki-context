@@ -167,8 +167,11 @@ pipe or redirect) is now rewritten before it runs to
 the JSON arrives pretty-printed (so no line hits the cap), the exit code is gh's,
 and anything jq cannot parse is passed through verbatim. `gh api repos/Osyna/tanuki-context`
 went from one 5,910-char line cut at 768 bytes to 149 complete lines that parse;
-`.../commits?per_page=3` then shrank 14 % under the lines-kept minify. Needs `jq`
-on PATH; otherwise the step runs unchanged.
+`.../commits?per_page=3` then shrank 14 % under the lines-kept minify. Needs a
+`jq` on PATH that keeps number spellings: it is probed once, and a 20-digit id
+and `1.50` must come back byte for byte (jq 1.7+ and jaq do; jq 1.6 rounds big
+ids). Otherwise the step runs unchanged. The rewritten command is what the model
+sees in its own tool call.
 
 `TANUKI_ROUTE=off` turns the router off; `TANUKI_MINIFY=off` keeps JSON results
 indented (hook and proxy) and leaves `gh api` alone; `TANUKI_DELTA=off` turns off
@@ -285,13 +288,14 @@ minified once per session (a memo keyed by its hash, with a whitespace pre-check
 that skips already-compact JSON without a parse): 200 messages of 28 KB pretty
 JSON cost 17 % as much on the second request of a session as on the first.
 
-**Cache breakpoint.** If your client never places a `cache_control` on a
-message, the proxy adds one after two consecutive requests whose earlier messages
-matched (the prefix demonstrably holds), on the last block before the recency
-window: never a fifth breakpoint, never on a thinking or empty block, never when
-you placed one yourself. `--no-auto-cache` or `TANUKI_AUTO_CACHE=off` turns it
-off; `--no-cache` turns off every breakpoint. It has not been measured against
-the live API. If your client rewrites the same message on three requests in a row
+**Cache breakpoint (opt-in).** With `--auto-cache` or `TANUKI_AUTO_CACHE=on`, if
+your client never places a `cache_control` on a message, the proxy adds one after
+two consecutive requests whose earlier messages matched (the prefix demonstrably
+holds), on the last block before the recency window: never a fifth breakpoint
+(system, tools, message blocks and blocks nested in a `tool_result` all count),
+never on a thinking or empty block, never when you placed one yourself.
+`--no-cache` turns off every breakpoint. It is off by default because it has not
+been measured against the live API. If your client rewrites the same message on three requests in a row
 (a timestamp inside a message, say) the cache never holds; the proxy says so once
 on stderr and logs `client_break` per request.
 
@@ -301,7 +305,7 @@ billed ones (`input + cache_read + cache_creation`), and `tanuki_stats` reports
 estimator that gates imaging matches the bill; below 100 it under-predicts).
 Client-sent images and unknown block types count 0 in the estimate.
 
-Knobs worth knowing: `--no-auto-cache` (or `TANUKI_AUTO_CACHE=off`) skips the
+Knobs worth knowing: `--auto-cache` (or `TANUKI_AUTO_CACHE=on`) adds the
 automatic breakpoint, `--distill` drops repeated log noise before drawing,
 `--min-chars 4000` sets how big a block has to be before it is worth touching,
 `--recency 1` is how many recent messages stay text, `--port` and `--upstream`
@@ -385,8 +389,11 @@ block identical to the previous run collapses to
 differ only in timings: 2,353 -> 212 chars (2,412 alone; 832 -> 78 o200k
 tokens). The previous run lives in the stash, one `fetch` away.
 `TANUKI_DELTA=off` turns it off. Caveat: a change that only touches a masked token
-(a timestamp, a duration) reads as identical, and the fixed/new lists rely on
-test-runner vocabulary.
+(a timestamp, a duration with its unit, a `0x` address of 6+ hex digits, a test
+thread's id in `thread 'x' (N)`) reads as identical; every other number, counts
+in parentheses included, is content. The fixed/new lists rely on test-runner
+vocabulary. The stash is capped at `TANUKI_STASH_MAX_MB` (default 512): past it,
+each write deletes the oldest entries down to 75 % of the cap.
 
 ### stash, fetch, verify: the exact-bytes path
 
@@ -557,7 +564,7 @@ section.
 | `verbatim: "lazy"` | cold, one-shot renders | cuts 42% of payload | **no measurable cost win**; 97% cache hit | Opt-in. Cached bytes bill at $0.30/Mtok, so cutting them saves the cheapest thing. | [§6](reference/EVALS.md) |
 | `stash` | content beyond the window | n/a, a capability | **19,722,893 / 19,722,893** chars byte-identical | Flawless. Not an optimisation, a capability. | [§7](reference/EVALS.md) |
 | `fetch` + match-count | slice retrieval | n/a | **retrieval precision 73.3%** across 5 strategies | Essential. The match-count marker is the only text route to an aggregate answer. | [§10](reference/EVALS.md) |
-| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count (pure rare-word asks tied); 0.23 adds a fixed log-synonym table and light stemming: on 24 asks whose answer shares no whole word with the ask, right line first **19/24 vs 0/24** | Rare words outweigh the ones on every line; a synonym counts half a direct hit. Never imaged. | [§10](reference/EVALS.md), [§16](reference/EVALS.md) |
+| `fetch --find` (0.20, BM25 since 0.22) | bare-word and plain-language asks | n/a | **3/3** bare-word answers as text; on a real 6,000-line journal with asks mixing common and rare words, right line first **25/200 vs 11/200** under the old flat count (pure rare-word asks tied); 0.23 adds a small hand-made log-synonym table and light stemming: on 24 asks whose answer shares no whole word with the ask, right line first **3/24 vs 1/24** on a set written blind to the table (19/24 vs 0/24 on the set written alongside it: fitted); nothing else moved | Rare words outweigh the ones on every line; a synonym counts half a direct hit. Never imaged. | [§10](reference/EVALS.md), [§16](reference/EVALS.md) |
 | JSON minify (0.22) | pretty-printed JSON tool results (proxy, omp/pi hook) | **17-28%** fewer o200k tokens one-line (proxy), **11-20%** with line breaks kept (hook), on real `npm view --json`, `gh api \| jq .`, `gh run list --json`, `docker inspect` | lossless: whitespace between tokens only, strings and number spellings byte-exact; cache-stable (same bytes from the first request) | Default on, `TANUKI_MINIFY=off` to disable. File views never touched. | this README |
 | `verify` | settling a misread value | ~40 tokens | corrects one-character misreads, **no model** | Flawless backstop. Covers the sidecar's residual. | [§7](reference/EVALS.md) |
 | Credential gate | secrets | refuses to image | never imaged | Essential. | [§8](reference/EVALS.md) |
@@ -716,7 +723,7 @@ these gets worse** versus `reference/gate-baseline.json`: run-rule savings per
 real command output (chars and o200k tokens, and that each 0.23 rule fires),
 delta second-run size, distill size with its planted answers, id catch rate,
 `find` ranking (seeded set and the vocabulary-gap set), JSON minify, proxy saving
-(estimator tokens, not billed ones), proxy memo timing, byte-exact splicing and
+(estimator tokens, not billed ones), proxy memo reuse (a warm call rescans nothing), byte-exact splicing and
 the automatic-breakpoint schedule, the estimator's drift from o200k, imaging
 cost, and speed as a ratio to a fixed workload in the same process.
 Model-dependent figures (read-back accuracy, billed tokens) are outside it; a

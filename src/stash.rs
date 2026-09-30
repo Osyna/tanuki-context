@@ -45,6 +45,50 @@ pub fn stash_read(id: &str) -> Option<String> {
     read_stash(id).ok()
 }
 
+/// The stash's own entries (12-hex files) are capped: past TANUKI_STASH_MAX_MB
+/// (positive number, default 512) the oldest by mtime go until the total is
+/// 75% of the cap. The entry just written survives; `runs/` and anything else
+/// in the dir is not ours to delete. Any IO error is swallowed - pruning must
+/// never fail a stash write. Mirror of the TS engine.
+/// ponytail: one readdir + stat per entry on every stash (~1 ms per 1,000
+/// entries); amortise with a stamp file if a stash ever holds 50k+ entries.
+fn prune(dir: &std::path::Path, keep: &str) {
+    let mb = std::env::var("TANUKI_STASH_MAX_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .unwrap_or(512.0);
+    let cap = mb * 1048576.0;
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut all = Vec::new();
+    let mut total = 0f64;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.len() != 12 || !name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        let Ok(mtime) = md.modified() else { continue };
+        total += md.len() as f64;
+        all.push((mtime, name, md.len()));
+    }
+    if total <= cap {
+        return;
+    }
+    all.sort();
+    for (_, name, size) in all {
+        if total <= cap * 0.75 {
+            break;
+        }
+        if name != keep && std::fs::remove_file(dir.join(&name)).is_ok() {
+            total -= size as f64;
+        }
+    }
+}
+
 /// Park `text` under its content hash; returns (id, overview).
 pub fn stash_text(text: &str) -> std::io::Result<(String, String)> {
     stash_text_view(text, None)
@@ -74,6 +118,7 @@ pub fn stash_text_view(text: &str, view: Option<(&str, &str)>) -> std::io::Resul
         use std::io::Write as _;
         opts.open(dir.join(&id))?.write_all(text.as_bytes())?;
     }
+    prune(&dir, &id);
     let ov = overview(&id, text, view);
     Ok((id, ov))
 }
@@ -677,6 +722,45 @@ mod tests {
 
             assert_eq!(verify_value(&id, "").unwrap_err(), "verify needs a non-empty value");
             assert_eq!(verify_value("deadbeefcafe", "whatever").unwrap_err(), "unknown stash id: deadbeefcafe");
+        })
+    }
+
+    #[test]
+    fn prune_drops_oldest_keeps_fresh_entry_and_foreign_files() {
+        use std::time::{Duration, SystemTime};
+        with_test_dir("prune", || {
+            let d = stash_dir();
+            std::fs::create_dir_all(d.join("runs")).unwrap();
+            std::env::set_var("TANUKI_STASH_MAX_MB", "0.001"); // 1048 bytes, prune to 786
+            let old = ["aaaaaaaaaaa1", "aaaaaaaaaaa2", "aaaaaaaaaaa3", "aaaaaaaaaaa4"];
+            let stamp = |p: PathBuf, secs: u64| {
+                let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+                f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+            };
+            for (i, n) in old.iter().enumerate() {
+                std::fs::write(d.join(n), "x".repeat(300)).unwrap();
+                stamp(d.join(n), 1000 + i as u64);
+            }
+            std::fs::write(d.join("runs/deadbeef0000"), "r".repeat(2000)).unwrap();
+            std::fs::write(d.join("notes.txt"), "n".repeat(2000)).unwrap();
+            let (id, _) = stash_text(&"y".repeat(300)).unwrap();
+            let alive: Vec<bool> = old.iter().map(|n| d.join(n).exists()).collect();
+            assert_eq!(alive, [false, false, false, true]);
+            assert!(d.join(&id).exists());
+            assert!(d.join("runs/deadbeef0000").exists());
+            assert!(d.join("notes.txt").exists());
+
+            // restashing the same text refreshes its mtime, so it counts as recent
+            stamp(d.join(&id), 5);
+            stash_text(&"y".repeat(300)).unwrap();
+            let age = SystemTime::now().duration_since(std::fs::metadata(d.join(&id)).unwrap().modified().unwrap());
+            assert!(age.unwrap() < Duration::from_secs(60));
+
+            // under the cap nothing is touched
+            std::env::set_var("TANUKI_STASH_MAX_MB", "1");
+            stash_text(&"z".repeat(300)).unwrap();
+            assert!(d.join("aaaaaaaaaaa4").exists());
+            std::env::remove_var("TANUKI_STASH_MAX_MB");
         })
     }
 }

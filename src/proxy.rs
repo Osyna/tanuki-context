@@ -20,11 +20,12 @@
 //!      replacement, an added `cache_control`) and only those spans are
 //!      substituted. Key order, whitespace, number spellings, system and tools
 //!      stay the client's own bytes, so no number is ever re-printed.
-//!   9. Automatic cache breakpoint: once a session has sent two requests in a
-//!      row whose earlier messages matched the previous request, and the
-//!      client placed no `cache_control` on any message, one ephemeral
-//!      breakpoint goes on the last block before the recency window (never a
-//!      5th: Anthropic 400s on it). `--no-auto-cache` / TANUKI_AUTO_CACHE=off.
+//!   9. Automatic cache breakpoint (opt-in: `--auto-cache` / TANUKI_AUTO_CACHE=on,
+//!      never with `--no-cache`; not measured against the live API, so off by
+//!      default): once a session has sent two requests in a row whose earlier
+//!      messages matched the previous request, and the client placed no
+//!      `cache_control` on any message, one ephemeral breakpoint goes on the
+//!      last block before the recency window (never a 5th: Anthropic 400s on it).
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -133,7 +134,7 @@ pub struct ProxyCfg {
     pub max_pages: usize, // give up on absurdly large single blocks
     pub recency_window: usize, // trailing messages always kept as text (default 1)
     pub cache: bool, // place a cache breakpoint on the last imaged message (default on)
-    pub auto_cache: bool, // add one breakpoint before the recency window once the prefix holds (default on)
+    pub auto_cache: bool, // add one breakpoint before the recency window once the prefix holds (default off)
     pub verbatim: needles::Verbatim, // sidecar next to the pages: full · lazy pointer · off
 }
 
@@ -153,7 +154,7 @@ impl Default for ProxyCfg {
             max_pages: 20,
             recency_window: 1,
             cache: true,
-            auto_cache: true,
+            auto_cache: false,
             verbatim: needles::Verbatim::Full,
         }
     }
@@ -645,19 +646,35 @@ fn splice(raw: &str, reps: &Reps) -> String {
 }
 
 /// Anthropic accepts at most 4 `cache_control` breakpoints per request and
-/// 400s on a 5th, so count the ones the client already placed (system, tools
-/// and message blocks) before adding ours. Fail-open: a request that worked
-/// without the proxy must still work through it.
+/// 400s on a 5th, so count the ones the client already placed (system, tools,
+/// message blocks and the text blocks inside a tool_result) before adding
+/// ours. Fail-open: a request that worked without the proxy must still work
+/// through it.
 const MAX_BREAKPOINTS: usize = 4;
+
+/// Opt-in (`--auto-cache` -> cfg.auto_cache, or TANUKI_AUTO_CACHE=on) and never
+/// with `--no-cache`, which clears cfg.cache. Same rule as the proxy.ts transform.
+fn auto_cache_on(cfg: &ProxyCfg) -> bool {
+    cfg.cache && (cfg.auto_cache || std::env::var("TANUKI_AUTO_CACHE").as_deref() == Ok("on"))
+}
+
+/// `cache_control` members in a block array, a tool_result's own content included.
+fn scan_breakpoints(v: &Value) -> usize {
+    v.as_array().map_or(0, |a| {
+        a.iter()
+            .map(|b| {
+                usize::from(b.get("cache_control").is_some())
+                    + if b["type"] == "tool_result" { scan_breakpoints(&b["content"]) } else { 0 }
+            })
+            .sum()
+    })
+}
+
 fn count_breakpoints(body: &Value) -> usize {
-    let scan = |v: &Value| -> usize {
-        v.as_array()
-            .map_or(0, |a| a.iter().filter(|b| b.get("cache_control").is_some()).count())
-    };
-    let mut n = scan(&body["system"]) + scan(&body["tools"]);
+    let mut n = scan_breakpoints(&body["system"]) + scan_breakpoints(&body["tools"]);
     if let Some(ms) = body["messages"].as_array() {
         for m in ms {
-            n += scan(&m["content"]);
+            n += scan_breakpoints(&m["content"]);
         }
     }
     n
@@ -665,13 +682,9 @@ fn count_breakpoints(body: &Value) -> usize {
 
 /// The client caches on its own: any message block already carries a breakpoint.
 fn client_caches(body: &Value) -> bool {
-    body["messages"].as_array().is_some_and(|ms| {
-        ms.iter().any(|m| {
-            m["content"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(|b| b.is_object() && b.get("cache_control").is_some()))
-        })
-    })
+    body["messages"]
+        .as_array()
+        .is_some_and(|ms| ms.iter().any(|m| scan_breakpoints(&m["content"]) > 0))
 }
 
 /// Cheap upper bound before the parse in minify_json: one pass counting the
@@ -1395,8 +1408,7 @@ pub fn transform_request_body(
     // before the recency window makes that history a cache read. Never when the
     // client caches itself, never a 5th breakpoint.
     let mut auto_cache = false;
-    if cfg.auto_cache
-        && std::env::var("TANUKI_AUTO_CACHE").as_deref() != Ok("off")
+    if auto_cache_on(cfg)
         && session.is_some()
         && stable >= 2
         && !client_cc
@@ -1725,7 +1737,7 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
         cfg.upstream,
         cfg.recency_window.max(1),
         if cfg.cache { " \u{b7} imaged prefix marked cacheable" } else { "" },
-        if cfg.auto_cache && std::env::var("TANUKI_AUTO_CACHE").as_deref() != Ok("off") {
+        if auto_cache_on(cfg) {
             " \u{b7} auto cache breakpoint once the prefix holds"
         } else {
             ""
@@ -2280,42 +2292,33 @@ mod tests {
     }
 
     #[test]
-    fn warm_session_transforms_a_pretty_json_history_in_a_fraction_of_the_first_call() {
+    fn a_warm_session_scans_nothing_again_on_a_pretty_json_history() {
+        let _env = AUTO_ENV.read().unwrap();
         let kb = pretty_doc(0).len() / 1024;
         let messages: Vec<Value> = (0..200)
             .map(|n| msg("user", json!([{ "type": "tool_result", "tool_use_id": format!("t{n}"), "content": pretty_doc(n) }])))
             .collect();
         let raw = json!({ "model": "claude-sonnet-4", "messages": messages }).to_string();
-        // imaging and the auto breakpoint off: this measures the minify + bookkeeping path
-        let c = ProxyCfg { min_chars: 1_000_000_000, auto_cache: false, ..cfg() };
-        let mut ok = false;
-        for attempt in 1..=3 {
-            let mut s = ProxySession::new();
-            let t = std::time::Instant::now();
-            let first = transform_request_body(&raw, &c, Some(&mut s)).unwrap();
-            let t1 = t.elapsed().as_secs_f64() * 1000.0;
-            let mut t2 = f64::INFINITY;
-            let mut second = None;
-            for _ in 0..3 {
-                let t = std::time::Instant::now();
-                second = transform_request_body(&raw, &c, Some(&mut s));
-                t2 = t2.min(t.elapsed().as_secs_f64() * 1000.0);
-            }
-            println!(
-                "memo timing #{attempt}: 200 messages x {kb} KB pretty JSON ({:.1} MB): first {t1:.0} ms, second {t2:.0} ms ({:.0} %)",
-                raw.len() as f64 / 1e6,
-                100.0 * t2 / t1
-            );
-            assert_eq!(first.minified_blocks, 200);
-            assert_eq!(second.unwrap().body, first.body);
-            // Rust's cold call is already native-fast (parse + minify ~ 120 ms), so the
-            // memo's share is smaller than in the TS engine (which bounds it at 20 %).
-            ok = t1 < 1000.0 && t2 < 0.5 * t1;
-            if ok {
-                break;
-            }
-        }
-        assert!(ok);
+        // imaging off (and the auto breakpoint with it, default): this is the minify + bookkeeping path
+        let c = ProxyCfg { min_chars: 1_000_000_000, ..cfg() };
+        let mut s = ProxySession::new();
+        let t = std::time::Instant::now();
+        let first = transform_request_body(&raw, &c, Some(&mut s)).unwrap();
+        let t1 = t.elapsed().as_secs_f64() * 1000.0;
+        let scanned = s.memo_chars;
+        let t = std::time::Instant::now();
+        let second = transform_request_body(&raw, &c, Some(&mut s)).unwrap();
+        let t2 = t.elapsed().as_secs_f64() * 1000.0;
+        // timing is informational (shared CI runners); the gate owns speed
+        println!(
+            "memo timing: 200 messages x {kb} KB pretty JSON ({:.1} MB): first {t1:.0} ms, second {t2:.0} ms",
+            raw.len() as f64 / 1e6
+        );
+        assert_eq!(first.minified_blocks, 200);
+        assert_eq!(second.minified_blocks, 200);
+        assert_eq!(second.body, first.body);
+        assert_eq!(s.minify_memo.len(), 200);
+        assert_eq!(s.memo_chars, scanned); // every block came from the memo: no text was scanned or parsed twice
     }
 
     #[test]
@@ -2387,13 +2390,77 @@ mod tests {
         run(&conv(5, json!("q0"), None), c, &mut s).auto_cache
     }
 
+    // the feature is opt-in (ProxyCfg::default().auto_cache is false): these tests turn it on
+    fn auto() -> ProxyCfg {
+        ProxyCfg { auto_cache: true, ..cfg() }
+    }
+
+    fn total(body: &str) -> usize {
+        body.matches("cache_control").count()
+    }
+
+    fn cc_block() -> Value {
+        json!({ "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } })
+    }
+
+    /// `conv` with `sn` system blocks and the first `tn` of four tools carrying a breakpoint.
+    fn conv_bp(n: usize, first: Value, sn: usize, tn: usize) -> String {
+        let mut b: Value = serde_json::from_str(&conv(n, first, None)).unwrap();
+        if sn > 0 {
+            b["system"] = json!((0..sn).map(|_| cc_block()).collect::<Vec<_>>());
+        }
+        b["tools"] = json!((0..4)
+            .map(|i| {
+                let mut t = json!({ "name": format!("t{i}"), "description": "d", "input_schema": { "type": "object" } });
+                if i < tn {
+                    t["cache_control"] = json!({ "type": "ephemeral" });
+                }
+                t
+            })
+            .collect::<Vec<_>>());
+        b.to_string()
+    }
+
+    /// TANUKI_AUTO_CACHE is process-wide: the one test that sets it holds the
+    /// write side, every test that replays a warm session on the default cfg
+    /// holds the read side, so none of them sees it flip mid-run.
+    static AUTO_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    #[test]
+    fn default_cfg_places_none_the_proxy_stays_a_pass_through() {
+        let _env = AUTO_ENV.read().unwrap();
+        let mut s = ProxySession::new();
+        for n in [1, 3, 5] {
+            let body = conv(n, json!("q0"), None);
+            let r = run(&body, &cfg(), &mut s);
+            assert!(!r.auto_cache);
+            assert_eq!(r.body, body);
+        }
+    }
+
+    #[test]
+    fn tanuki_auto_cache_on_opts_in_with_the_default_cfg_but_not_past_no_cache_and_off_means_nothing_special() {
+        let _env = AUTO_ENV.write().unwrap();
+        std::env::set_var("TANUKI_AUTO_CACHE", "on");
+        assert!(warm_auto(&cfg()));
+        let mut s = ProxySession::new();
+        run(&conv(1, json!("q0"), None), &cfg(), &mut s);
+        run(&conv(3, json!("q0"), None), &cfg(), &mut s);
+        assert_eq!(total(&run(&conv(5, json!("q0"), None), &cfg(), &mut s).body), 1);
+        assert!(!warm_auto(&ProxyCfg { cache: false, ..cfg() }));
+        std::env::set_var("TANUKI_AUTO_CACHE", "off");
+        assert!(!warm_auto(&cfg()));
+        assert!(warm_auto(&auto()));
+        std::env::remove_var("TANUKI_AUTO_CACHE");
+    }
+
     #[test]
     fn first_two_requests_untouched_the_third_gets_one_breakpoint_before_the_recency_window() {
         let mut s = ProxySession::new();
-        let r1 = run(&conv(1, json!("q0"), None), &cfg(), &mut s);
-        let r2 = run(&conv(3, json!("q0"), None), &cfg(), &mut s);
+        let r1 = run(&conv(1, json!("q0"), None), &auto(), &mut s);
+        let r2 = run(&conv(3, json!("q0"), None), &auto(), &mut s);
         assert!(!(r1.changed || r2.changed || r1.auto_cache || r2.auto_cache));
-        let r3 = run(&conv(5, json!("q0"), None), &cfg(), &mut s);
+        let r3 = run(&conv(5, json!("q0"), None), &auto(), &mut s);
         assert!(r3.auto_cache);
         // the same literal becomes the one text block that carries it; nothing else moves
         assert_eq!(
@@ -2403,7 +2470,7 @@ mod tests {
                 r#""content":[{"type":"text","text":"a1","cache_control":{"type":"ephemeral"}}]"#
             )
         );
-        assert_eq!(r3.body.matches("cache_control").count(), 1);
+        assert_eq!(total(&r3.body), 1);
     }
 
     #[test]
@@ -2411,36 +2478,81 @@ mod tests {
         let mut s = ProxySession::new();
         let client = json!([{ "type": "text", "text": "q0", "cache_control": { "type": "ephemeral" } }]);
         for n in [1, 3, 5] {
-            let r = run(&conv(n, client.clone(), None), &cfg(), &mut s);
+            let r = run(&conv(n, client.clone(), None), &auto(), &mut s);
             assert!(!r.auto_cache && !r.changed);
         }
     }
 
     #[test]
-    fn system_breakpoints_count_toward_the_ceiling_of_four() {
-        let four: Vec<Value> = (0..4)
-            .map(|_| json!({ "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } }))
-            .collect();
-        for (system, expected) in [(four[..3].to_vec(), true), (four.clone(), false)] {
+    fn client_breakpoints_in_system_tools_or_both_count_toward_the_ceiling_of_four() {
+        // (system, tools, does auto place one?)
+        for (sn, tn, expected) in [
+            (4, 0, false), (3, 0, true), (0, 4, false), (0, 3, true), (2, 2, false),
+            (1, 2, true), (1, 3, false), (3, 1, false), (2, 1, true),
+        ] {
             let mut s = ProxySession::new();
             for n in [1, 3] {
-                run(&conv(n, json!("q0"), Some(("system", json!(system)))), &cfg(), &mut s);
+                run(&conv_bp(n, json!("q0"), sn, tn), &auto(), &mut s);
             }
-            let r = run(&conv(5, json!("q0"), Some(("system", json!(system)))), &cfg(), &mut s);
-            assert_eq!(r.auto_cache, expected);
+            let r = run(&conv_bp(5, json!("q0"), sn, tn), &auto(), &mut s);
+            assert_eq!(r.auto_cache, expected, "system {sn} tools {tn}");
+            assert_eq!(total(&r.body), sn + tn + usize::from(expected), "system {sn} tools {tn}");
+        }
+    }
+
+    #[test]
+    fn with_imaging_on_the_imaged_prefix_breakpoint_and_the_automatic_one_never_pass_four_in_total() {
+        let c = ProxyCfg { min_chars: 1000, ..auto() };
+        for sn in 0..=4 {
+            for tn in 0..=(4 - sn) {
+                let k = sn + tn;
+                let mut s = ProxySession::new();
+                // big() opens the conversation, so it is imaged from the first request on
+                for n in [3, 3] {
+                    assert!(total(&run(&conv_bp(n, json!(big()), sn, tn), &c, &mut s).body) <= 4);
+                }
+                let r = run(&conv_bp(5, json!(big()), sn, tn), &c, &mut s);
+                assert_eq!(r.imaged_blocks, 1, "system {sn} tools {tn}");
+                assert_eq!(r.cached, k < 4, "system {sn} tools {tn}");
+                assert_eq!(r.auto_cache, k < 3, "system {sn} tools {tn}");
+                assert_eq!(total(&r.body), (k + 2).min(4), "system {sn} tools {tn}");
+            }
+        }
+    }
+
+    #[test]
+    fn breakpoints_inside_a_tool_results_own_content_count_too() {
+        let nested = |n: usize| msg("user", json!([{ "type": "tool_result", "tool_use_id": "t", "content": (0..n).map(|_| cc_block()).collect::<Vec<_>>() }]));
+        // four nested breakpoints leave no room for the imaged-prefix one
+        let full = json!({ "model": "claude-sonnet-4", "messages": [
+            msg("user", json!(big())), msg("assistant", json!("a0")), nested(4), msg("assistant", json!("a1")), msg("user", json!("q2")),
+        ] })
+        .to_string();
+        let r = transform_request_body(&full, &auto(), None).unwrap();
+        assert_eq!(r.imaged_blocks, 1);
+        assert!(!r.cached);
+        assert_eq!(total(&r.body), 4);
+        // and a nested one is a client breakpoint: the automatic one stays away
+        let mut s = ProxySession::new();
+        for n in [1, 3, 5] {
+            let msgs: Vec<Value> = vec![nested(1), msg("assistant", json!("a0")), msg("user", json!("q1")), msg("assistant", json!("a1")), msg("user", json!("q2"))];
+            let body = json!({ "model": "claude-sonnet-4", "messages": msgs.into_iter().take(n).collect::<Vec<_>>() }).to_string();
+            assert!(!run(&body, &auto(), &mut s).auto_cache);
         }
     }
 
     #[test]
     fn a_prefix_that_keeps_changing_earns_none_and_the_opt_outs_hold() {
+        let _env = AUTO_ENV.read().unwrap();
         let mut s = ProxySession::new();
         for (i, n) in [1, 3, 5, 5].into_iter().enumerate() {
             // message 0 differs on every request: the cache never held
-            assert!(!run(&conv(n, json!(format!("q0-{i}")), None), &cfg(), &mut s).auto_cache);
+            assert!(!run(&conv(n, json!(format!("q0-{i}")), None), &auto(), &mut s).auto_cache);
         }
-        assert!(warm_auto(&cfg()));
-        assert!(!warm_auto(&ProxyCfg { auto_cache: false, ..cfg() }));
-        assert!(!transform_request_body(&conv(5, json!("q0"), None), &cfg(), None).unwrap().auto_cache);
+        assert!(warm_auto(&auto()));
+        assert!(!warm_auto(&cfg())); // the default
+        assert!(!warm_auto(&ProxyCfg { cache: false, ..auto() })); // --no-cache
+        assert!(!transform_request_body(&conv(5, json!("q0"), None), &auto(), None).unwrap().auto_cache); // no session
     }
 
     #[test]
@@ -2458,9 +2570,9 @@ mod tests {
             json!({ "messages": v }).to_string()
         };
         let mut s = ProxySession::new();
-        run(&body(1), &cfg(), &mut s);
-        run(&body(3), &cfg(), &mut s);
-        let r = run(&body(5), &cfg(), &mut s);
+        run(&body(1), &auto(), &mut s);
+        run(&body(3), &auto(), &mut s);
+        let r = run(&body(5), &auto(), &mut s);
         assert!(!r.auto_cache && !r.changed);
     }
 
@@ -2472,9 +2584,9 @@ mod tests {
         let long = format!(
             r#"{head},{{"role":"assistant","content":[{{"type":"text","text":"a1"}},{{"type":"text", "text":"a2" }}]}},{{"role":"user","content":"q2"}}]}}"#
         );
-        run(&short, &cfg(), &mut s);
-        run(&short, &cfg(), &mut s);
-        let r = run(&long, &cfg(), &mut s);
+        run(&short, &auto(), &mut s);
+        run(&short, &auto(), &mut s);
+        let r = run(&long, &auto(), &mut s);
         assert!(r.auto_cache);
         assert_eq!(
             r.body,
