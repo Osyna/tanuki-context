@@ -8,7 +8,7 @@
 //! (distill-powered) or line range; the caller images it only when pages
 //! clearly win. Contract is byte-identical with the Rust engine.
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { distillLog } from "./distill.ts";
 import { redactCredentials } from "./needles.ts";
@@ -179,6 +179,42 @@ export interface MapView {
   note: string;
 }
 
+/// The stash's own entries (12-hex files) are capped: past TANUKI_STASH_MAX_MB
+/// (positive number, default 512) the oldest by mtime go until the total is
+/// 75% of the cap. The entry just written survives; `runs/` and anything else
+/// in the dir is not ours to delete. Any IO error is swallowed - pruning must
+/// never fail a stash write. Mirror of the Rust engine.
+/// ponytail: one readdir + stat per entry on every stash (~1 ms per 1,000
+/// entries); amortise with a stamp file if a stash ever holds 50k+ entries.
+function pruneStash(dir: string, keep: string): void {
+  try {
+    const raw = (process.env.TANUKI_STASH_MAX_MB ?? "").trim();
+    const mb = /^\+?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(raw) ? Number(raw) : 0;
+    const cap = (mb > 0 && Number.isFinite(mb) ? mb : 512) * 1048576;
+    const all: { name: string; size: number; mtime: number }[] = [];
+    let total = 0;
+    for (const name of readdirSync(dir)) {
+      if (!/^[0-9a-f]{12}$/.test(name)) continue;
+      try {
+        const st = statSync(`${dir}/${name}`);
+        if (!st.isFile()) continue;
+        all.push({ name, size: st.size, mtime: st.mtimeMs });
+        total += st.size;
+      } catch {}
+    }
+    if (total <= cap) return;
+    all.sort((a, b) => a.mtime - b.mtime || cmpCodepoints(a.name, b.name));
+    for (const e of all) {
+      if (total <= cap * 0.75) break;
+      if (e.name === keep) continue;
+      try {
+        unlinkSync(`${dir}/${e.name}`);
+        total -= e.size;
+      } catch {}
+    }
+  } catch {}
+}
+
 export function stashText(text: string, view?: MapView): Stashed {
   const id = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 12);
   const dir = stashDir();
@@ -186,6 +222,7 @@ export function stashText(text: string, view?: MapView): Stashed {
   // rather than whatever umask says (0755/0644 by default).
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(`${dir}/${id}`, text, { mode: 0o600 });
+  pruneStash(dir, id);
 
   const bytes = Buffer.byteLength(text, "utf8");
   const segments = text.split("\n");

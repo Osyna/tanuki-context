@@ -460,10 +460,13 @@
   "value": 1,
   "better": "higher"
  },
- "proxy.memo_warm_pct_of_cold": {
-  "value": 17,
-  "better": "lower-speed",
-  "limit": 35
+ "proxy.memo_warm_rescanned_chars": {
+  "value": 0,
+  "better": "lower"
+ },
+ "proxy.memo_entries": {
+  "value": 200,
+  "better": "higher"
  },
  "proxy.memo_warm_same_bytes": {
   "value": 1,

@@ -1,7 +1,7 @@
 // Stash mode: park text outside context, fetch slices back, auto-imaged when
 // pages clearly win. Storage isolated per-run via TANUKI_STASH.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DIR = mkdtempSync(`${tmpdir()}/tanuki-stash-test-`);
@@ -214,6 +214,42 @@ describe("stash", () => {
       expect(statSync(`${nested}/${id}`).mode & 0o077).toBe(0);
     } finally {
       process.env.TANUKI_STASH = prev;
+    }
+  });
+
+  test("prune: over the cap the oldest entries go, the fresh one and runs/ stay", () => {
+    const d = `${DIR}/prune-check`;
+    mkdirSync(`${d}/runs`, { recursive: true });
+    const prev = { dir: process.env.TANUKI_STASH, cap: process.env.TANUKI_STASH_MAX_MB };
+    process.env.TANUKI_STASH = d;
+    process.env.TANUKI_STASH_MAX_MB = "0.001"; // 1048 bytes, prune to 786
+    try {
+      const old = ["aaaaaaaaaaa1", "aaaaaaaaaaa2", "aaaaaaaaaaa3", "aaaaaaaaaaa4"];
+      old.forEach((n, i) => {
+        writeFileSync(`${d}/${n}`, "x".repeat(300));
+        utimesSync(`${d}/${n}`, 1000 + i, 1000 + i);
+      });
+      writeFileSync(`${d}/runs/deadbeef0000`, "r".repeat(2000));
+      writeFileSync(`${d}/notes.txt`, "n".repeat(2000));
+      const { id } = stashText("y".repeat(300));
+      expect(old.map((n) => existsSync(`${d}/${n}`))).toEqual([false, false, false, true]);
+      expect(existsSync(`${d}/${id}`)).toBe(true);
+      expect(existsSync(`${d}/runs/deadbeef0000`)).toBe(true);
+      expect(existsSync(`${d}/notes.txt`)).toBe(true);
+
+      // restashing the same text refreshes its mtime, so it counts as recent
+      utimesSync(`${d}/${id}`, 5, 5);
+      stashText("y".repeat(300));
+      expect(statSync(`${d}/${id}`).mtimeMs).toBeGreaterThan(Date.now() - 60_000);
+
+      // under the cap nothing is touched
+      process.env.TANUKI_STASH_MAX_MB = "1";
+      stashText("z".repeat(300));
+      expect(existsSync(`${d}/aaaaaaaaaaa4`)).toBe(true);
+    } finally {
+      process.env.TANUKI_STASH = prev.dir;
+      if (prev.cap === undefined) delete process.env.TANUKI_STASH_MAX_MB;
+      else process.env.TANUKI_STASH_MAX_MB = prev.cap;
     }
   });
 

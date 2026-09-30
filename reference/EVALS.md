@@ -1040,19 +1040,27 @@ lines whose noise repeats common ask words as decoys. A control in the report
 fails if any gold line shares a whole word (or a 4+ character substring) with its
 ask, so the set stays a vocabulary-gap set.
 
-| engine | hit@1 | MRR |
+| set | 0.22.1 hit@1 / MRR | 0.23.0 hit@1 / MRR |
 | --- | ---: | ---: |
-| 0.22.1 (before) | 0/24 | 0.000 |
-| 0.23.0, TS and Rust byte-identical | **19/24** | **0.854** |
+| `VOCAB_GAP`, written alongside the table | 0/24 · 0.000 | **19/24** · 0.854 |
+| `VOCAB_GAP_HELDOUT`, written blind to the table | 1/24 · 0.042 | **3/24** · 0.201 |
 
-The five misses are the honest ones: "which request was slow" (`latency=` decoys
-outrank it, rank 2), "network problem reaching the database" (no hit in the top
-8), "when did the server start" (rank 2), "corrupted data on replay" (rank 2),
-"frequent timeouts from peers" (`peer=` decoys, no hit). The seeded find set of §10
-is unchanged (60/60, MRR 1.000) and the retrieval report still reads 11/15. The
-table is hand-picked from log vocabulary; groups holding very common words
-(fail/error) lift little because their idf is low. The gate holds
-`find.vocab_gap_hit1_of_24` and `find.vocab_gap_mrr_permille`.
+**The 19/24 is fitted.** The same hand wrote the table and the first set. A second
+set of 24 asks, written without seeing the table (same noise generator, another
+seed), moves from 1/24 to 3/24: the hits are a full disk, a locked-out login and
+a configuration change; 18 asks rank nowhere in the printed windows. One held-out
+ask (`leaked file handles`) shares `file` with `EMFILE` in its gold line; the
+report's guard flags it, and it misses on both engines. Read the table as a small
+hand-made list that helps when an ask happens to use its words, not as a thesaurus.
+
+Nothing dropped. The seeded find set of §10 stays 60/60 (MRR 1.000), the retrieval
+report 11/15. A rebuilt journal benchmark (a `journalctl -n 6000` snapshot, 188
+asks of 2 rare + 2 common words; the original 25/200 script is not in the tree, and
+this one is easier) ranks identically ask by ask on both engine versions, 154/188.
+Twenty asks sharing a rare literal (an id, an error code, a host) with their answer:
+20/20 before and after; with decoys added 18/20 before, 20/20 after. No synonym
+expansion outranked a literal hit. The gate holds `find.vocab_gap_hit1_of_24` and
+`find.vocab_gap_mrr_permille` (the fitted set: a regression guard, not a claim).
 
 ### 0.23 run rules on real captures
 
@@ -1115,10 +1123,15 @@ The npm pair reads `output identical` plus one pointer (88 % saved against -3 % 
 the run alone); a failing run followed by a 95-char passing run leads with
 `exit 101 -> 0 · 3 fixed · 0 new` and the three test names. Limits: unchanged blocks
 are compared as sets of normalised lines, so a change that only touches a masked
-token (a timestamp, a duration, a 4+ digit number in parentheses) reads as
-identical; fixed/new lists use test-runner vocabulary. Every routed run of 400+
+token (a timestamp, a duration with its unit, a 6+ hex-digit `0x` address, a test
+thread id in `thread 'x' (N)`) reads as identical; any other number, a count in
+parentheses included, is content (tested: `(1204 items)` -> `(1205 items)` shows
+as a change). Fixed/new lists use test-runner vocabulary. Every routed run of 400+
 chars is now stashed (content-addressed, so identical bytes dedupe) plus a
-20-byte index file per command; neither engine garbage-collects the stash.
+20-byte index file per command. Both engines cap the stash's own entries at
+`TANUKI_STASH_MAX_MB` (default 512): after each write, oldest mtime first, down to
+75 % of the cap, never the entry just written, `runs/` and foreign files untouched.
+The scan costs about 1 ms per 1,000 entries (4.8 ms at 5,000, 53 ms at 50,000).
 
 The gate holds `crush.new_rules_fired_of_12`, `delta.cargo-test.second_run_chars`,
 `delta.npm-test.second_run_chars` (and their o200k tokens) and that the second run

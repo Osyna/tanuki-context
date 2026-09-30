@@ -112,7 +112,7 @@ async function runEngine(label, cmd, args, bodies) {
 
 const TS_ARGS = [process.env.TANUKI_TS_CLI ?? "dist/cli.js", "proxy"];
 const [ts] = await runEngine("ts", "node", TS_ARGS, [REQ]);
-const tsConv = await runEngine("ts", "node", TS_ARGS, CONV);
+const tsConv = await runEngine("ts", "node", [...TS_ARGS, "--auto-cache"], CONV); // the breakpoint is opt-in
 const tsCases = await runEngine("ts", "node", TS_ARGS, CASES);
 // The Rust engine is a sibling worktree, not a dependency, so it is absent in
 // a plain CI checkout. Compare cross-engine when it is there; otherwise still
@@ -121,7 +121,7 @@ const tsCases = await runEngine("ts", "node", TS_ARGS, CASES);
 const RS_BIN = process.env.TANUKI_BIN ?? "/tmp/tanuki-rust/target/release/tanuki-context";
 const haveRust = existsSync(RS_BIN);
 const [rs] = haveRust ? await runEngine("rust", RS_BIN, ["proxy"], [REQ]) : [null];
-const rsConv = haveRust ? await runEngine("rust", RS_BIN, ["proxy"], CONV) : null;
+const rsConv = haveRust ? await runEngine("rust", RS_BIN, ["proxy", "--auto-cache"], CONV) : null;
 const rsCases = haveRust ? await runEngine("rust", RS_BIN, ["proxy"], CASES) : null;
 upstream.close();
 rmSync(EVENTS, { force: true });

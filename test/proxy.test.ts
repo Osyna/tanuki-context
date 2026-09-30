@@ -751,6 +751,9 @@ describe("memoised minify (T1b)", () => {
 
 // ------------------------------------------------ T8a automatic cache breakpoint
 describe("automatic cache breakpoint (T8a)", () => {
+  // the feature is opt-in (PROXY_DEFAULTS.autoCache is false): these tests turn it on
+  const AUTO: ProxyCfg = { ...CFG, autoCache: true };
+  const total = (body: string): number => body.split("cache_control").length - 1;
   const conv = (n: number, first: unknown = "q0", extra: Record<string, unknown> = {}): string =>
     JSON.stringify({
       model: "claude-sonnet-4",
@@ -758,60 +761,119 @@ describe("automatic cache breakpoint (T8a)", () => {
       ...extra,
     });
 
+  const warm = (cfg: ProxyCfg): boolean => {
+    const ss = newSession();
+    transformRequestBody(conv(1), cfg, ss);
+    transformRequestBody(conv(3), cfg, ss);
+    return transformRequestBody(conv(5), cfg, ss)!.autoCache;
+  };
+
+  test("default cfg places none: the proxy stays a pass-through", () => {
+    const s = newSession();
+    for (const n of [1, 3, 5]) {
+      const r = transformRequestBody(conv(n), CFG, s)!;
+      expect(r.autoCache).toBe(false);
+      expect(r.body).toBe(conv(n));
+    }
+  });
+
   test("first two requests untouched, the third gets exactly one breakpoint before the recency window", () => {
     const s = newSession();
-    const r1 = transformRequestBody(conv(1), CFG, s)!;
-    const r2 = transformRequestBody(conv(3), CFG, s)!;
+    const r1 = transformRequestBody(conv(1), AUTO, s)!;
+    const r2 = transformRequestBody(conv(3), AUTO, s)!;
     expect(r1.changed || r2.changed || r1.autoCache || r2.autoCache).toBe(false);
-    const r3 = transformRequestBody(conv(5), CFG, s)!;
+    const r3 = transformRequestBody(conv(5), AUTO, s)!;
     expect(r3.autoCache).toBe(true);
     // the same literal becomes the one text block that carries it; nothing else moves
     expect(r3.body).toBe(conv(5).replace('"content":"a1"', '"content":[{"type":"text","text":"a1","cache_control":{"type":"ephemeral"}}]'));
-    expect(r3.body.split("cache_control").length - 1).toBe(1);
+    expect(total(r3.body)).toBe(1);
   });
 
   test("a client breakpoint on any message block suppresses it", () => {
     const s = newSession();
     const client = [{ type: "text", text: "q0", cache_control: { type: "ephemeral" } }];
     for (const n of [1, 3, 5]) {
-      const r = transformRequestBody(conv(n, client), CFG, s)!;
+      const r = transformRequestBody(conv(n, client), AUTO, s)!;
       expect(r.autoCache).toBe(false);
       expect(r.changed).toBe(false);
     }
   });
 
-  test("system/tools breakpoints count toward the ceiling of 4", () => {
-    const four = [0, 1, 2, 3].map(() => ({ type: "text", text: "x", cache_control: { type: "ephemeral" } }));
-    for (const [system, expected] of [[four.slice(0, 3), true], [four, false]] as const) {
+  const ccBlock = { type: "text", text: "x", cache_control: { type: "ephemeral" } };
+  const withSystem = (n: number) => (n > 0 ? { system: Array.from({ length: n }, () => ccBlock) } : {});
+  // four tools, the first `n` of them carrying a breakpoint
+  const withTools = (n: number) => ({ tools: [0, 1, 2, 3].map((i) => ({ name: `t${i}`, description: "d", input_schema: { type: "object" }, ...(i < n ? { cache_control: { type: "ephemeral" } } : {}) })) });
+
+  test("client breakpoints in system, tools or both count toward the ceiling of 4", () => {
+    // [system, tools, does auto place one?]
+    for (const [sn, tn, expected] of [[4, 0, false], [3, 0, true], [0, 4, false], [0, 3, true], [2, 2, false], [1, 2, true], [1, 3, false], [3, 1, false], [2, 1, true]] as const) {
+      const extra = { ...withSystem(sn), ...withTools(tn) };
       const s = newSession();
-      transformRequestBody(conv(1, "q0", { system }), CFG, s);
-      transformRequestBody(conv(3, "q0", { system }), CFG, s);
-      expect(transformRequestBody(conv(5, "q0", { system }), CFG, s)!.autoCache).toBe(expected);
+      transformRequestBody(conv(1, "q0", extra), AUTO, s);
+      transformRequestBody(conv(3, "q0", extra), AUTO, s);
+      const r = transformRequestBody(conv(5, "q0", extra), AUTO, s)!;
+      expect(r.autoCache).toBe(expected);
+      expect(total(r.body)).toBe(sn + tn + (expected ? 1 : 0));
     }
   });
 
-  test("a prefix that keeps changing earns none; TANUKI_AUTO_CACHE=off, cfg and a missing session also opt out", () => {
+  test("with imaging on, the imaged-prefix breakpoint and the automatic one never pass 4 in total", () => {
+    const cfg = { ...AUTO, minChars: 1000 };
+    for (let sn = 0; sn <= 4; sn++) {
+      for (let tn = 0; sn + tn <= 4; tn++) {
+        const k = sn + tn;
+        const extra = { ...withSystem(sn), ...withTools(tn) };
+        const s = newSession();
+        // BIG opens the conversation, so it is imaged from the first request on
+        for (const n of [3, 3]) expect(total(transformRequestBody(conv(n, BIG, extra), cfg, s)!.body)).toBeLessThanOrEqual(4);
+        const r = transformRequestBody(conv(5, BIG, extra), cfg, s)!;
+        expect(r.imagedBlocks).toBe(1);
+        expect(r.cached).toBe(k < 4);
+        expect(r.autoCache).toBe(k < 3);
+        expect(total(r.body)).toBe(Math.min(4, k + 2));
+      }
+    }
+  });
+
+  test("breakpoints inside a tool_result's own content count too", () => {
+    const nested = (n: number) => msg("user", [{ type: "tool_result", tool_use_id: "t", content: Array.from({ length: n }, () => ccBlock) }]);
+    // four nested breakpoints leave no room for the imaged-prefix one
+    const full = JSON.stringify({ model: "claude-sonnet-4", messages: [msg("user", BIG), msg("assistant", "a0"), nested(4), msg("assistant", "a1"), msg("user", "q2")] });
+    const r = transformRequestBody(full, AUTO)!;
+    expect(r.imagedBlocks).toBe(1);
+    expect(r.cached).toBe(false);
+    expect(total(r.body)).toBe(4);
+    // and a nested one is a client breakpoint: the automatic one stays away
+    const s = newSession();
+    const turn = (n: number) => JSON.stringify({ model: "claude-sonnet-4", messages: [nested(1), msg("assistant", "a0"), msg("user", "q1"), msg("assistant", "a1"), msg("user", "q2")].slice(0, n) });
+    for (const n of [1, 3, 5]) expect(transformRequestBody(turn(n), AUTO, s)!.autoCache).toBe(false);
+  });
+
+  test("a prefix that keeps changing earns none; --no-cache and a missing session also opt out", () => {
     const s = newSession();
     for (const n of [1, 3, 5, 5]) {
       // message 0 differs on every request: the cache never held, so nothing to protect
-      const r = transformRequestBody(conv(n, `q0-${Math.random()}`), CFG, s)!;
+      const r = transformRequestBody(conv(n, `q0-${Math.random()}`), AUTO, s)!;
       expect(r.autoCache).toBe(false);
     }
-    const warm = (cfg: ProxyCfg): boolean => {
-      const ss = newSession();
-      transformRequestBody(conv(1), cfg, ss);
-      transformRequestBody(conv(3), cfg, ss);
-      return transformRequestBody(conv(5), cfg, ss)!.autoCache;
-    };
-    expect(warm(CFG)).toBe(true);
-    expect(warm({ ...CFG, autoCache: false })).toBe(false);
-    process.env.TANUKI_AUTO_CACHE = "off";
+    expect(warm(AUTO)).toBe(true);
+    expect(warm({ ...AUTO, cache: false })).toBe(false);
+    expect(transformRequestBody(conv(5), AUTO)!.autoCache).toBe(false);
+  });
+
+  test("TANUKI_AUTO_CACHE=on opts in with the default cfg (but not past --no-cache); off means nothing special", () => {
+    const prev = process.env.TANUKI_AUTO_CACHE;
     try {
+      process.env.TANUKI_AUTO_CACHE = "on";
+      expect(warm(CFG)).toBe(true);
+      expect(warm({ ...CFG, cache: false })).toBe(false);
+      process.env.TANUKI_AUTO_CACHE = "off";
       expect(warm(CFG)).toBe(false);
+      expect(warm(AUTO)).toBe(true);
     } finally {
-      delete process.env.TANUKI_AUTO_CACHE;
+      if (prev === undefined) delete process.env.TANUKI_AUTO_CACHE;
+      else process.env.TANUKI_AUTO_CACHE = prev;
     }
-    expect(transformRequestBody(conv(5), CFG)!.autoCache).toBe(false);
   });
 
   test("a thinking tail and an empty string cannot carry one", () => {
@@ -820,9 +882,9 @@ describe("automatic cache breakpoint (T8a)", () => {
     const s = newSession();
     // boundary message of the 5-message request is index 3 ("a"); make it the thinking one instead
     const body = (n: number) => thinking(n).replace('"content":"a"', '"content":[{"type":"thinking","thinking":"hm","signature":"s"}]');
-    transformRequestBody(body(1), CFG, s);
-    transformRequestBody(body(3), CFG, s);
-    const r = transformRequestBody(body(5), CFG, s)!;
+    transformRequestBody(body(1), AUTO, s);
+    transformRequestBody(body(3), AUTO, s);
+    const r = transformRequestBody(body(5), AUTO, s)!;
     expect(r.autoCache).toBe(false);
     expect(r.changed).toBe(false);
   });
@@ -832,9 +894,9 @@ describe("automatic cache breakpoint (T8a)", () => {
     const head = '{"model":"m","messages":[{"role":"user","content":"q0"},{"role":"assistant","content":"a0"},{"role":"user","content":"q1"}';
     const short = `${head}]}`;
     const long = `${head},{"role":"assistant","content":[{"type":"text","text":"a1"},{"type":"text", "text":"a2" }]},{"role":"user","content":"q2"}]}`;
-    transformRequestBody(short, CFG, s);
-    transformRequestBody(short, CFG, s);
-    const r = transformRequestBody(long, CFG, s)!;
+    transformRequestBody(short, AUTO, s);
+    transformRequestBody(short, AUTO, s);
+    const r = transformRequestBody(long, AUTO, s)!;
     expect(r.autoCache).toBe(true);
     expect(r.body).toBe(long.replace('"text":"a2" }', '"text":"a2","cache_control":{"type":"ephemeral"} }'));
   });
@@ -851,7 +913,7 @@ describe("automatic cache breakpoint (T8a)", () => {
     const log = `/tmp/tanuki-proxy-auto-${process.pid}.jsonl`;
     const prev = process.env.TANUKI_EVENTS;
     process.env.TANUKI_EVENTS = log;
-    const proxy = startProxy({ ...CFG, port: 0, upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}` });
+    const proxy = startProxy({ ...AUTO, port: 0, upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}` });
     await new Promise<void>((ok) => proxy.on("listening", ok));
     const port = (proxy.address() as AddressInfo).port;
     try {

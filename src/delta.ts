@@ -63,13 +63,13 @@ export function recordRun(key: string, id: string, code: number): void {
 // and process ids, durations, addresses. Two lines equal after this are "the
 // same line".
 const TS = /[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?/g;
-const PID = /\([0-9]{4,}\)/g;
+const PID = /(thread '[^']*' )\([0-9]+\)/g;
 const DUR = /(^|[^A-Za-z0-9_.])[0-9]+(?:\.[0-9]+)?(?:ns|µs|μs|us|ms|s)([^A-Za-z0-9_]|$)/g;
 const DUR_MS = /duration_ms [0-9.]+/g;
 const HEX = /0x[0-9a-f]{6,}/g;
 
 export function norm(line: string): string {
-  let s = rustTrim(line).replace(TS, "<ts>").replace(PID, "(#)");
+  let s = rustTrim(line).replace(TS, "<ts>").replace(PID, "$1(#)");
   // twice: "1s 2s" - the first match consumes the space the second one needs
   for (let i = 0; i < 2; i++) s = s.replace(DUR, (_m, a: string, b: string) => `${a}<t>${b}`);
   return s.replace(DUR_MS, "duration_ms <n>").replace(HEX, "0x#");

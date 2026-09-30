@@ -27,11 +27,12 @@
 //!      replacement, an added `cache_control`) and only those spans are
 //!      substituted. Key order, whitespace, number spellings, system and tools
 //!      stay the client's own bytes, so no number is ever re-printed.
-//!   9. Automatic cache breakpoint: once a session has sent two requests in a
-//!      row whose earlier messages matched the previous request, and the
-//!      client placed no `cache_control` on any message, one ephemeral
-//!      breakpoint goes on the last block before the recency window (never a
-//!      5th: Anthropic 400s on it). `--no-auto-cache` / TANUKI_AUTO_CACHE=off.
+//!   9. Automatic cache breakpoint (opt-in: `--auto-cache` / TANUKI_AUTO_CACHE=on,
+//!      never with `--no-cache`; not measured against the live API, so off by
+//!      default): once a session has sent two requests in a row whose earlier
+//!      messages matched the previous request, and the client placed no
+//!      `cache_control` on any message, one ephemeral breakpoint goes on the
+//!      last block before the recency window (never a 5th: Anthropic 400s on it).
 //!
 //! Responses stream through untouched; usage is scraped from the stream for
 //! the ~/.pxpipe/events.jsonl savings log (same format tanuki_stats reads).
@@ -108,7 +109,7 @@ export interface ProxyCfg {
   maxPages: number; // give up on absurdly large single blocks
   recencyWindow: number; // trailing messages always kept as text (default 1)
   cache: boolean; // place a cache breakpoint on the last imaged message (default on)
-  autoCache: boolean; // add one breakpoint before the recency window once the prefix holds (default on)
+  autoCache: boolean; // add one breakpoint before the recency window once the prefix holds (default off)
   verbatim: Verbatim; // sidecar next to the pages: full · lazy pointer · off
 }
 
@@ -124,7 +125,7 @@ export const PROXY_DEFAULTS: Omit<ProxyCfg, "port" | "upstream"> = {
   maxPages: 20,
   recencyWindow: 1,
   cache: true,
-  autoCache: true,
+  autoCache: false,
   verbatim: "full",
 };
 
@@ -502,31 +503,30 @@ function splice(raw: string, reps: Map<number, Rep>): string {
 }
 
 /// Anthropic accepts at most 4 `cache_control` breakpoints per request and
-/// 400s on a 5th, so count the ones the client already placed (system, tools
-/// and message blocks) before adding ours. Fail-open: a request that worked
-/// without the proxy must still work through it.
+/// 400s on a 5th, so count the ones the client already placed (system, tools,
+/// message blocks and the text blocks inside a tool_result) before adding
+/// ours. Fail-open: a request that worked without the proxy must still work
+/// through it.
 const MAX_BREAKPOINTS = 4;
-function countBreakpoints(body: Record<string, unknown>): number {
+
+/// `cache_control` members in a block array, a tool_result's own content included.
+function scanBreakpoints(arr: unknown): number {
+  if (!Array.isArray(arr)) return 0;
   let n = 0;
-  const scan = (arr: unknown): void => {
-    if (!Array.isArray(arr)) return;
-    for (const b of arr) if (isObj(b) && b.cache_control !== undefined) n++;
-  };
-  scan(body.system);
-  scan(body.tools);
-  if (Array.isArray(body.messages)) {
-    for (const m of body.messages) if (isObj(m)) scan(m.content);
+  for (const b of arr) {
+    if (!isObj(b)) continue;
+    if (b.cache_control !== undefined) n++;
+    if (b.type === "tool_result") n += scanBreakpoints(b.content);
   }
   return n;
 }
 
-/// The client caches on its own: any message block already carries a breakpoint.
-function clientCaches(messages: unknown[]): boolean {
-  for (const m of messages) {
-    if (!isObj(m) || !Array.isArray(m.content)) continue;
-    for (const b of m.content) if (isObj(b) && b.cache_control !== undefined) return true;
+function countBreakpoints(body: Record<string, unknown>): number {
+  let n = scanBreakpoints(body.system) + scanBreakpoints(body.tools);
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) if (isObj(m)) n += scanBreakpoints(m.content);
   }
-  return false;
+  return n;
 }
 
 /// Cheap upper bound before the JSON.parse in minifyJson: one pass counting the
@@ -629,7 +629,7 @@ function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefin
   };
   const touched = new Set<number>(); // messages the proxy rewrote (T8b)
   const preTok = new Map<object, number>(); // minified tool_result texts: tokens already known
-  const clientCC = clientCaches(msgs);
+  const clientCC = msgs.some((m) => isObj(m) && scanBreakpoints(m.content) > 0); // the client caches on its own
 
   let imagedBlocks = 0;
   let origChars = 0;
@@ -1101,8 +1101,9 @@ function rewriteBody(raw: string, cfg: ProxyCfg, session: ProxySession | undefin
   // client caches itself, never a 5th breakpoint.
   let autoCache = false;
   if (
-    cfg.autoCache &&
-    process.env.TANUKI_AUTO_CACHE !== "off" &&
+    // opt-in (--auto-cache, or TANUKI_AUTO_CACHE=on) and never with --no-cache (cfg.cache off)
+    cfg.cache &&
+    (cfg.autoCache || process.env.TANUKI_AUTO_CACHE === "on") &&
     session !== undefined &&
     session.stable >= 2 &&
     !clientCC &&
@@ -1305,7 +1306,7 @@ export function startProxy(cfg: ProxyCfg): http.Server {
     process.stderr.write(
       `tanuki-context proxy on http://127.0.0.1:${port} -> ${cfg.upstream}\n` +
         `  ${knobs}\n` +
-        `  rules: system prompt & tools untouched · edits spliced into your own request bytes (nothing else moves) · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control blocks never imaged · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}${cfg.autoCache && process.env.TANUKI_AUTO_CACHE !== "off" ? " · auto cache breakpoint once the prefix holds" : ""} · pretty JSON tool results minified (lossless)\n` +
+        `  rules: system prompt & tools untouched · edits spliced into your own request bytes (nothing else moves) · in-place blocks only · last ${Math.max(1, cfg.recencyWindow)} message(s) kept as text · secrets never imaged · cache_control blocks never imaged · identical blocks imaged once${cfg.cache ? " · imaged prefix marked cacheable" : ""}${cfg.cache && (cfg.autoCache || process.env.TANUKI_AUTO_CACHE === "on") ? " · auto cache breakpoint once the prefix holds" : ""} · pretty JSON tool results minified (lossless)\n` +
         `  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}\n`,
     );
   });

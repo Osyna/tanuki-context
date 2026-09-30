@@ -49,7 +49,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { opsCorpus, vocabGapCorpus } from "./lib/corpus.mjs";
+import { opsCorpus, vocabGapCorpus, vocabGapHeldoutCorpus } from "./lib/corpus.mjs";
 import { callTools } from "./lib/mcp.mjs";
 import { hex, lcg, UNITS } from "./lib/rand.mjs";
 
@@ -398,6 +398,49 @@ console.log(
 );
 // 17/24 = 70%: a clear majority. Before synonyms and stems this set scored far lower.
 control(`vocab-gap hit@1 is a clear majority (>= 17 of ${VG.asks.length})`, vgHit1 >= 17, `${vgHit1} measured`);
+
+// ---- held-out vocabulary gaps: same scoring, asks written blind to the synonym table ----
+// Print only, no control: VOCAB_GAP was written by the same hand as the engine's
+// table, so it may be fitted; this twin (VOCAB_GAP_HELDOUT) was frozen before it
+// was ever run. Read the two numbers side by side, not the first alone.
+const HO = vocabGapHeldoutCorpus();
+const hoShared = HO.asks.filter(({ ask, gold }) => {
+  const gw = new Set(vgWords(gold));
+  const gl = gold.toLowerCase();
+  return vgWords(ask).some((w) => gw.has(w) || (w.length >= 4 && gl.includes(w)));
+});
+// Not a control: the asks are frozen, so a surface overlap found after scoring is reported, not fixed.
+console.log(
+  `\nheld-out fixture: ${HO.asks.length} asks, ${hoShared.length} share a surface word/4+-char substring with gold` +
+    (hoShared.length ? ` (${hoShared.map((a) => `"${a.ask}"`).join(", ")}): treat as contaminated` : ""),
+);
+const hoStash = await callTools(CMD, ARGS, [{ name: "tanuki_stash", arguments: { text: HO.text } }], OPTS);
+const HOID = /stashed ([0-9a-f]{12})/.exec(hoStash[0].text)?.[1];
+const hoOut = await callTools(
+  CMD,
+  ARGS,
+  HO.asks.map(({ ask }) => ({ name: "tanuki_fetch", arguments: { id: HOID, find: ask, top: 8, redact: false } })),
+  OPTS,
+);
+let hoHit1 = 0;
+let hoMrr = 0;
+const hoMiss = [];
+HO.asks.forEach(({ ask, gold }, i) => {
+  const at = HO.text.split("\n").indexOf(gold) + 1;
+  const ranked = [...hoOut[i].text.matchAll(/^·find· L(\d+)-(\d+) score (\S+)/gm)]
+    .map((m) => ({ a: +m[1], b: +m[2], s: +m[3] }))
+    .sort((x, y) => y.s - x.s || x.a - y.a);
+  const rank = ranked.findIndex((w) => w.a <= at && at <= w.b);
+  if (rank === 0) hoHit1++;
+  else hoMiss.push(`"${ask}" -> rank ${rank === -1 ? "none" : rank + 1}`);
+  hoMrr += rank === -1 ? 0 : 1 / (rank + 1);
+});
+console.log(
+  `\nheld-out vocabulary gaps (find, ${HO.asks.length} asks, never tuned against): ` +
+    `hit@1 ${hoHit1}/${HO.asks.length}, MRR ${(hoMrr / HO.asks.length).toFixed(3)}  ` +
+    `(tuned set above: ${vgHit1}/${VG.asks.length}, MRR ${(vgMrr / VG.asks.length).toFixed(3)})` +
+    (hoMiss.length ? `\n  misses: ${hoMiss.join("; ")}` : ""),
+);
 
 // ---- gate -------------------------------------------------------------------
 if (failures > 0) {

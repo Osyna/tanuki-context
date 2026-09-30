@@ -23,8 +23,7 @@
 //! File tools and file-reading shell commands are never touched: an edit
 //! needs the file's own layout.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Type, type TSchema } from "typebox";
 import { routeOutput } from "./crush.ts";
@@ -82,7 +81,21 @@ const FOOTER = "\n\nWall time: ";
 /// to see a plain `gh api`.
 const PRETTY_HEAD = "(o=$(";
 const PRETTY_TAIL = `); rc=$?; printf '%s\\n' "$o" | jq . 2>/dev/null || printf '%s\\n' "$o"; exit $rc) #tanuki-pretty`;
-let jqFound: boolean | undefined;
+/// `jq .` must not re-spell a number: jq <= 1.6 parses them as doubles, so a
+/// 20-digit id would come back rounded. Probed once per PATH: the jq found must
+/// round-trip a wide integer and a trailing-zero decimal byte for byte.
+const JQ_PROBE = "[12345678901234567890,1.50]";
+const jqLossless = new Map<string, boolean>();
+function jqKeepsNumbers(): boolean {
+  const path = process.env.PATH ?? "";
+  let ok = jqLossless.get(path);
+  if (ok === undefined) {
+    const r = spawnSync("jq", ["-c", "."], { input: JQ_PROBE, encoding: "utf8", timeout: 5000, env: process.env });
+    ok = r.status === 0 && r.stdout === `${JQ_PROBE}\n`;
+    jqLossless.set(path, ok);
+  }
+  return ok;
+}
 /// The wrapped form of a `gh api` command that is one simple step (no pipe,
 /// redirect, list, substitution) and asks for plain JSON (no --jq/--template/
 /// --include/--silent/--help); null when it must be left alone.
@@ -92,8 +105,7 @@ function prettyGhApi(command: string): string | null {
   const w = c.split(/\s+/);
   if (w[0] !== "gh" || w[1] !== "api") return null;
   if (w.some((a) => /^--(jq|template|include|silent|verbose|help)\b/.test(a) || /^-[a-z]*[qtih]/.test(a))) return null;
-  jqFound ??= (process.env.PATH ?? "").split(":").some((d) => d !== "" && existsSync(`${d}/jq`));
-  return jqFound ? PRETTY_HEAD + c + PRETTY_TAIL : null;
+  return jqKeepsNumbers() ? PRETTY_HEAD + c + PRETTY_TAIL : null;
 }
 
 interface ToolResultEvent {
@@ -203,10 +215,16 @@ export default function (pi: ExtensionAPI) {
     client = null;
   });
 
+  // tool_call handler errors block the tool (fail-closed), so any surprise here
+  // must mean "leave the command alone", never "no bash".
   pi.on("tool_call", async (event: { toolName: string; input?: { command?: unknown } }) => {
-    if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off" || process.env.TANUKI_MINIFY === "off") return;
-    const command = prettyGhApi(String(event.input?.command ?? ""));
-    if (command !== null) return { input: { ...event.input, command } };
+    try {
+      if (event.toolName !== "bash" || process.env.TANUKI_ROUTE === "off" || process.env.TANUKI_MINIFY === "off") return;
+      const command = prettyGhApi(String(event.input?.command ?? ""));
+      if (command !== null) return { input: { ...event.input, command } };
+    } catch {
+      return;
+    }
   });
 
   pi.on("tool_result", async (event: ToolResultEvent) => {

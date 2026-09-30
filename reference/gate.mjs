@@ -299,34 +299,42 @@ function sectionDelta(ctx, put) {
   process.env.TANUKI_STASH = shared;
 }
 
-/** 8d. proxy 0.23: memoised minify (warm call as a percent of the cold one),
- *  byte-exact splicing (the rewritten request is the client's bytes with ONE
- *  string literal replaced), and the automatic cache breakpoint schedule. */
+/** 8d. proxy 0.23: memoised minify (a warm call rescans nothing: read off the
+ *  session, not a stopwatch), byte-exact splicing (the rewritten request is
+ *  the client's bytes with ONE string literal replaced), and the automatic
+ *  cache breakpoint schedule. */
 function sectionProxyBytes(ctx, put) {
   const { transformRequestBody, PROXY_DEFAULTS, newSession } = ctx.mod.proxy;
   const cfg = { ...PROXY_DEFAULTS, port: 0, upstream: "http://127.0.0.1:1" };
   // memo: 200 messages x ~28 KB pretty JSON; imaging and auto breakpoint off so
-  // it measures minify + bookkeeping. Median of 3 fresh sessions, warm = best of 3.
+  // it measures minify + bookkeeping. Fresh sessions, warm = 3 more calls.
   const doc = (n) => JSON.stringify({ items: Array.from({ length: 350 }, (_, i) => ({ id: `n${n}-${i}`, name: `row ${i}`, note: "keep  these\tspaces", tags: ["a", "b"] })) }, null, 2);
   const raw = JSON.stringify({ model: "claude-sonnet-4", messages: Array.from({ length: 200 }, (_, n) => ({ role: "user", content: [{ type: "tool_result", tool_use_id: `t${n}`, content: doc(n) }] })) });
   const mcfg = { ...cfg, minChars: 1e9, autoCache: false };
   const pcts = [];
   let identical = 1;
+  let rescanned = 0;
+  let entries = Infinity;
   for (let a = 0; a < 3; a++) {
     const s = newSession();
     let t = performance.now();
     const first = transformRequestBody(raw, mcfg, s);
     const t1 = performance.now() - t;
+    const scanned = s.memoChars;
     let t2 = Infinity;
     for (let k = 0; k < 3; k++) {
       t = performance.now();
       const second = transformRequestBody(raw, mcfg, s);
       t2 = Math.min(t2, performance.now() - t);
       if (second?.body !== first?.body) identical = 0;
+      if (k === 0) rescanned = Math.max(rescanned, s.memoChars - scanned); // the second call: a memo hit adds nothing
     }
+    entries = Math.min(entries, s.minifyMemo.size);
     pcts.push((100 * t2) / t1);
   }
-  put("proxy.memo_warm_pct_of_cold", Math.round(pcts.sort((x, y) => x - y)[1]), "lower-speed", { limit: 35 });
+  console.error(`proxy memo: warm call = ${Math.round(pcts.sort((x, y) => x - y)[1])} % of the cold one (median of 3; information only, not gated)`);
+  put("proxy.memo_warm_rescanned_chars", rescanned, "lower");
+  put("proxy.memo_entries", entries, "higher");
   put("proxy.memo_warm_same_bytes", identical, "higher");
   // splice: odd key order, spaces after colons, a 20-digit id, 1.50, an escaped
   // slash; exactly one literal (the pretty tool_result) may change
@@ -336,13 +344,14 @@ function sectionProxyBytes(ctx, put) {
   const min = ctx.mod.serde.minifyJson(pretty);
   const r = transformRequestBody(before, { ...cfg, minChars: 1e9, autoCache: false });
   put("proxy.splice_bytes_exact", min !== null && r?.body === before.replace(literal, JSON.stringify(min)) ? 1 : 0, "higher");
-  // auto breakpoint: none on requests 1-2, exactly one on request 3, none when the client placed its own
+  // auto breakpoint (opt-in): none on requests 1-2, exactly one on request 3, none when the client placed its own
   const msg = (role, content) => ({ role, content });
   const conv = (n, first = "q0") => JSON.stringify({ model: "claude-sonnet-4", messages: [msg("user", first), msg("assistant", "a0"), msg("user", "q1"), msg("assistant", "a1"), msg("user", "q2")].slice(0, n) });
   const count = (body) => body.split("cache_control").length - 1;
+  const auto = { ...cfg, autoCache: true };
   const run = (first) => {
     const s = newSession();
-    return [1, 3, 5].map((n) => count(transformRequestBody(conv(n, first), cfg, s)?.body ?? conv(n, first)));
+    return [1, 3, 5].map((n) => count(transformRequestBody(conv(n, first), auto, s)?.body ?? conv(n, first)));
   };
   const plain = run("q0");
   const client = run([{ type: "text", text: "q0", cache_control: { type: "ephemeral" } }]);

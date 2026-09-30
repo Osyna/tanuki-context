@@ -258,6 +258,26 @@ describe("pi extension bash router", () => {
       }
     }
   });
+  test("a jq that re-spells numbers (<= 1.6 doubles) disables the rewrite: a 20-digit id must not be rounded", async () => {
+    const bin = mkdtempSync(`${tmpdir()}/tanuki-fakejq-`);
+    writeFileSync(`${bin}/jq`, '#!/bin/sh\ncat >/dev/null; echo "[12345678901234567000,1.5]"\n', { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      expect(await rewrite("gh api repos/o/r")).toBeUndefined();
+    } finally {
+      process.env.PATH = path;
+      rmSync(bin, { recursive: true });
+    }
+    expect(await rewrite("gh api repos/o/r")).toBeDefined(); // the real jq on PATH round-trips
+  });
+  test("tool_call is fail-open: garbage input never throws (a throwing handler would block every bash call)", async () => {
+    const call = ext.handlers.get("tool_call")!;
+    const evil = { toString: () => { throw new Error("boom"); } };
+    for (const ev of [{ toolName: "bash" }, { toolName: "bash", input: null }, { toolName: "bash", input: { command: 42 } }, { toolName: "bash", input: { command: evil } }]) {
+      expect(await call(ev, {})).toBeUndefined();
+    }
+  });
 });
 
 const RUST_BIN = process.env.TANUKI_BIN_TEST ?? "/tmp/tanuki-rust/target/release/tanuki-context";

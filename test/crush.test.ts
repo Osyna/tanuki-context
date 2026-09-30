@@ -789,6 +789,14 @@ test("delta: norm masks what changes on every run, nothing else", () => {
   same("at 0xdeadbeef01", "at 0x1234567890");
   assert(norm("test a::b ... FAILED") !== norm("test a::c ... FAILED"), "different tests stay different");
   assert(norm("line 12: id=3e43d0fb") !== norm("line 13: id=3e43d0fb"), "small numbers are content");
+  assert(norm("(1204 items)") !== norm("(1205 items)"), "a count in parentheses is content");
+  assert(norm("(1204)") !== norm("(1205)"), "a bare parenthesised number is content");
+});
+
+test("delta: a changed parenthesised count is not reported identical", () => {
+  const d = diffRuns({ id: "dddddddddddd", code: 0, text: "done (1204 items)\nx", lines: 2 }, { text: "done (1205 items)\nx", code: 0 });
+  assert(!d.head[0].includes("output identical"), d.head[0]);
+  assert(d.body.includes("done (1205 items)"), d.body);
 });
 
 test("delta: diffRuns caps long lists, quotes the previous run, keeps exit-code change", () => {

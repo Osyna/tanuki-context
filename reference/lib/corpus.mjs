@@ -157,3 +157,43 @@ export function vocabGapCorpus() {
   golds.forEach((g, i) => lines.splice(i * 25 + 3 + i + ((r() * 15) | 0), 0, g));
   return { text: lines.join("\n") + "\n", asks: VOCAB_GAP.map(([ask], i) => ({ ask, gold: golds[i] })) };
 }
+
+/** Held-out twin of VOCAB_GAP: written blind to the engine's synonym table, never tuned against. */
+export const VOCAB_GAP_HELDOUT = [
+  ["why did the pod keep restarting", "WARN container crashloopbackoff back-off 5m0s name=api-7d9"],
+  ["is the disk nearly full", "ERROR no space left on device path=/var/lib/data"],
+  ["who got locked out of their login", "WARN authentication denied user=mara too many failures suspended"],
+  ["did the certificate expire", "ERROR handshake failed x509 validity period ended host=edge-3"],
+  ["out of memory kills", "ERROR oom-killer terminated process pid=4411 rss=3.9GB"],
+  ["slow database queries", "WARN statement exceeded 2000ms sql=SELECT sum FROM ledger"],
+  ["deployment rolled back", "ERROR release v2.14.1 reverted to v2.14.0 after canary failure"],
+  ["messages stuck in the queue", "WARN broker backlog depth=48211 consumers=0 topic=orders"],
+  ["cannot resolve the hostname", "ERROR NXDOMAIN lookup failed name=billing.internal"],
+  ["network packets dropped", "WARN iface eth0 rx discards=9123 tx errors=12"],
+  ["permission problems writing files", "ERROR EACCES open /srv/uploads/a.tmp forbidden"],
+  ["service is unreachable from the load balancer", "WARN upstream 10.2.4.9:8080 marked down probes failed"],
+  ["cpu running hot", "WARN utilization 97% sustained cores saturated host=n12"],
+  ["backup job failed", "ERROR snapshot upload aborted bucket=nightly exit=1"],
+  ["who changed the configuration", "AUDIT admin=jlee modified setting max_conns=400 in settings.yaml"],
+  ["rate limiting kicked in", "WARN HTTP 429 throttled client=acme quota=1000/min"],
+  ["connection timed out to the cache", "ERROR redis i/o deadline exceeded addr=10.0.3.5:6379"],
+  ["leaked file handles", "ERROR EMFILE too many open descriptors limit=1024"],
+  ["clock drift between servers", "WARN ntp offset 1.8s exceeds tolerance peer=time1"],
+  ["user signed in from new country", "INFO session established geo=PT previously=NL uid=88"],
+  ["garbage collection pauses", "WARN stop-the-world 1240ms heap=7.8GB gen2"],
+  ["container artifact could not be fetched", "ERROR pull denied registry.local/app:3.2 manifest unknown"],
+  ["tls version mismatch", "ERROR handshake rejected protocol downgrade sslv3 client=10.1.1.4"],
+  ["duplicate requests processed twice", "WARN idempotency key reused txn=9f31 replay ignored"],
+];
+
+/** Same shape as vocabGapCorpus: 600 noise lines, golds spliced at seeded positions. */
+export function vocabGapHeldoutCorpus() {
+  const r = lcg(4242);
+  const lines = Array.from({ length: 600 }, (_, i) => {
+    const ts = `2026-07-27T10:${String((i / 10) % 60 | 0).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}Z`;
+    return `${ts} ${UNITS[(r() * UNITS.length) | 0]} ${NOISE[(r() * NOISE.length) | 0]((r() * 1000) | 0)}`;
+  });
+  const golds = VOCAB_GAP_HELDOUT.map(([, g], i) => `2026-07-27T11:00:${String(i).padStart(2, "0")}Z relay ${g}`);
+  golds.forEach((g, i) => lines.splice(i * 25 + 3 + i + ((r() * 15) | 0), 0, g));
+  return { text: lines.join("\n") + "\n", asks: VOCAB_GAP_HELDOUT.map(([ask], i) => ({ ask, gold: golds[i] })) };
+}

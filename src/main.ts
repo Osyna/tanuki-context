@@ -1096,7 +1096,7 @@ export function main(): void {
         maxPages: num("--max-pages", PROXY_DEFAULTS.maxPages),
         recencyWindow: num("--recency", parseNum(process.env.TANUKI_RECENCY, PROXY_DEFAULTS.recencyWindow)),
         cache: !argv.includes("--no-cache"),
-        autoCache: !argv.includes("--no-cache") && !argv.includes("--no-auto-cache"),
+        autoCache: argv.includes("--auto-cache"),
         verbatim: parseVerbatim(flagVal(argv, "--verbatim")),
       });
       break;
