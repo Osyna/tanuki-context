@@ -697,34 +697,27 @@ describe("memoised minify (T1b)", () => {
       2,
     );
 
-  test("200-message history of pretty-JSON tool results: second call on the session is a fraction of the first", () => {
+  test("200-message history of pretty-JSON tool results: the second call on the session scans nothing again", () => {
     const kb = Math.round(doc(0).length / 1024);
     const messages = Array.from({ length: 200 }, (_, n) => msg("user", [{ type: "tool_result", tool_use_id: `t${n}`, content: doc(n) }]));
     const raw = JSON.stringify({ model: "claude-sonnet-4", messages });
-    // imaging and the auto breakpoint off: this measures the minify + bookkeeping path (imaging has its own memo)
+    // imaging and the auto breakpoint off: this is the minify + bookkeeping path (imaging has its own memo)
     const cfg = { ...CFG, minChars: 1e9, autoCache: false };
-    // A timing ratio on a shared machine: up to three fresh-session attempts, the
-    // test passes on the first that meets both bounds and prints every attempt.
-    let ok = false;
-    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-      const s = newSession();
-      let t = performance.now();
-      const first = transformRequestBody(raw, cfg, s)!;
-      const t1 = performance.now() - t;
-      // the warm call, best of three: one GC pause must not fail a ratio test
-      let t2 = Infinity;
-      let second = first;
-      for (let k = 0; k < 3; k++) {
-        t = performance.now();
-        second = transformRequestBody(raw, cfg, s)!;
-        t2 = Math.min(t2, performance.now() - t);
-      }
-      console.log(`memo timing #${attempt + 1}: ${messages.length} messages x ${kb} KB pretty JSON (${(raw.length / 1e6).toFixed(1)} MB): first ${t1.toFixed(0)} ms, second ${t2.toFixed(0)} ms (${((100 * t2) / t1).toFixed(0)} %)`);
-      expect(first.minifiedBlocks).toBe(200);
-      expect(second.body).toBe(first.body);
-      ok = t1 < 1000 && t2 < 0.2 * t1;
-    }
-    expect(ok).toBe(true);
+    const s = newSession();
+    let t = performance.now();
+    const first = transformRequestBody(raw, cfg, s)!;
+    const t1 = performance.now() - t;
+    const scanned = s.memoChars;
+    t = performance.now();
+    const second = transformRequestBody(raw, cfg, s)!;
+    const t2 = performance.now() - t;
+    // timing is informational (shared CI runners); the gate owns speed
+    console.log(`memo timing: ${messages.length} messages x ${kb} KB pretty JSON (${(raw.length / 1e6).toFixed(1)} MB): first ${t1.toFixed(0)} ms, second ${t2.toFixed(0)} ms`);
+    expect(first.minifiedBlocks).toBe(200);
+    expect(second.minifiedBlocks).toBe(200);
+    expect(second.body).toBe(first.body);
+    expect(s.minifyMemo.size).toBe(200);
+    expect(s.memoChars).toBe(scanned); // every block came from the memo: no text was scanned or parsed twice
   });
 
   test("already-compact JSON is never parsed (whitespace pre-check) and stays untouched", () => {
