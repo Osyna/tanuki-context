@@ -21,6 +21,7 @@ mod distill;
 mod fidelity;
 mod gate;
 mod ladder;
+mod ledger;
 mod needles;
 mod png;
 mod proxy;
@@ -29,6 +30,7 @@ mod sha256;
 mod stash;
 mod stats;
 mod table;
+mod toolusage;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -584,9 +586,27 @@ fn stash_pages_win(tokens: u64, pages: usize, raw_tok: u64) -> bool {
         && pages <= MAX_INLINE_PAGES
 }
 
+/// `--prune-tools [stub|drop]` (bare flag = stub) or TANUKI_PRUNE_TOOLS=stub|drop|on|off; off unless asked.
+fn parse_prune(args: &[String]) -> proxy::PruneMode {
+    let at = args.iter().position(|a| a == "--prune-tools");
+    let word = match at {
+        Some(i) => match args.get(i + 1).map(String::as_str) {
+            Some(v @ ("stub" | "drop")) => v.to_string(),
+            _ => "stub".to_string(),
+        },
+        None => std::env::var("TANUKI_PRUNE_TOOLS").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "off".to_string()),
+    };
+    match word.as_str() {
+        "drop" => proxy::PruneMode::Drop,
+        "stub" | "on" => proxy::PruneMode::Stub,
+        _ => proxy::PruneMode::Off,
+    }
+}
+
 fn tool_stash(args: &Value) -> Result<Value, String> {
     let text = args["text"].as_str().unwrap_or("");
-    let (_, overview) = stash::stash_text(text).map_err(|e| format!("stash failed: {e}"))?;
+    let (id, overview) = stash::stash_text(text).map_err(|e| format!("stash failed: {e}"))?;
+    ledger::log_stash(&id, "stash", text_tokens(text) as i64 - text_tokens(&overview) as i64);
     Ok(json!([{ "type": "text", "text": overview }]))
 }
 
@@ -610,6 +630,12 @@ fn tool_fetch(args: &Value) -> Result<Value, String> {
         needles::Verbatim::Full => side.tokens,
     };
     let cost = r.tokens + side_tok;
+    // net-savings ledger: what this read-back cost the model (pages when they won)
+    let wins = args["find"].as_str().is_none()
+        && stash_pages_win(cost, r.pages.len(), raw_tok)
+        && needles::scan_credentials(&slice).is_empty()
+        && !(side.dense && verbatim != needles::Verbatim::Off);
+    ledger::log_fetch(id, if wins { cost } else { raw_tok });
     // A query fetch reports how many RAW lines matched: the slice is distilled
     // and context-padded, so counting it is wrong, and without a real count an
     // agent cannot answer "which unit logged the most errors" at all.
@@ -1202,11 +1228,12 @@ fn main() {
                 needles::Verbatim::Full => side.tokens,
             };
             // find mode never images - same rule as tool_fetch above.
-            if find.is_none()
+            let wins = find.is_none()
                 && stash_pages_win(r.tokens + side_tok, r.pages.len(), raw_tok)
                 && needles::scan_credentials(&slice).is_empty()
-                && !(side.dense && verbatim != needles::Verbatim::Off)
-            {
+                && !(side.dense && verbatim != needles::Verbatim::Off);
+            ledger::log_fetch(id, if wins { r.tokens + side_tok } else { raw_tok });
+            if wins {
                 println!(
                     "{}",
                     json!({ "mode": "pages", "pages": r.pages.len(),
@@ -1294,6 +1321,8 @@ fn main() {
                 cache: !args.iter().any(|a| a == "--no-cache"),
                 auto_cache: args.iter().any(|a| a == "--auto-cache"),
                 verbatim: needles::Verbatim::parse(&json!(sval("--verbatim").map(String::as_str))),
+                prune_tools: parse_prune(&args),
+                prune_min: num("--prune-min", d.prune_min as f64) as u64,
             });
         }
         Some("run") => {

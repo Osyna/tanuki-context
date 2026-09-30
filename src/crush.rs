@@ -51,10 +51,13 @@ pub fn route_output(
             .clone()
     };
     let mut compose = |c: &Crushed, body: Option<&str>, map_only: bool, view: Option<(&str, &str)>| -> String {
-        let d = crate::distill::distill_log(body.unwrap_or(c.text.as_str()), query, 2);
-        let shown = head.iter().map(String::as_str).chain([d.distilled.as_str()]).collect::<Vec<_>>().join("\n");
+        let (distilled, dist_lines) = {
+            let d = crate::distill::distill_log(body.unwrap_or(c.text.as_str()), query, 2);
+            (d.distilled, d.stats["outLines"].as_u64().unwrap_or(0))
+        };
+        let shown = head.iter().map(String::as_str).chain([distilled.as_str()]).collect::<Vec<_>>().join("\n");
         let saved_pct = crate::pct(captured.chars().count() as u64, shown.chars().count() as u64);
-        let out_lines = d.stats["outLines"].as_u64().unwrap_or(0) + head.len() as u64;
+        let out_lines = dist_lines + head.len() as u64;
         let mut header = format!("[tanuki run] exit {code} · {captured_lines} -> {out_lines} lines · {saved_pct}% of chars removed");
         if let Some(rule) = &c.rule {
             header.push_str(&format!(" · rule {rule}"));
@@ -62,7 +65,7 @@ pub fn route_output(
         let mut lines = vec![header];
         // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
         // if real usage ever wants one.
-        if !map_only && (d.distilled.chars().count() <= crate::RUN_INLINE_MAX || captured.chars().count() <= crate::RUN_INLINE_MAX) {
+        if !map_only && (distilled.chars().count() <= crate::RUN_INLINE_MAX || captured.chars().count() <= crate::RUN_INLINE_MAX) {
             lines.push(shown);
             if captured.chars().count() > crate::RUN_INLINE_MAX || delta.as_ref().is_some_and(|d| d.collapsed) {
                 lines.push(pointer(&stash_of(&mut stashed).0));
@@ -73,19 +76,31 @@ pub fn route_output(
         }
         lines.join("\n")
     };
+    let finish = |answer: String| finish_row(captured, crushed.rule.as_deref(), answer);
     let body = delta.as_ref().map(|d| d.body.as_str());
     let out = compose(&crushed, body, false, None);
     if !crushed.rule.as_deref().is_some_and(|r| r.contains("managedfields")) {
-        return out;
+        return finish(out);
     }
     // Dropping managedFields makes a document readable inline, but a larger
     // answer than the run wrapper gave before that rule existed is a
     // regression: then it is the map, described from the cleaned document.
     let before = compose(&crush_output_with(cmd, captured, code, false), None, false, None);
     if out.chars().count() <= before.chars().count() {
-        return out;
+        return finish(out);
     }
-    compose(&crushed, body, true, Some((crushed.text.as_str(), "managedFields dropped")))
+    finish(compose(&crushed, body, true, Some((crushed.text.as_str(), "managedFields dropped"))))
+}
+
+/// Every answer that points at (or maps) the stash is a ledger row: the
+/// tokens it saved now, so a later fetch can be charged against them.
+fn finish_row(captured: &str, rule: Option<&str>, answer: String) -> String {
+    let id = crate::stash::stash_id(captured);
+    if answer.contains(&id) {
+        let saved = crate::text_tokens(captured) as i64 - crate::text_tokens(&answer) as i64;
+        crate::ledger::log_stash(&id, rule.unwrap_or("distill"), saved);
+    }
+    answer
 }
 
 // Spinner chars from Unicode Braille Patterns block

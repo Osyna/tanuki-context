@@ -23,6 +23,14 @@ pub(crate) fn events_path() -> PathBuf {
 }
 
 pub fn px_stats() -> Value {
+    let mut r = events_summary();
+    if let (Some(net), Some(o)) = (crate::ledger::stash_net(), r.as_object_mut()) {
+        o.insert("stashNet".into(), net);
+    }
+    r
+}
+
+fn events_summary() -> Value {
     let path = events_path();
     let Ok(content) = std::fs::read_to_string(&path) else {
         return json!({ "available": false, "note": format!("no {} yet", path.display()) });
@@ -43,6 +51,7 @@ fn summarize(content: &str) -> Value {
     let (mut tax_requests, mut tax_tokens) = (0u64, 0u64);
     let mut last_tax_unused: Vec<String> = Vec::new();
     let mut volatile_count = 0u64;
+    let (mut pruned_requests, mut pruned_tokens, mut last_pruned_tools) = (0u64, 0u64, 0u64);
     for l in content.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(e) = serde_json::from_str::<Value>(l) else {
             continue;
@@ -81,6 +90,12 @@ fn summarize(content: &str) -> Value {
             if let Some(u) = e["toolTax"]["unused"].as_array() {
                 last_tax_unused = u.iter().filter_map(|n| n.as_str()).map(str::to_string).collect();
             }
+        }
+        // --prune-tools: tools left out of the forwarded request
+        if e["pruned_tools"].as_u64().unwrap_or(0) > 0 {
+            pruned_requests += 1;
+            pruned_tokens += e["pruned_tool_tokens"].as_u64().unwrap_or(0);
+            last_pruned_tools = e["pruned_tools"].as_u64().unwrap_or(0);
         }
         if e["volatileSystem"].as_bool() == Some(true) {
             volatile_count += 1;
@@ -141,6 +156,10 @@ fn summarize(content: &str) -> Value {
             first3.join(",")
         };
         out["toolTax"] = json!(format!("tool tax: {per} tok/request never invoked ({names})"));
+    }
+    if pruned_requests > 0 {
+        let per = crate::cost::rnd(pruned_tokens as f64 / pruned_requests as f64);
+        out["toolPrune"] = json!(format!("tool prune: {per} tok/request left out ({last_pruned_tools} tools, {pruned_requests} requests)"));
     }
     if volatile_count > 0 {
         out["volatileSystem"] =

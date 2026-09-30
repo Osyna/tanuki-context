@@ -1,7 +1,10 @@
 //! Implicit mode: a local Anthropic middlebox, the pxpipe deployment shape
 //! without pxpipe's structural flaw. Rules that keep it injection-shaped-free:
 //!
-//!   1. The system prompt and tool definitions are NEVER touched.
+//!   1. The system prompt and tool definitions are NEVER touched - except by the
+//!      opt-in `--prune-tools`, which decides ONCE per conversation (from
+//!      cross-session usage evidence) which never-called tools to reduce, and
+//!      forwards the same bytes on every later request so the cached prefix holds.
 //!   2. Nothing moves between roles or positions: an oversized text block is
 //!      replaced IN PLACE by a short overt marker + PNG page blocks, in the
 //!      same user-role message (Anthropic allows image blocks in user content
@@ -35,6 +38,7 @@
 
 use crate::render::{self, Font};
 use crate::stats;
+use crate::toolusage::{self, UsageStore};
 use crate::{codebook, distill, ladder, needles, table};
 use base64::Engine;
 use regex::Regex;
@@ -120,6 +124,14 @@ pub(crate) fn attribute_break(
         Some((i, "modified".to_string()))
     }
 }
+/// `--prune-tools`: leave tools the client never calls out of the request, decided once per conversation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PruneMode {
+    Off,
+    Stub,
+    Drop,
+}
+
 pub struct ProxyCfg {
     pub port: u16,
     pub upstream: String, // e.g. https://api.anthropic.com
@@ -136,6 +148,8 @@ pub struct ProxyCfg {
     pub cache: bool, // place a cache breakpoint on the last imaged message (default on)
     pub auto_cache: bool, // add one breakpoint before the recency window once the prefix holds (default off)
     pub verbatim: needles::Verbatim, // sidecar next to the pages: full · lazy pointer · off
+    pub prune_tools: PruneMode, // leave never-called tools out of the request, decided once per conversation (default off)
+    pub prune_min: u64, // ...only tools advertised in at least this many conversations and called in none
 }
 
 impl Default for ProxyCfg {
@@ -156,6 +170,8 @@ impl Default for ProxyCfg {
             cache: true,
             auto_cache: false,
             verbatim: needles::Verbatim::Full,
+            prune_tools: PruneMode::Off,
+            prune_min: 20,
         }
     }
 }
@@ -342,6 +358,8 @@ pub struct TransformResult {
     pub cache_break: Option<CacheBreak>,
     pub tool_tax: Option<ToolTax>,
     pub volatile_system: bool,
+    /// tools left out (dropped, or reduced to a stub) by --prune-tools, and the tokens that saved.
+    pub pruned_tools: Option<(Vec<String>, i64)>,
 }
 
 /// Cross-request memory, LEDGER-ONLY by construction: it never changes the
@@ -385,6 +403,19 @@ pub struct ProxySession {
     /// memoised per session like the minify one. Holds only immutable data.
     image_memo: HashMap<String, (String, Option<Arc<ImagedBlock>>)>, // text -> (config key, verdict)
     image_chars: usize,
+    /// --prune-tools: the decision per conversation (tool list + first message), made on
+    /// its first request and reused byte-for-byte after - a tool list that changes
+    /// mid-conversation would rewrite the cached prefix. None = nothing to prune.
+    prune_memo: HashMap<String, Option<Arc<PrunedList>>>,
+    /// the memo's keys, oldest first: the oldest conversation goes when it is full.
+    prune_order: std::collections::VecDeque<String>,
+    /// where the per-tool usage evidence lives; None = none (no counting, no pruning).
+    pub tool_usage: Option<Box<dyn UsageStore + Send>>,
+    /// conversations already counted (tool list + first message, cache_control stripped) ->
+    /// the tool names already counted as used in each.
+    convs: HashMap<String, Vec<String>>,
+    /// the same keys, oldest first: the oldest conversation goes when the map is full.
+    conv_order: std::collections::VecDeque<String>,
 }
 
 impl ProxySession {
@@ -400,6 +431,11 @@ impl ProxySession {
             memo_chars: 0,
             image_memo: HashMap::new(),
             image_chars: 0,
+            prune_memo: HashMap::new(),
+            prune_order: std::collections::VecDeque::new(),
+            tool_usage: None,
+            convs: HashMap::new(),
+            conv_order: std::collections::VecDeque::new(),
         }
     }
 }
@@ -440,11 +476,12 @@ struct Span {
     content: Option<Box<Span>>, // member "content" (the root's "messages")
     text: Option<(usize, usize)>, // member "text"
     last: Option<usize>,        // end of the last member/element value
+    tools_at: Option<usize>,    // root only: where the "tools" value starts
 }
 
 impl Span {
     fn at(s: usize) -> Span {
-        Span { s, e: 0, items: None, content: None, text: None, last: None }
+        Span { s, e: 0, items: None, content: None, text: None, last: None, tools_at: None }
     }
 }
 
@@ -532,6 +569,9 @@ fn obj_span(b: &[u8], s: usize, root: bool) -> Option<Span> {
             if !root && key == "text" {
                 sp.text = Some((i, end));
             }
+            if root && key == "tools" {
+                sp.tools_at = Some(i);
+            }
         }
         sp.last = Some(end);
         i = ws_end(b, end);
@@ -580,14 +620,16 @@ fn val_span(b: &[u8], i: usize) -> Option<Span> {
     }
 }
 
-/// One span per element of the top-level "messages" array.
-fn scan_messages(raw: &str) -> Option<Vec<Span>> {
+/// One span per element of the top-level "messages" array, and where "tools" starts.
+fn scan_root(raw: &str) -> Option<(Vec<Span>, Option<usize>)> {
     let b = raw.as_bytes();
     let at = ws_end(b, 0);
     if *b.get(at)? != b'{' {
         return None;
     }
-    obj_span(b, at, true)?.content?.items
+    let root = obj_span(b, at, true)?;
+    let tools_at = root.tools_at;
+    Some((root.content?.items?, tools_at))
 }
 
 /// The array elements of a span that must be an array.
@@ -1051,6 +1093,192 @@ fn place(
     Some(true)
 }
 
+// ------------------------------------------------------------ tool pruning
+/// A tool list, reduced once. `parts` are the array's elements as forwarded (the
+/// client's own bytes for a kept tool, a stub for a reduced one).
+struct PrunedList {
+    parts: Vec<String>,
+    parsed: Vec<Value>,
+    names: Vec<String>,
+    tokens: i64,
+}
+
+/// Byte ranges of the elements of the JSON array starting at `at`.
+fn elem_ranges(b: &[u8], at: usize) -> Option<Vec<(usize, usize)>> {
+    let mut out = Vec::new();
+    let mut i = ws_end(b, at + 1);
+    if *b.get(i)? == b']' {
+        return Some(out);
+    }
+    loop {
+        let e = val_end(b, i)?;
+        out.push((i, e));
+        i = ws_end(b, e);
+        if *b.get(i)? != b',' {
+            return Some(out);
+        }
+        i = ws_end(b, i + 1);
+    }
+}
+
+/// Names the request already uses: every tool_use in its history, plus a forced
+/// tool_choice, in first-seen order. Never pruned, and credited as used.
+fn called_names(body: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |n: &str| {
+        if !out.iter().any(|x| x == n) {
+            out.push(n.to_string());
+        }
+    };
+    for m in body["messages"].as_array().into_iter().flatten() {
+        for b in m["content"].as_array().into_iter().flatten() {
+            if b["type"] == "tool_use" {
+                if let Some(n) = b["name"].as_str() {
+                    add(n);
+                }
+            }
+        }
+    }
+    if body["tool_choice"]["type"] == "tool" {
+        if let Some(n) = body["tool_choice"]["name"].as_str() {
+            add(n);
+        }
+    }
+    out
+}
+
+/// The stub a reduced tool keeps: name, its description's first line, an open
+/// object schema. Still callable - the client validates the real arguments and
+/// its own error names what was missing - so a wrongly pruned tool is one retry
+/// away, not gone. Built by hand so both engines print the same key order.
+fn stub_json(name: &str, description: &Value) -> String {
+    let d = description.as_str().map_or("", |s| crate::distill::truncate_chars(s.split('\n').next().unwrap_or("").trim(), 160));
+    format!(
+        r#"{{"name":{},"description":{},"input_schema":{{"type":"object"}}}}"#,
+        serde_json::to_string(name).unwrap_or_default(),
+        serde_json::to_string(d).unwrap_or_default()
+    )
+}
+
+/// Decide, once per CONVERSATION, which tools this client never calls. Only
+/// client-defined tools with a schema and no cache_control are candidates; one
+/// is pruned when the usage evidence shows it advertised in at least
+/// `cfg.prune_min` conversations and called in none, and the request's own
+/// history does not call it. The verdict is memoised by the conversation key
+/// (tool list + first message), so every later request of the conversation
+/// forwards the same bytes - the tools sit at the head of the cached prefix and
+/// must never change under it - while a conversation that starts after the
+/// evidence crossed the threshold is pruned even in a long-running proxy. The
+/// unused tools cross `prune_min` together, so the pruned set rarely differs from
+/// one conversation to the next. The memo is bounded like the conversation map.
+fn pruned_list(
+    raw: &str,
+    at: usize,
+    body: &Value,
+    key: &str,
+    cfg: &ProxyCfg,
+    session: &mut ProxySession,
+) -> Option<(Option<Arc<PrunedList>>, usize)> {
+    let b = raw.as_bytes();
+    let end = val_end(b, at)?;
+    let called = called_names(body);
+    if let Some(m) = session.prune_memo.get(key) {
+        // a tool this request forces or already called is never hidden: it gets the client's
+        // own list (one cache miss, never a 400). In stub mode that is the recovery path: a
+        // stubbed tool the model called is shown whole from then on.
+        let hides = m.as_ref().is_some_and(|m| m.names.iter().any(|n| called.contains(n)));
+        return Some((if hides { None } else { m.clone() }, end));
+    }
+    let tools = body["tools"].as_array()?;
+    let ranges = elem_ranges(b, at)?;
+    if ranges.len() != tools.len() {
+        return None;
+    }
+    let usage = session.tool_usage.as_ref().map_or_else(toolusage::UsageMap::new, |u| u.load());
+    let mut list = PrunedList { parts: Vec::new(), parsed: Vec::new(), names: Vec::new(), tokens: 0 };
+    for (i, t) in tools.iter().enumerate() {
+        let name = t["name"].as_str();
+        let candidate = t.is_object()
+            && name.is_some_and(|n| {
+                (t.get("type").is_none() || t["type"] == "custom")
+                    && t["input_schema"].is_object()
+                    && t.get("cache_control").is_none()
+                    && !called.iter().any(|c| c == n)
+                    && usage.get(n).is_some_and(|&(adv, used)| adv >= cfg.prune_min && used == 0)
+            });
+        let Some(name) = name.filter(|_| candidate) else {
+            list.parts.push(raw[ranges[i].0..ranges[i].1].to_string());
+            list.parsed.push(t.clone());
+            continue;
+        };
+        list.names.push(name.to_string());
+        list.tokens += crate::text_tokens(&table::canon_string(t)) as i64;
+        if cfg.prune_tools == PruneMode::Stub {
+            let stub = stub_json(name, &t["description"]);
+            let v: Value = serde_json::from_str(&stub).ok()?;
+            list.tokens -= crate::text_tokens(&table::canon_string(&v)) as i64;
+            list.parts.push(stub);
+            list.parsed.push(v);
+        }
+    }
+    let memo = if list.names.is_empty() { None } else { Some(Arc::new(list)) };
+    if session.prune_memo.len() >= CONVS_MAX {
+        if let Some(old) = session.prune_order.pop_front() {
+            session.prune_memo.remove(&old);
+        }
+    }
+    session.prune_order.push_back(key.to_string());
+    session.prune_memo.insert(key.to_string(), memo.clone());
+    Some((memo, end))
+}
+
+/// The conversation a request belongs to: its tool list plus its first message, cache_control ignored.
+fn conv_key(raw: &str, at: usize, first: &Span) -> Option<String> {
+    let b = raw.as_bytes();
+    let mut buf = b[at..val_end(b, at)?].to_vec();
+    buf.push(0);
+    buf.extend_from_slice(CC_MEMBER.replace_all(&raw[first.s..first.e], "").as_bytes());
+    Some(crate::sha256::hex(&buf))
+}
+
+/// A `cache_control` member with its comma: a client moving its breakpoint must not make
+/// the same conversation look new. Same pattern in proxy.ts.
+static CC_MEMBER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#",\s*"cache_control"\s*:\s*\{[^{}]*\}|"cache_control"\s*:\s*\{[^{}]*\}\s*,?"#).unwrap()
+});
+const CONVS_MAX: usize = 2000;
+
+/// Count this request in the usage evidence: the tools it advertises (once per
+/// conversation - the same list and first message, breakpoints ignored) and the
+/// tools it uses (its history's tool_use blocks and a forced tool_choice; once per
+/// conversation and name). `hidden` = tools this request's forwarded list left
+/// out: the client did advertise them, but the model never saw them, so a "never
+/// called" there is no evidence and they are not counted as advertised.
+fn count_tool_usage(conv: String, adv_names: &[String], hidden: &[String], body: &Value, session: &mut ProxySession) -> Option<()> {
+    if session.tool_usage.is_none() {
+        return Some(());
+    }
+    let known = session.convs.get(&conv).cloned();
+    let mut credited = known.clone().unwrap_or_default();
+    let adv: Vec<String> = if known.is_some() { Vec::new() } else { adv_names.iter().filter(|n| !hidden.contains(n)).cloned().collect() };
+    let used: Vec<String> = called_names(body).into_iter().filter(|n| !credited.contains(n)).collect();
+    if adv.is_empty() && used.is_empty() && known.is_some() {
+        return Some(());
+    }
+    if known.is_none() {
+        if session.convs.len() >= CONVS_MAX {
+            if let Some(old) = session.conv_order.pop_front() {
+                session.convs.remove(&old);
+            }
+        }
+        session.conv_order.push_back(conv.clone());
+    }
+    credited.extend(used.iter().cloned());
+    session.convs.insert(conv, credited);
+    session.tool_usage.as_mut()?.bump(&adv, &used);
+    Some(())
+}
+
 /// Rewrite a /v1/messages body. None = not a messages request (the caller
 /// forwards the original bytes untouched, and so on any internal failure).
 pub fn transform_request_body(
@@ -1063,7 +1291,7 @@ pub fn transform_request_body(
     // Spans of the values the rewrite may replace, in the ORIGINAL bytes. The
     // parsed tree below is still edited in step (diagnostics hash what the API
     // will see), but it is never printed: the output is `raw` with `reps` applied.
-    let spans = scan_messages(raw)?;
+    let (spans, tools_at) = scan_root(raw)?;
     if spans.len() != msg_count {
         return None;
     }
@@ -1097,6 +1325,28 @@ pub fn transform_request_body(
         minified_blocks: 0,
     };
     let mut reps: Reps = BTreeMap::new();
+    // --prune-tools: reduce the tool list once per distinct list (see pruned_list). Usage
+    // is counted either way, so the evidence fills while pruning is still off.
+    let mut pruned_tools: Option<(Vec<String>, i64)> = None;
+    if let Some(at) = tools_at {
+        let adv_names: Vec<String> = body["tools"]
+            .as_array()
+            .map_or_else(Vec::new, |ts| ts.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect());
+        if body["tools"].as_array().is_some_and(|ts| !ts.is_empty()) && ctx.session.is_some() {
+            if let Some(first) = spans.first() {
+                let conv = conv_key(raw, at, first)?;
+                if cfg.prune_tools != PruneMode::Off {
+                    let (memo, end) = pruned_list(raw, at, &body, &conv, cfg, ctx.session.as_deref_mut()?)?;
+                    if let Some(m) = memo {
+                        put(&mut reps, at, end, m.parts.clone(), true);
+                        body["tools"] = Value::Array(m.parsed.clone());
+                        pruned_tools = Some((m.names.clone(), m.tokens));
+                    }
+                }
+                count_tool_usage(conv, &adv_names, pruned_tools.as_ref().map_or(&[][..], |p| &p.0[..]), &body, ctx.session.as_deref_mut()?)?;
+            }
+        }
+    }
     let mut touched: HashSet<usize> = HashSet::new(); // messages the proxy rewrote (T8b)
     let mut pre_tok: HashMap<(usize, usize, usize), u64> = HashMap::new();
     // index of the last message we imaged into; where the cache breakpoint goes
@@ -1437,6 +1687,7 @@ pub fn transform_request_body(
         cache_break,
         tool_tax,
         volatile_system,
+        pruned_tools,
     })
 }
 
@@ -1675,6 +1926,10 @@ fn handle(
             if s.volatile_system {
                 ev["volatileSystem"] = json!(true);
             }
+            if let Some((names, tokens)) = &s.pruned_tools {
+                ev["pruned_tools"] = json!(names.len());
+                ev["pruned_tool_tokens"] = json!(tokens);
+            }
         }
         log_event(&ev);
         // F4: per-request diagnostic stdout, mirrored with the TS engine
@@ -1688,6 +1943,9 @@ fn handle(
             }
             if let Some(tt) = &s.tool_tax {
                 diag.push_str(&format!(" \u{b7} toolTax {}tok", tt.tokens));
+            }
+            if let Some((names, tokens)) = &s.pruned_tools {
+                diag.push_str(&format!(" \u{b7} pruned {} tools (-{tokens}tok)", names.len()));
             }
             if !diag.is_empty() {
                 eprintln!("[tanuki proxy]{diag}");
@@ -1731,9 +1989,21 @@ pub fn bind(cfg: &ProxyCfg) -> tiny_http::Server {
         cfg.min_chars,
         cfg.ratio,
         cfg.min_save,
-    );
+    ) + &if cfg.prune_tools == PruneMode::Off {
+        String::new()
+    } else {
+        format!(" pruneTools={} pruneMin={}", if cfg.prune_tools == PruneMode::Stub { "stub" } else { "drop" }, cfg.prune_min)
+    };
+    let tools_rule = match cfg.prune_tools {
+        PruneMode::Off => "system prompt & tools untouched".to_string(),
+        m => format!(
+            "system prompt untouched \u{b7} tools never called in {}+ conversations {}, decided once per conversation",
+            cfg.prune_min,
+            if m == PruneMode::Stub { "reduced to stubs" } else { "dropped" }
+        ),
+    };
     eprint!(
-        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: system prompt & tools untouched \u{b7} edits spliced into your own request bytes (nothing else moves) \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control blocks never imaged \u{b7} identical blocks imaged once{}{} \u{b7} pretty JSON tool results minified (lossless)\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
+        "tanuki-context proxy on http://127.0.0.1:{port} -> {}\n  {knobs}\n  rules: {tools_rule} \u{b7} edits spliced into your own request bytes (nothing else moves) \u{b7} in-place blocks only \u{b7} last {} message(s) kept as text \u{b7} secrets never imaged \u{b7} cache_control blocks never imaged \u{b7} identical blocks imaged once{}{} \u{b7} pretty JSON tool results minified (lossless)\n  point your client at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}\n",
         cfg.upstream,
         cfg.recency_window.max(1),
         if cfg.cache { " \u{b7} imaged prefix marked cacheable" } else { "" },
@@ -1755,7 +2025,9 @@ pub fn serve(server: tiny_http::Server, cfg: ProxyCfg) {
     let cfg = Arc::new(cfg);
     let agent = ureq::AgentBuilder::new().redirects(0).build();
     // one ledger session per proxy process: replay detection + cache evidence
-    let session = Arc::new(Mutex::new(ProxySession::new()));
+    let mut fresh = ProxySession::new();
+    fresh.tool_usage = Some(Box::new(toolusage::FileUsage));
+    let session = Arc::new(Mutex::new(fresh));
     for request in server.incoming_requests() {
         let cfg = Arc::clone(&cfg);
         let agent = agent.clone();
@@ -2680,5 +2952,274 @@ mod tests {
         assert_eq!(imaged.imaged_blocks, 1);
         assert!(imaged.est_tokens < as_text.est_tokens);
         assert!(imaged.est_tokens > 200); // pages are not free
+    }
+}
+
+/// --prune-tools mirrors test/prune.test.ts: the list is reduced once per distinct
+/// list from usage evidence and forwarded byte-identically afterwards.
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    type Bumps = Arc<Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+
+    struct Mem {
+        map: Arc<Mutex<toolusage::UsageMap>>,
+        bumps: Bumps,
+    }
+
+    impl UsageStore for Mem {
+        fn load(&self) -> toolusage::UsageMap {
+            self.map.lock().unwrap().clone()
+        }
+        fn bump(&mut self, adv: &[String], used: &[String]) {
+            self.bumps.lock().unwrap().push((adv.to_vec(), used.to_vec()));
+        }
+    }
+
+    fn evidence() -> toolusage::UsageMap {
+        [("Bash", (9, 9)), ("Read", (9, 4)), ("NotebookEdit", (9, 0)), ("WebFetch", (2, 0))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    fn session(map: toolusage::UsageMap) -> (ProxySession, Arc<Mutex<toolusage::UsageMap>>, Bumps) {
+        let map = Arc::new(Mutex::new(map));
+        let bumps: Bumps = Arc::default();
+        let mut s = ProxySession::new();
+        s.tool_usage = Some(Box::new(Mem { map: Arc::clone(&map), bumps: Arc::clone(&bumps) }));
+        (s, map, bumps)
+    }
+
+    fn cfg(mode: PruneMode) -> ProxyCfg {
+        ProxyCfg { port: 0, upstream: "http://127.0.0.1:1".to_string(), prune_tools: mode, prune_min: 3, ..ProxyCfg::default() }
+    }
+
+    fn tool(name: &str) -> Value {
+        json!({
+            "name": name,
+            "description": format!("{name} does one thing.\nLong second paragraph nobody needs every turn, {}", "pad ".repeat(80)),
+            "input_schema": { "type": "object", "properties": { "path": { "type": "string", "description": "x".repeat(200) } }, "required": ["path"] },
+        })
+    }
+
+    fn tools() -> Vec<Value> {
+        ["Bash", "Read", "NotebookEdit", "WebFetch"].iter().map(|n| tool(n)).collect()
+    }
+
+    /// tools before messages, like a real client (serde_json would sort them the other way round)
+    fn body(tools: &[Value], msgs: Value, extra: Value) -> String {
+        let mut s = format!(r#"{{"model":"claude-sonnet-4-5","tools":{},"messages":{}"#, Value::Array(tools.to_vec()), msgs);
+        if let Value::Object(e) = extra {
+            for (k, v) in e {
+                s.push_str(&format!(",{}:{v}", serde_json::to_string(&k).unwrap()));
+            }
+        }
+        s.push('}');
+        s
+    }
+
+    fn hi() -> Value {
+        json!([{ "role": "user", "content": "hi" }])
+    }
+
+    fn names(raw: &str) -> Vec<String> {
+        serde_json::from_str::<Value>(raw).unwrap()["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn head(raw: &str) -> &str {
+        &raw[raw.find("\"tools\"").unwrap()..raw.find("\"messages\"").unwrap()]
+    }
+
+    #[test]
+    fn stub_mode_reduces_only_often_advertised_never_called_tools() {
+        let (mut s, _, _) = session(evidence());
+        let raw = body(&tools(), hi(), json!({}));
+        let r = transform_request_body(&raw, &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(r.pruned_tools.as_ref().unwrap().0, vec!["NotebookEdit".to_string()]);
+        assert_eq!(names(&r.body), ["Bash", "Read", "NotebookEdit", "WebFetch"]);
+        let out: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(out["tools"][2], json!({ "name": "NotebookEdit", "description": "NotebookEdit does one thing.", "input_schema": { "type": "object" } }));
+        let orig: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(out["tools"][0], orig["tools"][0]);
+        assert_eq!(out["tools"][3], orig["tools"][3]);
+        assert!(r.body.len() < raw.len());
+        assert!(r.pruned_tools.as_ref().unwrap().1 > 50);
+        assert_eq!(&r.body[..r.body.find("\"tools\"").unwrap()], &raw[..raw.find("\"tools\"").unwrap()]);
+        assert_eq!(&r.body[r.body.find("\"messages\"").unwrap()..], &raw[raw.find("\"messages\"").unwrap()..]);
+    }
+
+    #[test]
+    fn drop_mode_leaves_the_tool_out() {
+        let (mut s, _, _) = session(evidence());
+        let r = transform_request_body(&body(&tools(), hi(), json!({})), &cfg(PruneMode::Drop), Some(&mut s)).unwrap();
+        assert_eq!(names(&r.body), ["Bash", "Read", "WebFetch"]);
+    }
+
+    #[test]
+    fn off_prunes_nothing_but_still_counts_usage_and_no_evidence_prunes_nothing() {
+        let (mut s, _, bumps) = session(evidence());
+        let raw = body(&tools(), hi(), json!({}));
+        let r = transform_request_body(&raw, &cfg(PruneMode::Off), Some(&mut s)).unwrap();
+        assert!(r.pruned_tools.is_none() && !r.changed && r.body == raw);
+        let all: Vec<String> = ["Bash", "Read", "NotebookEdit", "WebFetch"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(*bumps.lock().unwrap(), vec![(all, Vec::<String>::new())]);
+        let (mut empty, _, _) = session(toolusage::UsageMap::new());
+        let r = transform_request_body(&raw, &cfg(PruneMode::Stub), Some(&mut empty)).unwrap();
+        assert!(r.pruned_tools.is_none() && !r.changed);
+    }
+
+    #[test]
+    fn decided_once_per_tool_list() {
+        let (mut s, map, _) = session(evidence());
+        let first = transform_request_body(&body(&tools(), hi(), json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        {
+            let mut m = map.lock().unwrap();
+            m.get_mut("NotebookEdit").unwrap().1 = 5;
+            m.insert("WebFetch".to_string(), (9, 0));
+        }
+        let later = json!([{ "role": "user", "content": "hi" }, { "role": "assistant", "content": "ok" }, { "role": "user", "content": "more" }]);
+        for m in [hi(), later] {
+            let again = transform_request_body(&body(&tools(), m, json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+            assert_eq!(head(&again.body), head(&first.body));
+        }
+        let fresh = transform_request_body(&body(&tools()[..3], hi(), json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert!(fresh.pruned_tools.is_none());
+    }
+
+    #[test]
+    fn called_forced_cached_typed_and_schemaless_tools_are_left_alone() {
+        let called = json!([
+            { "role": "user", "content": "go" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "NotebookEdit", "input": { "path": "a" } }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] },
+        ]);
+        let run = |raw: String| transform_request_body(&raw, &cfg(PruneMode::Stub), Some(&mut session(evidence()).0)).unwrap();
+        assert!(run(body(&tools(), called, json!({}))).pruned_tools.is_none());
+        assert!(run(body(&tools(), hi(), json!({ "tool_choice": { "type": "tool", "name": "NotebookEdit" } }))).pruned_tools.is_none());
+        let mut cached = tool("NotebookEdit");
+        cached["cache_control"] = json!({ "type": "ephemeral" });
+        assert!(run(body(&[tool("Bash"), cached], hi(), json!({}))).pruned_tools.is_none());
+        let odd = [json!({ "type": "web_search_20250305", "name": "NotebookEdit", "max_uses": 3 }), json!({ "name": "NotebookEdit", "description": "no schema" })];
+        assert!(run(body(&odd, hi(), json!({}))).pruned_tools.is_none());
+    }
+
+    #[test]
+    fn usage_counts_a_conversation_once_and_a_call_once_per_name() {
+        let (mut s, _, bumps) = session(toolusage::UsageMap::new());
+        let turn2 = json!([
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }, { "type": "tool_use", "id": "t2", "name": "Bash", "input": {} }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] },
+        ]);
+        let (b1, b2) = (body(&tools(), hi(), json!({})), body(&tools(), turn2, json!({})));
+        for b in [&b1, &b2, &b2] {
+            transform_request_body(b, &cfg(PruneMode::Off), Some(&mut s)).unwrap();
+        }
+        let all: Vec<String> = ["Bash", "Read", "NotebookEdit", "WebFetch"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(*bumps.lock().unwrap(), vec![(all, vec![]), (vec![], vec!["Bash".to_string()])]);
+    }
+
+    #[test]
+    fn evidence_crossing_the_threshold_mid_lifetime_prunes_the_next_conversation_only() {
+        let mut low = evidence();
+        low.insert("NotebookEdit".to_string(), (1, 0));
+        let (mut s, map, _) = session(low);
+        let a1 = transform_request_body(&body(&tools(), json!([{ "role": "user", "content": "a" }]), json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert!(a1.pruned_tools.is_none());
+        map.lock().unwrap().insert("NotebookEdit".to_string(), (9, 0));
+        let turn2 = json!([{ "role": "user", "content": "a" }, { "role": "assistant", "content": "ok" }, { "role": "user", "content": "more" }]);
+        let a2 = transform_request_body(&body(&tools(), turn2, json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert!(a2.pruned_tools.is_none());
+        assert_eq!(head(&a2.body), head(&a1.body));
+        let b1 = transform_request_body(&body(&tools(), json!([{ "role": "user", "content": "b" }]), json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(b1.pruned_tools.as_ref().unwrap().0, vec!["NotebookEdit".to_string()]);
+        let turn2b = json!([{ "role": "user", "content": "b" }, { "role": "assistant", "content": "ok" }, { "role": "user", "content": "more" }]);
+        let b2 = transform_request_body(&body(&tools(), turn2b, json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(head(&b2.body), head(&b1.body));
+    }
+
+    #[test]
+    fn a_memo_made_for_one_conversation_never_hides_a_tool_another_forces_or_already_called() {
+        let (mut s, _, _) = session(evidence());
+        let first = transform_request_body(&body(&tools(), hi(), json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(first.pruned_tools.as_ref().unwrap().0, vec!["NotebookEdit".to_string()]);
+        let other = json!([{ "role": "user", "content": "other" }]);
+        let plain = transform_request_body(&body(&tools(), other, json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(head(&plain.body), head(&first.body));
+        let third = json!([{ "role": "user", "content": "third" }]);
+        let forced_raw = body(&tools(), third, json!({ "tool_choice": { "type": "tool", "name": "NotebookEdit" } }));
+        let forced = transform_request_body(&forced_raw, &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert!(forced.pruned_tools.is_none() && forced.body == forced_raw);
+        let called = json!([
+            { "role": "user", "content": "fourth" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "NotebookEdit", "input": { "path": "a" } }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] },
+        ]);
+        let called_raw = body(&tools(), called, json!({}));
+        let c = transform_request_body(&called_raw, &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert!(c.pruned_tools.is_none() && c.body == called_raw);
+        let fifth = json!([{ "role": "user", "content": "fifth" }]);
+        let again = transform_request_body(&body(&tools(), fifth, json!({})), &cfg(PruneMode::Stub), Some(&mut s)).unwrap();
+        assert_eq!(head(&again.body), head(&first.body));
+    }
+
+    #[test]
+    fn hidden_tools_are_not_counted_as_advertised_and_a_forced_choice_counts_as_a_call() {
+        for mode in [PruneMode::Stub, PruneMode::Drop] {
+            let (mut s, _, bumps) = session(evidence());
+            transform_request_body(&body(&tools(), hi(), json!({})), &cfg(mode), Some(&mut s)).unwrap();
+            let adv: Vec<String> = ["Bash", "Read", "WebFetch"].iter().map(|s| s.to_string()).collect();
+            assert_eq!(*bumps.lock().unwrap(), vec![(adv, Vec::<String>::new())]);
+        }
+        let (mut s, _, bumps) = session(toolusage::UsageMap::new());
+        let raw = body(&tools(), hi(), json!({ "tool_choice": { "type": "tool", "name": "WebFetch" } }));
+        transform_request_body(&raw, &cfg(PruneMode::Off), Some(&mut s)).unwrap();
+        let all: Vec<String> = ["Bash", "Read", "NotebookEdit", "WebFetch"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(*bumps.lock().unwrap(), vec![(all, vec!["WebFetch".to_string()])]);
+    }
+
+    #[test]
+    fn a_conversation_survives_a_moved_cache_control_and_the_oldest_is_evicted_not_all() {
+        let (mut s, _, bumps) = session(toolusage::UsageMap::new());
+        let c = cfg(PruneMode::Off);
+        let plain = body(&tools(), json!([{ "role": "user", "content": [{ "type": "text", "text": "same start" }] }]), json!({}));
+        let cached = body(&tools(), json!([{ "role": "user", "content": [{ "type": "text", "text": "same start", "cache_control": { "type": "ephemeral" } }] }]), json!({}));
+        for b in [&plain, &cached, &plain] {
+            transform_request_body(b, &c, Some(&mut s)).unwrap();
+        }
+        assert_eq!(bumps.lock().unwrap().len(), 1);
+        for i in 0..2000 {
+            let conv = json!([{ "role": "user", "content": format!("conv {i}") }]);
+            transform_request_body(&body(&tools(), conv, json!({})), &c, Some(&mut s)).unwrap();
+        }
+        let before = bumps.lock().unwrap().len();
+        transform_request_body(&body(&tools(), json!([{ "role": "user", "content": "conv 1999" }]), json!({})), &c, Some(&mut s)).unwrap();
+        assert_eq!(bumps.lock().unwrap().len(), before);
+        transform_request_body(&plain, &c, Some(&mut s)).unwrap();
+        assert_eq!(bumps.lock().unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn file_store_round_trips_across_handles_privately() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("tanuki-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // TANUKI_TOOL_USAGE is process-wide; this is the only test that sets it
+        std::env::set_var("TANUKI_TOOL_USAGE", dir.join("sub").join("u.json"));
+        let mut a = toolusage::FileUsage;
+        a.bump(&["Bash".to_string(), "Read".to_string()], &[]);
+        toolusage::FileUsage.bump(&["Bash".to_string()], &["Bash".to_string()]);
+        let m = a.load();
+        assert_eq!(m["Bash"], (2, 1));
+        assert_eq!(m["Read"], (1, 0));
+        let f = dir.join("sub").join("u.json");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "{\"Bash\":{\"adv\":2,\"used\":1},\"Read\":{\"adv\":1,\"used\":0}}\n");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(dir.join("sub")).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::read_dir(dir.join("sub")).unwrap().count(), 1);
+        std::env::remove_var("TANUKI_TOOL_USAGE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

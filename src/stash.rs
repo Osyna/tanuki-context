@@ -94,11 +94,17 @@ pub fn stash_text(text: &str) -> std::io::Result<(String, String)> {
     stash_text_view(text, None)
 }
 
+/// The id `stash_text` files `text` under: a 12-char lowercase sha256 prefix.
+pub fn stash_id(text: &str) -> String {
+    let mut id = sha256::hex(text.as_bytes());
+    id.truncate(12);
+    id
+}
+
 /// `stash_text` whose overview describes `view` = (cleaned text, note) instead
 /// of the raw bytes (kubectl without managedFields); the stash holds `text`.
 pub fn stash_text_view(text: &str, view: Option<(&str, &str)>) -> std::io::Result<(String, String)> {
-    let mut id = sha256::hex(text.as_bytes());
-    id.truncate(12);
+    let id = stash_id(text);
     let dir = stash_dir();
     // The stash deliberately holds unredacted bytes, so it is owner-only
     // rather than whatever umask says (0755/0644 by default). Mode is applied

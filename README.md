@@ -305,6 +305,8 @@ billed ones (`input + cache_read + cache_creation`), and `tanuki_stats` reports
 estimator that gates imaging matches the bill; below 100 it under-predicts).
 Client-sent images and unknown block types count 0 in the estimate.
 
+**Tool pruning (opt-in).** `--prune-tools [stub|drop]` (or `TANUKI_PRUNE_TOOLS`) leaves out tools your client advertises but never calls. The proxy counts, per tool, in how many conversations it was advertised and called (names only, in `~/.tanuki/tool-usage.json`, filled even while the flag is off). On the first request of each conversation (tool list + first message) it reduces the tools advertised in at least `--prune-min` (default 20) conversations and called in none, and forwards the same bytes on every later request of that conversation so the cache holds; a conversation that starts after a tool crossed the threshold is pruned too, and since unused tools cross it together the pruned set rarely changes between conversations. `stub` keeps name, first description line and an open schema, so a wrongly pruned tool still works; `drop` removes it. Measured with Claude Code and Sonnet 5.5: 38,157 -> 16,675 input tokens per request, cost per session -17 %, 20/20 tasks solved ([EVALS 20](reference/EVALS.md)).
+
 Knobs worth knowing: `--auto-cache` (or `TANUKI_AUTO_CACHE=on`) adds the
 automatic breakpoint, `--distill` drops repeated log noise before drawing,
 `--min-chars 4000` sets how big a block has to be before it is worth touching,
@@ -662,6 +664,7 @@ costs the next reader a week:
   `firmware`), enough to tip pages to `dense`, which forfeits imaging outright,
   all to chase a shape with **zero instances across 19.5 MB** of real logs
   ([EVALS §7](reference/EVALS.md)).
+- **Back-off for commands whose output is fetched back.** Showing the crushed output whole after repeated fetches cost 3,500 tokens per run against about 500 per fetch it prevented; live it moved billed input +6 % and reduced no fetches. Removed; the fetches are counted instead (`stashNet` in `tanuki_stats`, [EVALS 20](reference/EVALS.md)).
 
 ## More
 
