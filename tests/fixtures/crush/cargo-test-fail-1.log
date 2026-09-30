@@ -1,0 +1,67 @@
+   Compiling ledger v0.1.0 (/tmp/ctxrules/cargo-demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/ledger-1d75e0b47ee2583e)
+
+running 13 tests
+test tests::balance_of_nothing_is_zero ... ok
+test tests::fee_is_deducted ... ok
+test tests::balance_sums_entries ... ok
+test tests::interest_compounds_yearly ... ok
+test tests::fee_rounds_toward_zero ... ok
+test tests::fee_never_negative ... FAILED
+test tests::interest_zero_years_is_principal ... ok
+test tests::parse_plain_amount ... ok
+test tests::parse_handles_whitespace ... FAILED
+test tests::parse_rejects_garbage ... ok
+test tests::report_matches_golden ... FAILED
+test tests::split_evenly_spreads_remainder ... ok
+test tests::split_evenly_keeps_total ... ok
+
+failures:
+
+---- tests::fee_never_negative stdout ----
+
+thread 'tests::fee_never_negative' (487013) panicked at src/lib.rs:99:9:
+assertion failed: apply_fee(50, 200) >= 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::parse_handles_whitespace stdout ----
+
+thread 'tests::parse_handles_whitespace' (487017) panicked at src/lib.rs:104:9:
+assertion `left == right` failed
+  left: Err("bad amount \"$ 7.00\": invalid digit found in string")
+ right: Ok(700)
+
+---- tests::report_matches_golden stdout ----
+
+thread 'tests::report_matches_golden' (487020) panicked at src/lib.rs:113:13:
+report differs from golden:
+--- got ---
+ITEM      AMOUNT
+rent      120000
+food       45000
+fuel       18000
+phone       6000
+gym         3500
+tea         1200
+TOTAL     193700
+--- want ---
+ITEM      AMOUNT
+rent      120000
+food       45000
+fuel       18000
+phone       6000
+gym         3500
+tea         1200
+TOTAL     193000
+--- end ---
+
+
+failures:
+    tests::fee_never_negative
+    tests::parse_handles_whitespace
+    tests::report_matches_golden
+
+test result: FAILED. 10 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

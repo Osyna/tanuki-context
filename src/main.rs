@@ -16,6 +16,7 @@ mod atlas;
 mod codebook;
 mod cost;
 mod crush;
+mod delta;
 mod distill;
 mod fidelity;
 mod gate;
@@ -1291,6 +1292,7 @@ fn main() {
                 max_pages: num("--max-pages", d.max_pages as f64) as usize,
                 recency_window: num("--recency", env_recency) as usize,
                 cache: !args.iter().any(|a| a == "--no-cache"),
+                auto_cache: !args.iter().any(|a| a == "--no-cache" || a == "--no-auto-cache"),
                 verbatim: needles::Verbatim::parse(&json!(sval("--verbatim").map(String::as_str))),
             });
         }
@@ -1322,38 +1324,10 @@ fn main() {
             };
             let code = out.status.code().unwrap_or(0);
             let cmd_vec: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
-            let crushed = crush::crush_output(&cmd_vec, &captured, code);
-            let d = distill::distill_log(&crushed.text, query, 2);
-            let s = &d.stats;
-            // split('\n').count(), not lines().count(): TS split("\n").length
-            // counts the trailing empty segment and this header must match it.
-            let captured_lines = captured.split('\n').count();
-            let saved_pct = pct(captured.chars().count() as u64, d.distilled.chars().count() as u64);
-            let mut header = format!(
-                "[tanuki run] exit {code} · {captured_lines} -> {} lines · {saved_pct}% of chars removed",
-                s["outLines"]
-            );
-            if let Some(rule) = &crushed.rule {
-                header.push_str(&format!(" · rule {rule}"));
-            }
-            let mut lines = vec![header];
-            // ponytail: fixed 8000-char inline budget (~2k tokens); make it a knob
-            // if real usage ever wants one.
-            if d.distilled.chars().count() <= RUN_INLINE_MAX
-                || captured.chars().count() <= RUN_INLINE_MAX
-            {
-                lines.push(d.distilled);
-                if captured.chars().count() > RUN_INLINE_MAX {
-                    let (id, _) = stash::stash_text(&captured).expect("write stash");
-                    lines.push(format!(
-                        "full output stashed: tanuki-context fetch {id} [--query re] [--lines a-b]"
-                    ));
-                }
-            } else {
-                let (_id, overview) = stash::stash_text(&captured).expect("write stash");
-                lines.push(overview);
-            }
-            print!("{}\n", lines.join("\n"));
+            let out = crush::route_output(&cmd_vec, &captured, code, query, &|id| {
+                format!("full output stashed: tanuki-context fetch {id} [--query re] [--lines a-b]")
+            });
+            println!("{out}");
             std::process::exit(code);
         }
         Some("--version") | Some("-V") => println!("tanuki-context {VERSION}"),

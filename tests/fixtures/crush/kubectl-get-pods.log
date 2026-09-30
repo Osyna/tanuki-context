@@ -1,0 +1,10 @@
+NAMESPACE     NAME                                 READY   STATUS              RESTARTS   AGE
+kube-system   helm-install-gateway-api-crd-nppnk   0/1     ContainerCreating   0          5m27s
+shop          api-69c5d8857d-5kvql                 0/1     ContainerCreating   0          3m48s
+shop          api-69c5d8857d-qp2rz                 0/1     ContainerCreating   0          3m48s
+shop          web-857fc4757b-2h7tg                 0/1     ContainerCreating   0          3m48s
+shop          web-857fc4757b-c4dqs                 0/1     ContainerCreating   0          3m48s
+shop          web-857fc4757b-wkjgc                 0/1     ContainerCreating   0          3m48s
+shop          worker-694c9f5fd6-d222g              0/1     ContainerCreating   0          20s
+shop          worker-694c9f5fd6-jrjdw              0/1     ContainerCreating   0          3m48s
+shop          worker-694c9f5fd6-khphv              0/1     ContainerCreating   0          20s

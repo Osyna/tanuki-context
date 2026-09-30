@@ -39,8 +39,20 @@ fn read_stash(id: &str) -> Result<String, String> {
         .ok_or_else(|| format!("unknown stash id: {id}"))
 }
 
+/// Read-only lookup for other modules (delta): None for an unshaped id or a
+/// missing/unreadable file.
+pub fn stash_read(id: &str) -> Option<String> {
+    read_stash(id).ok()
+}
+
 /// Park `text` under its content hash; returns (id, overview).
 pub fn stash_text(text: &str) -> std::io::Result<(String, String)> {
+    stash_text_view(text, None)
+}
+
+/// `stash_text` whose overview describes `view` = (cleaned text, note) instead
+/// of the raw bytes (kubectl without managedFields); the stash holds `text`.
+pub fn stash_text_view(text: &str, view: Option<(&str, &str)>) -> std::io::Result<(String, String)> {
     let mut id = sha256::hex(text.as_bytes());
     id.truncate(12);
     let dir = stash_dir();
@@ -62,18 +74,21 @@ pub fn stash_text(text: &str) -> std::io::Result<(String, String)> {
         use std::io::Write as _;
         opts.open(dir.join(&id))?.write_all(text.as_bytes())?;
     }
-    let ov = overview(&id, text);
+    let ov = overview(&id, text, view);
     Ok((id, ov))
 }
 
 /// The compact map returned by stash: joined with '\n', no trailing newline.
-fn overview(id: &str, text: &str) -> String {
+fn overview(id: &str, text: &str, view: Option<(&str, &str)>) -> String {
     let segs: Vec<&str> = text.split('\n').collect();
-    let stats = distill::distill_log(text, None, 2).stats;
+    let map_text = view.map_or(text, |v| v.0);
+    let map_segs: Vec<&str> = map_text.split('\n').collect();
+    let stats = distill::distill_log(map_text, None, 2).stats;
+    let note = view.map_or(String::new(), |v| format!(" ({})", v.1));
     let mut out = vec![
         format!("stashed {id} · {} bytes · {} lines", text.len(), segs.len()),
         format!(
-            "distill map: {} -> {} lines · {}% of chars removable · {} error/warn lines",
+            "distill map{note}: {} -> {} lines · {}% of chars removable · {} error/warn lines",
             stats["origLines"], stats["outLines"], stats["savedPct"], stats["importantKept"],
         ),
     ];
@@ -89,8 +104,8 @@ fn overview(id: &str, text: &str) -> String {
     fn t(s: &str) -> &str {
         distill::truncate_chars(s.trim(), 160)
     }
-    let last = segs.iter().rev().find(|s| !s.is_empty()).copied().unwrap_or("");
-    out.push(format!("first: {}", t(segs[0])));
+    let last = map_segs.iter().rev().find(|s| !s.is_empty()).copied().unwrap_or("");
+    out.push(format!("first: {}", t(map_segs[0])));
     out.push(format!("last: {}", t(last)));
     out.push(format!(
         "fetch: tanuki_fetch {{\"id\":\"{id}\",\"query\":\"<regex>\"}} or {{\"id\":\"{id}\",\"lines\":\"a-b\"}}"
@@ -127,6 +142,76 @@ fn term_freq(lower: &str, word: &str) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Vocabulary gaps (mirror of stash.ts SYN_GROUPS): symmetric groups of log
+/// vocabulary matched on stems. An expansion hit scores half a direct hit with
+/// tf pinned to 1, and only where the line has no direct hit for that word.
+const SYN_GROUPS: &[&[&str]] = &[
+    &["crash", "panic", "fatal", "abort", "segfault", "sigsegv", "sigabrt", "oom", "killed"],
+    &["slow", "latency", "timeout", "timed", "deadline", "delay", "stall", "hang"],
+    &["fail", "failure", "error", "err", "exception", "fault"],
+    &["auth", "authentication", "authorization", "token", "bearer", "unauthorized", "forbidden", "401", "403", "credential", "login"],
+    &["permission", "denied", "eacces", "forbidden", "403"],
+    &["disk", "space", "enospc", "full", "storage"],
+    &["net", "network", "connection", "refused", "reset", "unreachable", "dns", "socket", "econnrefused"],
+    &["start", "boot", "init", "listening", "ready", "launch", "startup"],
+    &["stop", "shutdown", "exit", "terminated", "sigterm", "halt"],
+    &["memory", "heap", "oom", "leak", "alloc"],
+    &["missing", "absent", "notfound", "404", "enoent"],
+    &["deploy", "rollout", "release", "upgrade"],
+    &["corrupt", "corruption", "mismatch", "invalid", "malformed"],
+    &["limit", "quota", "throttle", "ratelimit", "429"],
+    &["config", "configuration", "setting"],
+];
+
+/// Light suffix strip on an ASCII word (mirror of stash.ts stem).
+fn stem(w: &str) -> &str {
+    fn cut(s: &str, k: usize) -> &str {
+        if s.len() >= k + 3 { &s[..s.len() - k] } else { s }
+    }
+    let mut s = w;
+    if ["ses", "xes", "zes", "ches", "shes"].iter().any(|x| s.ends_with(x)) {
+        s = cut(s, 2);
+    } else if s.ends_with('s') && !s.ends_with("ss") {
+        s = cut(s, 1);
+    }
+    if s.ends_with("ing") {
+        return cut(s, 3);
+    }
+    if s.ends_with("ed") || s.ends_with("er") {
+        return cut(s, 2);
+    }
+    s
+}
+
+/// Stems an ask word may also match: its own and its synonym groups'. None for
+/// anything that is not a plain ASCII word (after trimming edge punctuation).
+fn variant_stems(word: &str) -> Option<std::collections::HashSet<String>> {
+    let key = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+    if key.is_empty() || !key.bytes().all(is_word_byte) {
+        return None;
+    }
+    let k = stem(key);
+    let mut set = std::collections::HashSet::new();
+    set.insert(k.to_string());
+    for g in SYN_GROUPS {
+        if g.iter().any(|m| stem(m) == k) {
+            for m in *g {
+                set.insert(stem(m).to_string());
+            }
+        }
+    }
+    Some(set)
+}
+
+/// The stems of every word-unit run in a lowercased line.
+fn line_stems(lower: &str) -> std::collections::HashSet<String> {
+    lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .map(|t| stem(t).to_string())
+        .collect()
 }
 
 /// Pull a slice of a stashed text: `query` (regex -> distilled slice), `lines`
@@ -168,10 +253,33 @@ pub fn fetch_slice(
         let dl: Vec<usize> = segments.iter().map(|s| s.split_whitespace().count()).collect();
         let total: f64 = dl.iter().map(|&d| d as f64).sum();
         let avg = total / n as f64;
+        // variant hits: expansion-only lines (no direct hit for that word)
+        let vsets: Vec<Option<std::collections::HashSet<String>>> = words.iter().map(|w| variant_stems(w)).collect();
+        // a token's stem is a prefix of the token, so a line holding none of a word's
+        // stems as a substring cannot match; tokenise only the lines that pass
+        let mut cache: Vec<Option<std::collections::HashSet<String>>> = vec![None; n];
+        let mut vh: Vec<Vec<bool>> = Vec::with_capacity(words.len());
+        for (j, vs) in vsets.iter().enumerate() {
+            let mut col = vec![false; n];
+            if let Some(vs) = vs {
+                for i in 0..n {
+                    if tf[j][i] != 0.0 || !vs.iter().any(|s| lowers[i].contains(s.as_str())) {
+                        continue;
+                    }
+                    let st = cache[i].get_or_insert_with(|| line_stems(&lowers[i]));
+                    col[i] = st.iter().any(|s| vs.contains(s));
+                }
+            }
+            vh.push(col);
+        }
         let idf: Vec<f64> = tf
             .iter()
-            .map(|col| {
-                let df = col.iter().filter(|&&f| f > 0.0).count() as f64;
+            .enumerate()
+            .map(|(j, col)| {
+                let mut df = col.iter().filter(|&&f| f > 0.0).count() as f64;
+                if df == 0.0 {
+                    df = vh[j].iter().filter(|&&b| b).count() as f64;
+                }
                 (1.0 + (n as f64 - df + 0.5) / (df + 0.5)).ln()
             })
             .collect();
@@ -179,21 +287,25 @@ pub fn fetch_slice(
         struct Anchor {
             line: usize,
             score: i64,
+            terms: String,
         }
         let mut anchors = Vec::new();
         for i in 0..n {
             let mut score = 0.0f64;
-            let mut hit = false;
+            let mut terms: Vec<String> = Vec::new();
             for j in 0..words.len() {
                 let f = tf[j][i];
                 if f > 0.0 {
-                    hit = true;
+                    terms.push(words[j].clone());
                     score += (idf[j] * (f * (FIND_K1 + 1.0))) / (f + FIND_K1 * (1.0 - FIND_B + (FIND_B * dl[i] as f64) / avg));
+                } else if vh[j][i] {
+                    terms.push(format!("{}~", words[j]));
+                    score += ((idf[j] * (1.0 * (FIND_K1 + 1.0))) / (1.0 + FIND_K1 * (1.0 - FIND_B + (FIND_B * dl[i] as f64) / avg))) * 0.5;
                 }
             }
-            if hit {
+            if !terms.is_empty() {
                 // integer micro-points: ordering and the window max are exact across engines
-                anchors.push(Anchor { line: i + 1, score: crate::cost::rnd(score * 1e6) });
+                anchors.push(Anchor { line: i + 1, score: crate::cost::rnd(score * 1e6), terms: terms.join(", ") });
             }
         }
         
@@ -218,12 +330,13 @@ pub fn fetch_slice(
             start: usize,
             end: usize,
             score: i64,
+            terms: String,
         }
         let mut windows = Vec::new();
         for anc in &top_anchors {
             let start = 1.max(anc.line.saturating_sub(2));
             let end = n.min(anc.line + 2);
-            windows.push(Window { start, end, score: anc.score });
+            windows.push(Window { start, end, score: anc.score, terms: anc.terms.clone() });
         }
         
         // Merge overlapping/adjacent windows
@@ -235,14 +348,17 @@ pub fn fetch_slice(
             } else {
                 let last = merged.last_mut().unwrap();
                 last.end = last.end.max(win.end);
-                last.score = last.score.max(win.score);
+                if win.score > last.score {
+                    last.score = win.score;
+                    last.terms = win.terms;
+                }
             }
         }
         
         // Output
         let mut parts = Vec::new();
         for win in &merged {
-            parts.push(format!("·find· L{}-{} score {:.1}", win.start, win.end, crate::cost::rnd(win.score as f64 / 1e5) as f64 / 10.0));
+            parts.push(format!("·find· L{}-{} score {:.1} · {}", win.start, win.end, crate::cost::rnd(win.score as f64 / 1e5) as f64 / 10.0, win.terms));
             parts.push(segments[win.start - 1..win.end].join("\n"));
         }
         parts.push(format!("·find· {} words · {} lines matched · {} windows", words.len(), h, merged.len()));
@@ -636,6 +752,29 @@ mod count_tests {
             let text = [vec!["error_code=500".to_string()], pad.clone(), vec!["an error occurred".to_string()], pad].concat().join("\n");
             let (id, _o) = stash_text(&text).unwrap();
             assert!(fetch_slice(&id, None, None, Some("error"), 1).unwrap().starts_with("\u{b7}find\u{b7} L9-13 score "));
+        })
+    }
+
+    #[test]
+    fn find_synonyms_stems_and_matched_terms() {
+        // Mirror of the TS vocabulary-gap tests: the answer shares only a
+        // synonym or a stem with the ask; the header names the matched words.
+        with_test_dir("find_vocab", || {
+            let lines_with = |gold: &str| {
+                let mut l: Vec<String> = (0..80).map(|i| format!("t{i} INFO service request served status=200 worker-{}", i % 4)).collect();
+                l[40] = format!("t40 {gold}");
+                stash_text(&l.join("\n")).unwrap().0
+            };
+            let id = lines_with("FATAL panic: invariant violated");
+            let got = fetch_slice(&id, None, None, Some("why did the service crash"), 1).unwrap();
+            assert!(got.starts_with("\u{b7}find\u{b7} L39-43 score "), "{got}");
+            assert!(got.lines().next().unwrap().ends_with(" \u{b7} crash~"), "{got}");
+            let id = lines_with("INFO retry 3/5 upload chunk=88");
+            let got = fetch_slice(&id, None, None, Some("retrying uploads"), 1).unwrap();
+            assert!(got.lines().next().unwrap().ends_with(" \u{b7} retrying~, uploads~"), "{got}");
+            let got = fetch_slice(&id, None, None, Some("retry upload"), 1).unwrap();
+            assert!(got.lines().next().unwrap().ends_with(" \u{b7} retry, upload"), "{got}");
+            assert_eq!(fetch_slice(&id, None, None, Some("!!! \u{c9}RROR"), 8).unwrap(), "\u{b7}find\u{b7} 2 words \u{b7} 0 lines matched");
         })
     }
 

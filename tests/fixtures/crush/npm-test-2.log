@@ -1,0 +1,80 @@
+npm notice run inventory@1.0.0 test
+npm notice run node --test
+▶ add
+  ✔ creates a new sku (0.483198ms)
+  ✔ accumulates repeated adds (0.117551ms)
+  ✔ accepts zero (0.076254ms)
+  ✔ returns the new level (0.42ms)
+  ✔ keeps other skus (0.114305ms)
+✔ add (1.7923ms)
+▶ remove
+  ✔ subtracts stock (0.120086ms)
+  ✔ refuses to go negative (0.045516ms)
+  ✔ returns the remainder (0.046177ms)
+  ✔ allows removing everything (0.056065ms)
+  ✔ leaves other skus (0.066204ms)
+✔ remove (0.485333ms)
+▶ total
+  ✔ sums all skus (0.061155ms)
+  ✔ is zero when empty (0.038593ms)
+  ✔ tracks removals (0.030828ms)
+  ✔ counts each sku once (0.024716ms)
+  ✔ ignores cleared skus (0.023875ms)
+✔ total (0.242876ms)
+▶ low
+  ✔ lists skus under threshold (0.04253ms)
+  ✔ sorts the answer (0.024516ms)
+  ✔ excludes exact threshold (0.028013ms)
+  ✔ is empty when all stocked (0.026329ms)
+  ✔ handles a single sku (0.025719ms)
+✔ low (0.201198ms)
+▶ restock
+  ✔ tops up to the target (0.046117ms)
+  ✔ does nothing when full (0.034285ms)
+  ✔ reports what it added (0.038673ms)
+  ✔ respects the cap (0.05302ms)
+  ✔ skips unknown skus (0.028263ms)
+✔ restock (0.278043ms)
+▶ audit
+  ✔ records every add (0.071535ms)
+  ✔ records every remove (0.028403ms)
+  ✔ keeps order of events (0.036408ms)
+  ✔ caps the log length (0.026069ms)
+  ✔ clears with the stock (0.034274ms)
+✔ audit (0.274446ms)
+▶ reserve
+  ✔ holds stock for an order (0.059312ms)
+  ✔ releases on cancel (0.024796ms)
+  ✔ blocks over-reserving (0.023133ms)
+  ✔ counts reserved in total (0.023363ms)
+  ✔ expires old holds (0.024045ms)
+✔ reserve (0.211408ms)
+▶ export
+  ✔ writes one row per sku (0.053891ms)
+  ✔ quotes commas in names (0.023504ms)
+  ✔ sorts rows by sku (0.023314ms)
+  ✔ adds a header row (0.02647ms)
+  ✔ emits an empty file when bare (0.024466ms)
+✔ export (0.205306ms)
+▶ import
+  ✔ reads a header row (0.050224ms)
+  ✔ rejects bad quantities (0.024286ms)
+  ✔ merges with existing stock (0.033994ms)
+  ✔ skips blank lines (0.027572ms)
+  ✔ reports the row of an error (0.024957ms)
+✔ import (0.214413ms)
+▶ price
+  ✔ sums line values (0.065584ms)
+  ✔ rounds half up (0.026871ms)
+  ✔ applies a discount (0.072696ms)
+  ✔ refuses negative prices (0.024396ms)
+  ✔ formats with two decimals (0.321745ms)
+✔ price (0.583457ms)
+ℹ tests 50
+ℹ suites 10
+ℹ pass 50
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 49.865543

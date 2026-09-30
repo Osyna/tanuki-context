@@ -27,9 +27,16 @@ pub fn px_stats() -> Value {
     let Ok(content) = std::fs::read_to_string(&path) else {
         return json!({ "available": false, "note": format!("no {} yet", path.display()) });
     };
+    summarize(&content)
+}
+
+fn summarize(content: &str) -> Value {
     let (mut requests, mut compressed, mut orig_chars, mut images) = (0u64, 0u64, 0u64, 0u64);
     let (mut baseline, mut actual, mut output) = (0u64, 0u64, 0u64);
     let mut saved_ca = 0i64;
+    // T2b: the estimator's prediction next to what was billed, over the rows
+    // that carry both (an error response bills nothing and scrapes no usage)
+    let (mut estimated, mut est_billed) = (0u64, 0u64);
     // F4 diagnostic accumulators
     let (mut break_count, mut break_rebilled) = (0u64, 0u64);
     let mut last_break: Option<(u64, String)> = None;
@@ -48,9 +55,15 @@ pub fn px_stats() -> Value {
         }
         baseline += e["baseline_tokens"].as_u64().unwrap_or(0);
         saved_ca += e["saved_tokens_cache_aware"].as_i64().unwrap_or(0);
-        actual += e["input_tokens"].as_u64().unwrap_or(0)
+        let billed = e["input_tokens"].as_u64().unwrap_or(0)
             + e["cache_read_tokens"].as_u64().unwrap_or(0)
             + e["cache_create_tokens"].as_u64().unwrap_or(0);
+        actual += billed;
+        let est = e["est_input_tokens"].as_u64().unwrap_or(0);
+        if est > 0 && billed > 0 {
+            estimated += est;
+            est_billed += billed;
+        }
         output += e["output_tokens"].as_u64().unwrap_or(0);
         // F4: collect cache break / tool tax / volatile prompt stats
         if e["cacheBreak"].is_object() {
@@ -102,6 +115,14 @@ pub fn px_stats() -> Value {
             Value::Null
         },
     });
+    // T2b: how far the estimator that gates every imaging decision sits from the
+    // bill (100 = exact). Only when the log has rows that carry both figures.
+    if est_billed > 0 {
+        out["estimatedInputTokens"] = json!(estimated);
+        out["billedInputTokens"] = json!(est_billed);
+        out["estimatorRatioPct"] =
+            json!(((estimated as f64 / est_billed as f64) * 1000.0).round() / 10.0);
+    }
     if break_count > 0 {
         if let Some((i, k)) = &last_break {
             out["cacheBreaks"] = json!(format!(
@@ -126,4 +147,29 @@ pub fn px_stats() -> Value {
             json!("volatile system prompt: uuid/timestamp/jwt content busts the prefix cache");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(est: u64, input: u64, read: u64, create: u64) -> String {
+        json!({ "tool": "proxy", "est_input_tokens": est, "input_tokens": input, "cache_read_tokens": read, "cache_create_tokens": create }).to_string()
+    }
+
+    /// T2b: estimated and billed totals over the rows that carry both, and their ratio.
+    #[test]
+    fn stats_report_estimated_vs_billed() {
+        let log = [row(100, 60, 30, 10), row(300, 200, 100, 0), row(50, 0, 0, 0), json!({ "tool": "proxy", "input_tokens": 5 }).to_string()].join("\n");
+        let st = summarize(&log);
+        // the zero-billed row (an error response) and the row without an estimate are excluded
+        assert_eq!(st["estimatedInputTokens"], 400);
+        assert_eq!(st["billedInputTokens"], 400);
+        assert_eq!(st["estimatorRatioPct"].to_string(), "100.0");
+        assert_eq!(st["actualInputTokens"], 405);
+        // nothing to compare -> the keys are absent
+        assert!(summarize(&row(0, 5, 0, 0))["estimatorRatioPct"].is_null());
+        // an underestimating estimator reads below 100
+        assert_eq!(summarize(&row(70, 60, 30, 10))["estimatorRatioPct"].to_string(), "70.0");
+    }
 }
