@@ -402,8 +402,9 @@ export function transformRequestBody(
   // Ledger: the block was never sent pretty, so there is no flip - with cache
   // traffic seen, the saving rides a cache write the first time and reads after.
   let minifiedBlocks = 0;
+  const minifyOff = process.env.TANUKI_MINIFY === "off";
   const minify = (text: string): string | null => {
-    const m = minifyJson(text);
+    const m = minifyOff ? null : minifyJson(text);
     if (m === null) return null;
     minifiedBlocks++;
     const saved = textTokens(text) - textTokens(m);

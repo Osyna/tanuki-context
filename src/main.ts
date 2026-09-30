@@ -26,7 +26,7 @@ import { fetchSlice, matchCount, stashText, verifyValue } from "./stash.ts";
 import { pxStats } from "./stats.ts";
 import { TOOLS, type ToolMeta, visibleTools } from "./tools.ts";
 
-export const VERSION = "0.22.0";
+export const VERSION = "0.22.1";
 const MAX_INLINE_PAGES = 6;
 
 // ------------------------------------------------------------------ stages

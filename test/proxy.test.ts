@@ -359,6 +359,18 @@ describe("lossless JSON tool results (rule 7)", () => {
     }
     expect(transformRequestBody(JSON.stringify({ messages: [msg("user", PRETTY)] }), CFG)!.minifiedBlocks).toBe(0);
   });
+
+  test("TANUKI_MINIFY=off forwards the pretty result byte-for-byte", () => {
+    const body = JSON.stringify({ messages: [msg("user", [toolResult(PRETTY)])] });
+    process.env.TANUKI_MINIFY = "off";
+    try {
+      const r = transformRequestBody(body, CFG)!;
+      expect(r.changed).toBe(false);
+      expect(r.body).toBe(body);
+    } finally {
+      delete process.env.TANUKI_MINIFY;
+    }
+  });
 });
 
 // ------------------------------------------------ F4 diagnostics
